@@ -25,6 +25,17 @@ move the oldest entries verbatim into
 (or a new dated archive file) first, and promote anything durable before it
 goes. Trimming is allowed; editing an entry's recorded result is not.
 
+## 2026-09-27 — Deferred Metal layer lifetime on upstream 1.0.1
+
+- Based on upstream main 5286e70 (1.0.1). Kept a97e1e1 CopyPass teardown and its regression unchanged; this patch only retains the layer during deferred backend selection and adds ownership coverage.
+- uv run --no-project --python 3.12 python scripts/build.py --renderer-only: exit 0; renderer/bridge rebuilt and Swift bindings regenerated with no generated-source diff.
+- uv run --no-project --python 3.12 python scripts/test.py: exit 0; Python phase passed (187 tests reported), native phase 645 passed, 0 failed, 11 skipped.
+- uv run --no-project --python 3.12 python scripts/check_renderer.py: exit 0; 466 passed, 3 skipped; all 10 generated scenes passed pooled/isolated and expected-pixel checks; 8 projects reloaded twice.
+- The new SceneSurface.DeferredBackendRetainsTheLayerUntilTheSceneIsDeleted regression passes; Core Animation transactions and temporary weak-reference reads are drained before ownership assertions.
+- Skipped: 9 opt-in native-video tests, 2 live Workshop tests, 2 private text-scene checks and the optional local Metal scene corpus.
+- Earlier build 46efd59 with the same lifetime fix was packaged, installed and opened in the explicitly requested desktop check: saved scenes reached first frame and the panel opened; no new crash report was observed. Shader-compilation and desktop-poster diagnostics remained. This rebased tree was verified headlessly only, not installed or live-tested.
+- git diff --check passed. Crash reports, screenshots, local logs and wallpaper assets remain uncommitted.
+
 ## 2026-09-27 — Release CI: app icon compiled on macOS 26; 1.0.1 re-cut
 
 - Cause of the failed v1.0.1 build: on macos-15, Xcode 26.0.1-26.3 actool compiled AppIcon.icon in 6 of 30 probe attempts (exit 255); 30 of 30 on macos-26; Assets.xcassets alone 8 of 8 on macos-15.
@@ -95,12 +106,3 @@ goes. Trimming is allowed; editing an entry's recorded result is not.
 - python3 scripts/build.py --configuration Release: OK (full build; renderer sources have uncommitted changes in the tree).
 - Bundle check: WebUI settings.js, panel.js, settings.css, panel.css, locales/zh-Hans.js identical to WebUI/; binary contains EnergyRatings.json and AppleSmartBattery strings.
 - Delivered: build/Build/Products/Release/WallpaperMachine.app. Not launched; user verifies after quitting and reopening.
-
-## 2026-09-27 — Energy readout: grade, battery share, before/after, per-wallpaper rating
-
-- python3 scripts/test.py: 640 passed, 0 failed, 11 skipped (Python script tests all OK).
-- Targeted: EnergyUsageMonitorTests, WallpaperEnergyRatingsTests, WebPanelEnergyUsageTests, WebPanelPerformanceSettingsTests passed (31).
-- WebUI smoke in headless Chromium (throwaway harness, removed): Performance order energy→quality→playback; readout states measuring/ready/pending/after/contended in en and zh-Hans; inspector energy line rated/unrated.
-- BatteryCapacity.fullChargeWattHours on this MacBook Pro: 98.5 Wh (8,532 mAh × 3 × 3.85 V).
-- Not run: live app (no desktop authorization); background recorder and settingChanged wiring unobserved in the running app. Not rebuilt (no Release build).
-- Gap: WKWebView rendering not checked; Chromium only.

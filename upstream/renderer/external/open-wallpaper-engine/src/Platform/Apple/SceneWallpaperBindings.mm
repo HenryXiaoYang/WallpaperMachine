@@ -218,13 +218,15 @@ wallpaper::RenderInitInfo make_render_init_info(
         VK_KHR_SURFACE_EXTENSION_NAME,
         VK_EXT_METAL_SURFACE_EXTENSION_NAME,
     };
+    // Backend selection is deferred until the scene loads. Keep the layer alive
+    // even if the host replaces its window layer before that work runs.
+    CAMetalLayer* metal_layer = (__bridge CAMetalLayer*)metal_layer_handle;
     info.surface_info.createSurfaceOp =
-        [metal_layer_handle](VkInstance instance, VkSurfaceKHR* surface) {
+        [metal_layer](VkInstance instance, VkSurfaceKHR* surface) {
             auto* create_surface = reinterpret_cast<PFN_vkCreateMetalSurfaceEXT>(
                 vkGetInstanceProcAddr(instance, "vkCreateMetalSurfaceEXT"));
             if (create_surface == nullptr) return VK_ERROR_EXTENSION_NOT_PRESENT;
 
-            auto* metal_layer = (__bridge CAMetalLayer*)metal_layer_handle;
             const VkMetalSurfaceCreateInfoEXT create_info {
                 .sType = VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT,
                 .pNext = nullptr,
