@@ -25,6 +25,12 @@ move the oldest entries verbatim into
 (or a new dated archive file) first, and promote anything durable before it
 goes. Trimming is allowed; editing an entry's recorded result is not.
 
+## 2026-09-27 — Rebase onto origin/main (macOS 15, hide-after-apply) before 1.0.1
+
+- Conflicts resolved: settings.js keeps 'Hide window after applying a wallpaper' and drops General 'Pause on battery' (now Performance battery mode); pbxproj regenerated with xcodegen; verification logs merged, oldest entries archived.
+- python3 scripts/test.py: 644 passed, 0 failed, 11 skipped of 655; Python script suites OK.
+- Not run: Release build, check_renderer.py (no renderer change in the merge), desktop checks.
+
 ## 2026-09-27 — Hide-after-apply setting; Next Wallpaper and Lock Screen menu items
 
 - Settings > General gains 'Hide window after applying a wallpaper' (default on, UserDefaults WallpaperMachine.hideAfterActivating); activate only calls NSApp.hide when it is on.
@@ -48,7 +54,6 @@ goes. Trimming is allowed; editing an entry's recorded result is not.
 - Bundle check: WebUI settings.js, panel.js, settings.css, panel.css, locales/zh-Hans.js identical to WebUI/; binary contains EnergyRatings.json and AppleSmartBattery strings.
 - Delivered: build/Build/Products/Release/WallpaperMachine.app. Not launched; user verifies after quitting and reopening.
 
-
 ## 2026-09-27 — Energy readout: grade, battery share, before/after, per-wallpaper rating
 
 - python3 scripts/test.py: 640 passed, 0 failed, 11 skipped (Python script tests all OK).
@@ -57,7 +62,6 @@ goes. Trimming is allowed; editing an entry's recorded result is not.
 - BatteryCapacity.fullChargeWattHours on this MacBook Pro: 98.5 Wh (8,532 mAh × 3 × 3.85 V).
 - Not run: live app (no desktop authorization); background recorder and settingChanged wiring unobserved in the running app. Not rebuilt (no Release build).
 - Gap: WKWebView rendering not checked; Chromium only.
-
 
 ## 2026-09-27 — Native refresh default fps; welcome guide Performance step
 
@@ -68,13 +72,11 @@ goes. Trimming is allowed; editing an entry's recorded result is not.
 - ControlPanelShellTests welcome walkthrough: 6 steps; Performance page defaults to High with Native refresh rate readout; Low + 24 fps slider stays draft, Continue sends renderScale 0.5 and frameRateCap 24.
 - Not checked: visual layout of the welcome Performance page on a real display; no desktop run or Release build.
 
-
 ## 2026-09-27 — Release build
 
 - python3 scripts/test.py: 630 passed, 0 failed, 11 skipped
 - python3 scripts/build.py --configuration Release: OK
 - Bundled WebUI matches WebUI/
-
 
 ## 2026-09-27 — Settings energy readout (coalition CPU/GPU energy)
 
@@ -86,7 +88,6 @@ goes. Trimming is allowed; editing an entry's recorded result is not.
 - WebUI smoke in headless Chromium with a fake bridge: row renders Measuring…, then CPU 141 mW · GPU 1.6 W and the contention note in zh-Hans; no page errors. Screenshot capture timed out, so layout was not visually checked.
 - Not checked: the readout inside the running app; no Release build.
 
-
 ## 2026-09-27 — Application log and diagnostics report
 
 - cargo test --release -p wallpaper-core --lib: 216 passed; -p wallpaper-bridge --lib: 339 passed (line format, load tag, session/file retention, verbose setting persistence, project summary).
@@ -95,7 +96,6 @@ goes. Trimming is allowed; editing an entry's recorded result is not.
 - Throwaway core smoke: a real OWE scene with owe_scene_wallpaper_set_log_scope(99) before init logged 'main/render looper started|stopped' tagged load 99; set after init refused; frame timer thread untagged.
 - Throwaway bridge smoke (installed logger, fake engine): session header, configuration line, host load header with project summary, Swift line kept its supplied timestamp and load#1, debug hidden until verbose on and logged after.
 - Not checked: a desktop scene load, the Save panel and Finder reveal (no desktop run authorized); app not rebuilt for Release.
-
 
 ## 2026-09-27 — Performance page: frame-rate cap, battery mode, playback rules
 
@@ -106,10 +106,3 @@ goes. Trimming is allowed; editing an entry's recorded result is not.
 - Core Audio probe (throwaway, unsandboxed): kAudioHardwarePropertyProcessObjectList + IsRunningOutput readable without a permission prompt
 - WKWebView snapshots (throwaway test, deleted): Performance page default/custom/760px, app-rules editor, Displays 'Limited to 24 fps' note rendered correctly
 - Not verified: live desktop behavior (display sleep Stop/reload, app rules, other-app audio mute/pause) on real wallpapers; no Release build
-
-
-## 2026-09-27 — Release build: inspector report link and unified version
-
-- python3 scripts/build.py --swift-only --configuration Release: OK (incremental, after the gate in the previous entry passed).
-- Bundled Contents/Resources/WebUI identical to WebUI/ (diff -r); Info.plist 1.0.0 (17).
-- Delivered build/Build/Products/Release/WallpaperMachine.app; not launched. Visual check on the desktop is left to the user.

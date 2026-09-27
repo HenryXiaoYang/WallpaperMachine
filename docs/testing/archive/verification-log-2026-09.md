@@ -15,6 +15,12 @@ renderer behaviour and known-failing tests into
 [../renderer.md](../renderer.md), build and code-signing traps into
 [../../build.md](../../build.md).
 
+## 2026-09-27 — Release build: inspector report link and unified version
+
+- python3 scripts/build.py --swift-only --configuration Release: OK (incremental, after the gate in the previous entry passed).
+- Bundled Contents/Resources/WebUI identical to WebUI/ (diff -r); Info.plist 1.0.0 (17).
+- Delivered build/Build/Products/Release/WallpaperMachine.app; not launched. Visual check on the desktop is left to the user.
+
 ## 2026-09-27 — Inspector GitHub report link, failure reports, unified version
 
 - About shows the bundle version (1.0.0 from project.yml) and Git revision; hardcoded 'beta (unreleased)' and stale 0.1.0 component rows removed.
