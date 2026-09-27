@@ -106,4 +106,11 @@ The full checklist, including the definition of done, is in
 
 Agents working in this repository must follow [AGENTS.md](AGENTS.md) in addition
 to everything above; it is the authoritative rule file for skill routing, build
-delivery and verification boundaries.
+delivery, commits and verification boundaries.
+
+By default an agent asks before it commits and builds Release only when you ask.
+It never pushes, amends, rebases or rewrites history unless you ask. To give your own
+agent more autonomy, add a personal rule in your untracked `CLAUDE.local.md` or
+your agent tool's directory; `AGENTS.md` allows exactly two opt-ins, committing
+without asking and ending app-code tasks with a Release build. Commits an agent
+made are yours: review them before you push.

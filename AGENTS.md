@@ -83,13 +83,23 @@ the whole file. `.ignore` keeps `rg` out of `docs/archive/`, `docs/testing/archi
 - Release builds on request, not by default: build when the user asks to build,
   deliver, install or try it, and when a change
   cannot be verified any other way. Otherwise finish at the gate and say the app was
-  not rebuilt.
+  not rebuilt. Build only after the gate passes.
   `python3 scripts/build.py --swift-only --configuration Release` for Swift/WebUI/resources/config
   with current renderer/bindings; `python3 scripts/build.py --configuration Release`
   for renderer/bridge changes or missing outputs.
 - Delivered app: `build/Build/Products/Release/WallpaperMachine.app`. Claim delivery
   only after a successful Release build containing the changes; report path and remind
   the user to quit/reopen. Never launch/quit automatically. Failed/blocked builds ≠ delivery.
+- Commits: ask before committing unless the developer's local rules opt in. Whoever
+  decides, commit only complete work whose gate passed; one commit per purpose
+  (`git add -p` when purposes share a file); stage only this task's files and leave
+  others' edits unstaged; subjects follow
+  [conventions](docs/conventions.md#commits-and-pull-requests). Never push, amend,
+  rebase, force or rewrite history unless asked.
+- Personal opt-ins: a developer's local rules (`CLAUDE.local.md`, an agent tool dir)
+  may enable exactly two things: committing without asking, and ending app-code tasks
+  with a Release build. They never relax any other rule here; on conflict, follow
+  `AGENTS.md` and say so.
 - Update the owning docs; index new/removed documents in [docs/README.md](docs/README.md).
   For features and cross-domain changes, record commands, results, skips and gaps with
   `python3 scripts/log_verification.py --title "…" --line "…"` (about ten lines per entry;
