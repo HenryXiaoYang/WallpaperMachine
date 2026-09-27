@@ -15,6 +15,25 @@ renderer behaviour and known-failing tests into
 [../renderer.md](../renderer.md), build and code-signing traps into
 [../../build.md](../../build.md).
 
+## 2026-09-27 — Settings energy readout (coalition CPU/GPU energy)
+
+- Full gate python3 scripts/test.py: 630 passed, 0 failed, 11 skipped (Tests-20260927-024741-849396).
+- New: EnergyUsageMonitorTests (mW arithmetic, missing coalitions, contention threshold, window, live kernel counters) and WebPanelEnergyUsageTests (sampling only while Settings visible).
+- First gate hung ControlPanelSyncTests/ShellTests at 120 s; bisected to a settingsSection post from settings.js draw(); removed, gating is now window visible on Settings.
+- Standalone smoke: CoalitionEnergySource resolved its private symbols, found the running extension's coalition, ~2.6 ms per sample over ~740 coalitions.
+- Accounting cross-check (pm_compare.py, user-run powermetrics): coalition sum vs whole GPU within 5% idle, 6-9% under load; contention overstates the app (0.59 W alone, 15 W beside a saturating load).
+- WebUI smoke in headless Chromium with a fake bridge: row renders Measuring…, then CPU 141 mW · GPU 1.6 W and the contention note in zh-Hans; no page errors. Screenshot capture timed out, so layout was not visually checked.
+- Not checked: the readout inside the running app; no Release build.
+
+## 2026-09-27 — Application log and diagnostics report
+
+- cargo test --release -p wallpaper-core --lib: 216 passed; -p wallpaper-bridge --lib: 339 passed (line format, load tag, session/file retention, verbose setting persistence, project summary).
+- python3 scripts/test.py: 622 passed, 0 failed, 11 skipped (includes AppLogRouterTests, DiagnosticsRedactorTests, DiagnosticsBundleTests).
+- python3 scripts/check_renderer.py: 10 generated cases pooled/isolated pixel-equal, 0 diagnostics; reload cycles 0.
+- Throwaway core smoke: a real OWE scene with owe_scene_wallpaper_set_log_scope(99) before init logged 'main/render looper started|stopped' tagged load 99; set after init refused; frame timer thread untagged.
+- Throwaway bridge smoke (installed logger, fake engine): session header, configuration line, host load header with project summary, Swift line kept its supplied timestamp and load#1, debug hidden until verbose on and logged after.
+- Not checked: a desktop scene load, the Save panel and Finder reveal (no desktop run authorized); app not rebuilt for Release.
+
 ## 2026-09-27 — Performance page: frame-rate cap, battery mode, playback rules
 
 - cargo test --release -p wallpaper-bridge --lib (build.py cargo env, --skip smoke_logging_throwaway): 339 passed, 0 failed, 1 filtered

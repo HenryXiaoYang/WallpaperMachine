@@ -25,6 +25,23 @@ move the oldest entries verbatim into
 (or a new dated archive file) first, and promote anything durable before it
 goes. Trimming is allowed; editing an entry's recorded result is not.
 
+## 2026-09-27 — Launch crash: CopyPass left prepared across render-scale rebuild
+
+- Cause: crash reports 2026-09-27 13:45-13:48 SIGSEGV in MVKCmdCopyImage::validate from CopyPass::execute after 'render scale applied: 0.750'; CopyPass::destory was a no-op, so applyRenderScale re-prepared every pass except the copy, which kept freed image handles.
+- Fix: CopyPass::destory resets prepared, release list and vk_src/vk_dst; provenance.json and docs/testing/renderer.md updated.
+- Regression: PlaybackGPU.CopyPreparesAgainAfterRenderTargetsAreDroppedAndResized failed before the fix (copy.prepared() stayed true), passes after; playback_gpu_test 41/41.
+- python3 scripts/check_renderer.py: all binaries exit 0, generated cases pixel-equal, reload cycles 0 failures.
+- python3 scripts/test.py: 644 passed, 0 failed, 11 skipped.
+- python3 scripts/build.py --configuration Release: OK; built binary's CopyPass::destory disassembly clears the prepared flag and image parameters.
+- Not run: app launch on the desktop (not authorized); the user's config (render_scale 0.75, cs2 scene 3373259209) was not exercised live.
+
+## 2026-09-27 — Release build 1.0.1 (929b3c1 + scripts/lib/xcode.py log patterns)
+
+- python3 scripts/test.py: 644 passed, 0 failed, 11 skipped of 655.
+- python3 scripts/build.py --configuration Release: OK (full build incl. renderer and bindings).
+- Bundle WebUI matches WebUI/ (diff -rq); CFBundleShortVersionString 1.0.1; codesign --verify --deep --strict OK.
+- Delivered: build/Build/Products/Release/WallpaperMachine.app. Not packaged, not launched.
+
 ## 2026-09-27 — Release CI: parallel build/test jobs and build caches
 
 - Build workflow split into build + test (parallel macos-15) and publish (ubuntu, needs both); shared setup in .github/actions/prepare-build; warm-caches.yml keeps entries alive.
@@ -86,22 +103,3 @@ goes. Trimming is allowed; editing an entry's recorded result is not.
 - python3 scripts/test.py: 630 passed, 0 failed, 11 skipped
 - python3 scripts/build.py --configuration Release: OK
 - Bundled WebUI matches WebUI/
-
-## 2026-09-27 — Settings energy readout (coalition CPU/GPU energy)
-
-- Full gate python3 scripts/test.py: 630 passed, 0 failed, 11 skipped (Tests-20260927-024741-849396).
-- New: EnergyUsageMonitorTests (mW arithmetic, missing coalitions, contention threshold, window, live kernel counters) and WebPanelEnergyUsageTests (sampling only while Settings visible).
-- First gate hung ControlPanelSyncTests/ShellTests at 120 s; bisected to a settingsSection post from settings.js draw(); removed, gating is now window visible on Settings.
-- Standalone smoke: CoalitionEnergySource resolved its private symbols, found the running extension's coalition, ~2.6 ms per sample over ~740 coalitions.
-- Accounting cross-check (pm_compare.py, user-run powermetrics): coalition sum vs whole GPU within 5% idle, 6-9% under load; contention overstates the app (0.59 W alone, 15 W beside a saturating load).
-- WebUI smoke in headless Chromium with a fake bridge: row renders Measuring…, then CPU 141 mW · GPU 1.6 W and the contention note in zh-Hans; no page errors. Screenshot capture timed out, so layout was not visually checked.
-- Not checked: the readout inside the running app; no Release build.
-
-## 2026-09-27 — Application log and diagnostics report
-
-- cargo test --release -p wallpaper-core --lib: 216 passed; -p wallpaper-bridge --lib: 339 passed (line format, load tag, session/file retention, verbose setting persistence, project summary).
-- python3 scripts/test.py: 622 passed, 0 failed, 11 skipped (includes AppLogRouterTests, DiagnosticsRedactorTests, DiagnosticsBundleTests).
-- python3 scripts/check_renderer.py: 10 generated cases pooled/isolated pixel-equal, 0 diagnostics; reload cycles 0.
-- Throwaway core smoke: a real OWE scene with owe_scene_wallpaper_set_log_scope(99) before init logged 'main/render looper started|stopped' tagged load 99; set after init refused; frame timer thread untagged.
-- Throwaway bridge smoke (installed logger, fake engine): session header, configuration line, host load header with project summary, Swift line kept its supplied timestamp and load#1, debug hidden until verbose on and logged after.
-- Not checked: a desktop scene load, the Save panel and Finder reveal (no desktop run authorized); app not rebuilt for Release.

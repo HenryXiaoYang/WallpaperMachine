@@ -216,4 +216,13 @@ VkResult CopyPass::execute(const Device& device, RenderingResources& rr) {
     }
     return VK_SUCCESS;
 };
-void CopyPass::destory(const Device&, RenderingResources&) {}
+void CopyPass::destory(const Device&, RenderingResources&) {
+    // The renderer drops every render target after destroying the passes
+    // (render scale, copy-elision rebuild) and prepares only passes that report
+    // unprepared. Staying prepared would keep recording copies between freed
+    // images.
+    setPrepared(false);
+    clearReleaseTexs();
+    m_desc.vk_src = {};
+    m_desc.vk_dst = {};
+}

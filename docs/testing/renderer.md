@@ -629,6 +629,11 @@ without desktop surfaces or audio devices.
   framebuffer failures. The executor returns the first `VkResult` failure;
   failed recordings are reset and abandoned rather than submitted or waited on.
   Shader-read barriers are outside render passes and include vertex consumers.
+- Destroying a pass leaves it unprepared with no image handles. Render-scale and
+  copy-elision rebuilds destroy every pass, drop the render targets and prepare
+  only unprepared passes, so a pass that stays prepared records against freed
+  images (a `CopyPass` that did crashed MoltenVK at launch with render scale
+  below 1). `CopyPreparesAgainAfterRenderTargetsAreDroppedAndResized` covers it.
 - A prepared `PrePass` is skipped only when a same-image, same-view, single-mip,
   single-sample clear with bit-identical color is reached before any reader or
   non-custom pass. Visibility and actual active descriptors are reconsidered

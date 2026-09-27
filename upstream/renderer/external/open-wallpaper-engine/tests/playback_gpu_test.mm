@@ -2027,6 +2027,30 @@ TEST_F(PlaybackGPU, CopyPreservesNonuniformPatternBeforeSampling) {
     }
 }
 
+TEST_F(PlaybackGPU, CopyPreparesAgainAfterRenderTargetsAreDroppedAndResized) {
+    // What a render-scale change does: destroy every pass, drop the render
+    // targets, resize them, then prepare only the passes reporting unprepared.
+    const auto source = Target(), destination = Target();
+    auto& producer = Pass(false, false, source);
+    CopyPass copy(CopyPass::Desc {.src = source, .dst = destination});
+    copy.prepare(scene, device, rr); ASSERT_TRUE(copy.prepared());
+    std::array<VulkanPass*,2> sequence {&producer, &copy};
+    Frame(sequence);
+    ExpectSolid(Read(copy.desc().vk_dst), {0,255,0,255});
+
+    for (auto* pass : sequence) pass->destory(device, rr);
+    ASSERT_FALSE(copy.prepared());
+    ASSERT_TRUE(device.tex_cache().ClearRenderTargets());
+    for (const auto& name : {source, destination})
+        scene.renderTargets[name] = SceneRenderTarget {.width = 24, .height = 24};
+    for (auto* pass : sequence) if (!pass->prepared()) pass->prepare(scene, device, rr);
+    ASSERT_TRUE(producer.prepared()); ASSERT_TRUE(copy.prepared());
+    EXPECT_EQ(copy.desc().vk_src.extent.width, 24u);
+    EXPECT_EQ(copy.desc().vk_dst.extent.width, 24u);
+    Frame(sequence);
+    ExpectSolid(Read(copy.desc().vk_dst), {0,255,0,255});
+}
+
 TEST_F(PlaybackGPU, QueryFailureLeavesCopyAndFinalUnprepared) {
     const auto source = Target(), destination = Target();
     CopyPass copy(CopyPass::Desc {.src=source,.dst=destination});
