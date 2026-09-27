@@ -161,10 +161,12 @@ server (headers, the gateway's refusal message, the deadline).
 
 ## Workflows
 
-Three workflows in `.github/workflows/`. All grant `contents: write`; Build also
-needs `id-token: write` and `attestations: write` for its provenance attestation,
-and both callers pass those through, together with the repository's secrets
-(`secrets: inherit`).
+Four workflows in `.github/workflows/`. Version, Build and Release grant
+`contents: write`; Build's publish job also needs `id-token: write` and
+`attestations: write` for its provenance attestation, and both callers pass those
+through, together with the repository's secrets (`secrets: inherit`). Warm caches
+only reads. The macOS setup Build and Warm caches share lives in one composite
+action, [`.github/actions/prepare-build`](../.github/actions/prepare-build/action.yml).
 
 **The one secret.** `RELEASE_NOTES_API_KEY` is a repository secret, which only a
 repository administrator can set or replace: `gh secret set RELEASE_NOTES_API_KEY`
@@ -212,8 +214,14 @@ Release for hand-pushed ones.
 
 The licensing gate that used to fail this workflow's first step was removed for
 1.0.0 by maintainer decision; the questions in [../LICENSING.md](../LICENSING.md)
-are still open. On a `macos-15` runner (150-minute timeout; the oldest that carries
-Xcode 26, whose Homebrew bottles set the published app's minimum macOS) it:
+are still open. It runs three jobs. `build` and `test` start together on two
+`macos-15` runners (150-minute timeout each; the oldest runner that carries Xcode
+26, whose Homebrew bottles set the published app's minimum macOS), so the test
+gate adds no time on top of the Release build. `publish` runs on `ubuntu-latest`
+only after both succeed, so a published binary has passed the same gate a change
+has to pass.
+
+**`build`**
 
 1. checks out the tag with full history, which the notes need;
 2. writes the release body with `scripts/release_notes.py --release-body --ai
@@ -221,35 +229,61 @@ Xcode 26, whose Homebrew bottles set the published app's minimum macOS) it:
    Version had the model write, or for a hand-pushed tag without one, notes the
    model writes now. It runs before anything is built, so a notes problem fails in
    seconds rather than after the macOS build;
-3. selects the newest non-beta `/Applications/Xcode_26*.app`, then
-   `brew install --quiet` the XcodeGen/CMake/renderer package set and
-   `python3 scripts/install_ffmpeg.py` for the project's LGPL FFmpeg build;
-4. restores an `actions/cache` entry for `~/.cargo/registry`, `~/.cargo/git` and
-   `upstream/renderer/target`, keyed `renderer-macos-15-${{ hashFiles('upstream/renderer/Cargo.lock') }}`
-   with the `renderer-macos-15-` prefix as a restore key, so an unchanged lock file
-   reuses the previous renderer build and never one made on another runner;
-5. runs `python3 scripts/build.py --configuration Release`, then
-   `python3 scripts/test.py`, then `python3 scripts/package.py --configuration Release --require-deployment-target`,
+3. runs `prepare-build` (below);
+4. runs `python3 scripts/build.py --configuration Release`, then
+   `python3 scripts/package.py --configuration Release --require-deployment-target`,
    which fails if a bundled library needs a newer macOS than the deployment target.
-   The test gate runs against the renderer and generated bridge the build step
-   already produced, so it adds the test target rather than a second renderer
-   build; a published binary has passed the same gate a change has to pass.
    Packaging proves the disk image, not the build tree: it mounts the image
    read-only and requires `app.wallpapermachine` at the bundle's version, a
    passing `codesign --verify --deep --strict`, the `Applications` link and the
    window layout, then writes the `.sha256` sidecar
    ([build.md](build.md#packaging-and-installing));
-6. matches the image to the tag: it must be named
+5. matches the image to the tag: it must be named
    `WallpaperMachine-<tag without v>-arm64.dmg`, and its checksum is echoed into the
    job summary;
-7. attests build provenance for the image with
-   `actions/attest-build-provenance`;
-8. publishes the image and its sidecar with `scripts/publish_release.py`.
+6. hands the image, its sidecar and the notes to `publish` as the
+   `release-<tag>` artifact.
 
-Step 6's name check is the guard that the bump actually reached the build:
+**`test`** runs `prepare-build`, `python3 scripts/build.py --renderer-only` for the
+renderer and the generated bridge, then `python3 scripts/test.py`, which builds the
+Debug app and its tests itself.
+
+When either macOS job fails it uploads its full tool logs (`artifacts/build/`, and
+for `test` also `artifacts/tests/*.log`) as `build-logs-<tag>` or `test-logs-<tag>`,
+kept 14 days: the job output is only the scripts' filtered summary.
+
+**`publish`**
+
+1. downloads the artifact and checks the image against its `.sha256` sidecar;
+2. attests build provenance for the image with
+   `actions/attest-build-provenance`;
+3. publishes the image and its sidecar with `scripts/publish_release.py`.
+
+Step 5 of `build` is the guard that the bump actually reached the build:
 `scripts/package.py` names the image from the bundle's
 `CFBundleShortVersionString`, so a mismatch means the published tag and the
 built version disagree and the job fails instead of publishing the wrong binary.
+
+**`prepare-build` and the caches.** The composite action selects the newest
+non-beta `/Applications/Xcode_26*.app`, `brew install --quiet`s the
+XcodeGen/CMake/renderer package set with `dav1d` and `ccache`, and restores three
+`actions/cache` entries. Both macOS jobs restore and save the same keys; when both
+miss, one saves and the other logs that the key is already reserved.
+
+| Cache | Path | Key | What a hit saves |
+|---|---|---|---|
+| LGPL FFmpeg | `/opt/homebrew/Cellar/mwe-ffmpeg` | `mwe-ffmpeg-macos-15-<dav1d version>-<hash of Formula/mwe-ffmpeg.rb>` | the ~3 minute source build; the action restores the keg's `opt` link and `scripts/install_ffmpeg.py` finds the keg current |
+| C++ objects | `~/.ccache` | `ccache-macos-15-<run>`, restored by the `ccache-macos-15-` prefix | recompiling the scene engine. A checkout gives every file a new mtime, so CMake rebuilds the whole engine even from a restored build tree; ccache hashes content and returns the previous objects |
+| Renderer | `~/.cargo/registry`, `~/.cargo/git`, `upstream/renderer/target` | `renderer-ccache-macos-15-<hash of Cargo.lock, rust-toolchain.toml, provenance.json>`, restored by prefix | crate downloads, and Rust compilation while the nightly toolchain is unchanged |
+
+The `CMAKE_<LANG>_COMPILER_LAUNCHER=ccache` variables only take effect on a build
+tree's first CMake configure, which is why the renderer key's prefix changed when
+they were introduced: no tree configured without them is ever restored. Each
+macOS job prints `ccache --show-stats` at the end; hits against misses there is
+the evidence the cache worked. The toolchain is an unpinned `nightly`
+(`upstream/renderer/rust-toolchain.toml`), and a new nightly invalidates every
+compiled crate, so the Rust half of the renderer build is only reused between
+builds on the same nightly.
 
 **What the attestation does and does not say.** Its SLSA predicate is built from
 the run's OIDC claims: `resolvedDependencies[0]` is `git+<repo>@<claims.ref>` with
@@ -286,6 +320,15 @@ failed upload and reversed completion order:
   cannot take Latest and start offering users the wrong version. The residue is
   the interval between reading the published versions and writing the flag — two
   consecutive API calls, rather than a whole macOS build.
+
+### Warm caches (`warm-caches.yml`)
+
+GitHub evicts a cache entry nobody has read for seven days. Twice a week (and on
+demand from **Actions -> Warm caches -> Run workflow**) this runs `prepare-build`
+and `python3 scripts/build.py --renderer-only` on `main`, which reads every entry
+Build uses and saves a fresh C++ object cache, so a release after a quiet week
+still starts warm. Caches saved on `main` are readable from every ref, including
+the tags Release builds. It publishes nothing.
 
 ### Release (`release.yml`)
 

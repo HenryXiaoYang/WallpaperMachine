@@ -67,7 +67,8 @@ upstream/                          vendored third-party code only
 artifacts/                         Git-ignored: all test and verification evidence
 build/                             Git-ignored: Xcode derived data and built products only
 .agents/, .omp/, .commandcode/    Git-ignored: local agent skills, rules and tooling notes
-.github/workflows/                 CI: build.yml, release.yml, version.yml
+.github/workflows/                 CI: build.yml, release.yml, version.yml, warm-caches.yml
+.github/actions/prepare-build/     composite action: Xcode, Homebrew packages, LGPL FFmpeg and the build caches
 ```
 
 Things that must not appear:

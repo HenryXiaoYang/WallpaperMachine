@@ -15,6 +15,16 @@ renderer behaviour and known-failing tests into
 [../renderer.md](../renderer.md), build and code-signing traps into
 [../../build.md](../../build.md).
 
+## 2026-09-27 — Performance page: frame-rate cap, battery mode, playback rules
+
+- cargo test --release -p wallpaper-bridge --lib (build.py cargo env, --skip smoke_logging_throwaway): 339 passed, 0 failed, 1 filtered
+- python3 scripts/build.py --renderer-only: bindings regenerated (setBatteryMode, setFrameRateCap, setPresentationUnloaded, setAudioSuppressed)
+- python3 scripts/test.py: Python suites OK; native 622 passed, 0 failed, 11 skipped of 633
+- python3 scripts/test.py --only WebPanelPerformanceSettingsTests --only ControlPanelShellTests after catalog cleanup: 32 passed
+- Core Audio probe (throwaway, unsandboxed): kAudioHardwarePropertyProcessObjectList + IsRunningOutput readable without a permission prompt
+- WKWebView snapshots (throwaway test, deleted): Performance page default/custom/760px, app-rules editor, Displays 'Limited to 24 fps' note rendered correctly
+- Not verified: live desktop behavior (display sleep Stop/reload, app rules, other-app audio mute/pause) on real wallpapers; no Release build
+
 ## 2026-09-27 — Release build: inspector report link and unified version
 
 - python3 scripts/build.py --swift-only --configuration Release: OK (incremental, after the gate in the previous entry passed).

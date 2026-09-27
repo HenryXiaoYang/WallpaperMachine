@@ -25,6 +25,15 @@ move the oldest entries verbatim into
 (or a new dated archive file) first, and promote anything durable before it
 goes. Trimming is allowed; editing an entry's recorded result is not.
 
+## 2026-09-27 — Release CI: parallel build/test jobs and build caches
+
+- Build workflow split into build + test (parallel macos-15) and publish (ubuntu, needs both); shared setup in .github/actions/prepare-build; warm-caches.yml keeps entries alive.
+- actionlint 1.7.12 on .github/workflows/*.yml: clean. Composite action YAML parsed.
+- ccache probe (throwaway, fresh CARGO_TARGET_DIR, CMAKE_*_COMPILER_LAUNCHER=ccache): cold 67 s with 105 misses; second fresh build 48 s with 104 direct hits, so the cmake crate's CMake honors the env launcher.
+- Homebrew probe: with no tap providing mwe-ffmpeg, brew list --versions and brew --prefix still resolve the keg, so a restored Cellar keg needs only its opt link; install_ffmpeg.py unchanged.
+- python3 scripts/test.py: script modules now run concurrently (phase ~9 s, bounded by test_dmg); 644 passed, 0 failed, 11 skipped.
+- Not verified: the workflows themselves. Build runs only from Version or a tag push; first real run is the next release. Check both jobs' ccache --show-stats and the three cache restores there.
+
 ## 2026-09-27 — Rebase onto origin/main (macOS 15, hide-after-apply) before 1.0.1
 
 - Conflicts resolved: settings.js keeps 'Hide window after applying a wallpaper' and drops General 'Pause on battery' (now Performance battery mode); pbxproj regenerated with xcodegen; verification logs merged, oldest entries archived.
@@ -96,13 +105,3 @@ goes. Trimming is allowed; editing an entry's recorded result is not.
 - Throwaway core smoke: a real OWE scene with owe_scene_wallpaper_set_log_scope(99) before init logged 'main/render looper started|stopped' tagged load 99; set after init refused; frame timer thread untagged.
 - Throwaway bridge smoke (installed logger, fake engine): session header, configuration line, host load header with project summary, Swift line kept its supplied timestamp and load#1, debug hidden until verbose on and logged after.
 - Not checked: a desktop scene load, the Save panel and Finder reveal (no desktop run authorized); app not rebuilt for Release.
-
-## 2026-09-27 — Performance page: frame-rate cap, battery mode, playback rules
-
-- cargo test --release -p wallpaper-bridge --lib (build.py cargo env, --skip smoke_logging_throwaway): 339 passed, 0 failed, 1 filtered
-- python3 scripts/build.py --renderer-only: bindings regenerated (setBatteryMode, setFrameRateCap, setPresentationUnloaded, setAudioSuppressed)
-- python3 scripts/test.py: Python suites OK; native 622 passed, 0 failed, 11 skipped of 633
-- python3 scripts/test.py --only WebPanelPerformanceSettingsTests --only ControlPanelShellTests after catalog cleanup: 32 passed
-- Core Audio probe (throwaway, unsandboxed): kAudioHardwarePropertyProcessObjectList + IsRunningOutput readable without a permission prompt
-- WKWebView snapshots (throwaway test, deleted): Performance page default/custom/760px, app-rules editor, Displays 'Limited to 24 fps' note rendered correctly
-- Not verified: live desktop behavior (display sleep Stop/reload, app rules, other-app audio mute/pause) on real wallpapers; no Release build

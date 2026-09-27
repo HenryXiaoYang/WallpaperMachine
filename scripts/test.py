@@ -16,6 +16,7 @@ Opt-in layers are off by default and are requested through the environment:
 `WALLPAPER_MACHINE_NETWORK_TESTS=1` (live Steam pages).
 """
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import os
 import shutil
@@ -102,19 +103,27 @@ def main():
     if args.only:
         print(f"{MARK.warn} Targeted run ({', '.join(args.only)}): not a substitute for the full gate.", flush=True)
     else:
-        # unittest reports on stderr; the scripts under test chatter on stdout. Keep
-        # both unless something failed, and print one line per module otherwise.
-        for module in SCRIPT_TESTS:
-            script_tests = subprocess.run(
-                [sys.executable, str(module)], cwd=ROOT, capture_output=True, text=True, errors="replace")
+        # Every module isolates itself in temporary directories, so they run side by
+        # side; the gate waits for the slowest one instead of their sum. unittest
+        # reports on stderr; the scripts under test chatter on stdout. Keep both
+        # unless something failed, and print one line per module in a fixed order.
+        with ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as pool:
+            runs = list(pool.map(lambda module: subprocess.run(
+                [sys.executable, str(module)], cwd=ROOT, capture_output=True, text=True, errors="replace"),
+                SCRIPT_TESTS))
+        failed_modules = []
+        for module, script_tests in zip(SCRIPT_TESTS, runs):
             if script_tests.returncode != 0 or args.verbose:
                 sys.stdout.write(script_tests.stdout)
                 sys.stdout.write(script_tests.stderr)
             if script_tests.returncode != 0:
                 print(f"{MARK.missing} {module.relative_to(ROOT)} failed", flush=True)
-                return script_tests.returncode
+                failed_modules.append(script_tests.returncode)
+                continue
             ran = next((line for line in script_tests.stderr.splitlines() if line.startswith("Ran ")), "ran")
             print(f"{MARK.ok} {module.relative_to(ROOT)}: {ran}", flush=True)
+        if failed_modules:
+            return failed_modules[0]
     # `--use-cache` leaves the project untouched when project.yml has not changed,
     # so Xcode's incremental build state survives between runs.
     subprocess.run(["xcodegen", "generate", "--use-cache", "--quiet"], cwd=ROOT, check=True)

@@ -5,11 +5,13 @@
 # tags. Version has to call it directly: a tag pushed with GITHUB_TOKEN never starts
 # another workflow, so Release alone would never run for CI-produced tags.
 #
-# The release is created as a draft and published only after the disk image it needs is
-# uploaded, so the in-app updater never sees a "latest" release with nothing to
-# download. Everything published is derived from the build or recorded at the tag: the
-# notes from the tag's CHANGELOG.md section, the checksum from the image, the
-# provenance attestation from this run.
+# Three jobs. `build` and `test` run side by side on two macOS runners, so the test gate
+# costs no time on top of the Release build; `publish` needs both, so a binary is only
+# ever published after the gate a change has to pass. The release is created as a draft
+# and published only after the disk image it needs is uploaded, so the in-app updater
+# never sees a "latest" release with nothing to download. Everything published is
+# derived from the build or recorded at the tag: the notes from the tag's CHANGELOG.md
+# section, the checksum from the image, the provenance attestation from this run.
 name: Build
 
 on:
@@ -21,21 +23,15 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  publish:
+  build:
     # The oldest runner that carries Xcode 26. Homebrew pours bottles built for the
     # runner's own release, and the app bundles those dylibs, so the runner's macOS
     # is the lowest release the published app can launch on (docs/build.md).
     runs-on: macos-15
     timeout-minutes: 150
-    permissions:
-      contents: write
-      # actions/attest-build-provenance signs with a workflow OIDC token and records
-      # the attestation against the repository.
-      id-token: write
-      attestations: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -52,46 +48,18 @@ jobs:
           RELEASE_NOTES_API_KEY: ${{ secrets.RELEASE_NOTES_API_KEY }}
         run: |
           set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/release"
           python3 scripts/release_notes.py --tag "$TAG" --release-body --ai \
-            --built-from "$(git rev-parse HEAD)" --output "${RUNNER_TEMP}/notes.md"
-          cat "${RUNNER_TEMP}/notes.md" >> "$GITHUB_STEP_SUMMARY"
+            --built-from "$(git rev-parse HEAD)" --output "${RUNNER_TEMP}/release/notes.md"
+          cat "${RUNNER_TEMP}/release/notes.md" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Select Xcode 26
-        run: |
-          set -euo pipefail
-          xcode="$(ls -d /Applications/Xcode_26*.app | grep -iv beta | sort -V | tail -n 1)"
-          sudo xcode-select -s "${xcode}"
-
-      - name: Install renderer and Xcode project dependencies
-        run: |
-          set -euo pipefail
-          brew install --quiet xcodegen cmake quickjs-ng glslang freetype lz4 \
-            vulkan-loader vulkan-headers molten-vk eigen nlohmann-json argparse shaderc \
-            spirv-tools glm
-          # The bundled FFmpeg is the repository's LGPL build, not Homebrew's GPLv3 one (LICENSING.md).
-          python3 scripts/install_ffmpeg.py
-
-      - name: Cache renderer build
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            upstream/renderer/target
-          key: renderer-macos-15-${{ hashFiles('upstream/renderer/Cargo.lock') }}
-          restore-keys: renderer-macos-15-
+      - uses: ./.github/actions/prepare-build
 
       - name: Build
         run: |
           set -euo pipefail
           xcodebuild -version
           python3 scripts/build.py --configuration Release
-
-      - name: Test
-        # A published binary has passed the same gate a change has to pass. The
-        # renderer and the generated bridge already exist from the build step, so
-        # this adds the test target, not another renderer build.
-        run: python3 scripts/test.py
 
       - name: Package
         # Relocates and signs the bundle, wraps it in the drag-to-install disk image,
@@ -100,7 +68,6 @@ jobs:
         run: python3 scripts/package.py --configuration Release --require-deployment-target
 
       - name: Match the disk image to the tag
-        id: image
         env:
           TAG: ${{ inputs.tag }}
         run: |
@@ -112,10 +79,7 @@ jobs:
             ls -1 "${directory}"/*.dmg 2>/dev/null || true
             exit 1
           fi
-          {
-            echo "image=${directory}/${name}"
-            echo "checksum=${directory}/${name}.sha256"
-          } >> "$GITHUB_OUTPUT"
+          cp "${directory}/${name}" "${directory}/${name}.sha256" "${RUNNER_TEMP}/release/"
           {
             echo "### \`${name}\`"
             echo ""
@@ -123,6 +87,101 @@ jobs:
             cat "${directory}/${name}.sha256"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Report the C++ object cache
+        if: always()
+        run: ccache --show-stats
+
+      - name: Keep the build logs of a failed build
+        # scripts/build.py prints only a filtered summary; the full tool output, which
+        # names the command that failed and why, is under artifacts/build/.
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ inputs.tag }}
+          path: artifacts/build/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Hand the image to publish
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ inputs.tag }}
+          path: ${{ runner.temp }}/release/
+          if-no-files-found: error
+          # A disk image is already compressed.
+          compression-level: 0
+          retention-days: 7
+
+  test:
+    # The same gate `python3 scripts/test.py` is locally. It needs the renderer and the
+    # generated bridge, not the Release app, so it builds only those and then the Debug
+    # app and tests, on its own runner while `build` produces the Release image.
+    runs-on: macos-15
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+          # scripts/tests read the history the way the release scripts do.
+          fetch-depth: 0
+
+      - uses: ./.github/actions/prepare-build
+
+      - name: Build the renderer and bridge
+        run: python3 scripts/build.py --renderer-only
+
+      - name: Test
+        run: python3 scripts/test.py
+
+      - name: Report the C++ object cache
+        if: always()
+        run: ccache --show-stats
+
+      - name: Keep the logs of a failed test run
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs-${{ inputs.tag }}
+          path: |
+            artifacts/build/
+            artifacts/tests/*.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+  publish:
+    needs: [build, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      # actions/attest-build-provenance signs with a workflow OIDC token and records
+      # the attestation against the repository.
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-${{ inputs.tag }}
+          path: ${{ runner.temp }}/release
+
+      - name: Locate the image
+        id: image
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          name="WallpaperMachine-${TAG#v}-arm64.dmg"
+          {
+            echo "image=${RUNNER_TEMP}/release/${name}"
+            echo "checksum=${RUNNER_TEMP}/release/${name}.sha256"
+          } >> "$GITHUB_OUTPUT"
+          # The sidecar was written on the build runner; the image must still match it.
+          (cd "${RUNNER_TEMP}/release" && sha256sum -c "${name}.sha256")
 
       - name: Attest the build provenance
         # The SLSA predicate records this workflow run and the revision that
@@ -144,5 +203,5 @@ jobs:
         # is claimed only when no greater version is public: scripts/publish_release.py,
         # covered by scripts/tests/test_publish_release.py.
         run: |
-          python3 scripts/publish_release.py --tag "$TAG" --notes "${RUNNER_TEMP}/notes.md" \
+          python3 scripts/publish_release.py --tag "$TAG" --notes "${RUNNER_TEMP}/release/notes.md" \
             "$IMAGE" "$CHECKSUM"

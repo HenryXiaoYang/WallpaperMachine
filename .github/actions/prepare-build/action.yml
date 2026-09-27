@@ -1,0 +1,96 @@
+# Everything a macOS job needs before scripts/build.py can run: Xcode 26, the Homebrew
+# packages, the project's LGPL FFmpeg, and the three caches that keep a release from
+# compiling the world. Shared by Build's build and test jobs and by Warm caches, so all
+# of them read and write the same cache entries.
+#
+# Caches (docs/release.md, "Build (build.yml)"), all scoped to main, which every ref can read:
+# - mwe-ffmpeg: the built keg, keyed on the formula and the dav1d it links. A hit skips
+#   a ~3 minute source build; scripts/install_ffmpeg.py accepts the restored keg.
+# - ccache: the C++ scene engine's objects, hashed by content, so the fresh mtimes of a
+#   checkout (which force CMake to recompile everything) cost cache lookups, not builds.
+#   Saved under a new key every run and restored by prefix.
+# - renderer: cargo's registry and target directory, keyed on the lock file, the
+#   vendored revision and the toolchain file.
+name: Prepare build
+description: Select Xcode 26, install the build dependencies and restore the build caches.
+
+runs:
+  using: composite
+  steps:
+    - name: Select Xcode 26
+      shell: bash
+      run: |
+        set -euo pipefail
+        xcode="$(ls -d /Applications/Xcode_26*.app | grep -iv beta | sort -V | tail -n 1)"
+        sudo xcode-select -s "${xcode}"
+
+    - name: Install renderer and Xcode project dependencies
+      id: brew
+      shell: bash
+      # dav1d is mwe-ffmpeg's only runtime dependency. It is installed here, not by the
+      # formula, so its version can key the FFmpeg cache before FFmpeg is looked at.
+      run: |
+        set -euo pipefail
+        brew install --quiet xcodegen cmake quickjs-ng glslang freetype lz4 \
+          vulkan-loader vulkan-headers molten-vk eigen nlohmann-json argparse shaderc \
+          spirv-tools glm dav1d ccache
+        echo "dav1d=$(brew list --versions dav1d | tr ' ' '-')" >> "$GITHUB_OUTPUT"
+
+    - name: Restore the LGPL FFmpeg build
+      id: ffmpeg
+      uses: actions/cache@v4
+      with:
+        path: /opt/homebrew/Cellar/mwe-ffmpeg
+        key: mwe-ffmpeg-macos-15-${{ steps.brew.outputs.dav1d }}-${{ hashFiles('Formula/mwe-ffmpeg.rb') }}
+
+    - name: Install the LGPL FFmpeg build
+      shell: bash
+      # The bundled FFmpeg is the repository's LGPL build, not Homebrew's GPLv3 one
+      # (LICENSING.md). A restored keg only needs its opt link, which Homebrew made
+      # when it was built; the formula is keg-only, so nothing else is linked.
+      run: |
+        set -euo pipefail
+        if [ "${{ steps.ffmpeg.outputs.cache-hit }}" = "true" ]; then
+          version="$(ls /opt/homebrew/Cellar/mwe-ffmpeg | sort -V | tail -n 1)"
+          ln -sfn "../Cellar/mwe-ffmpeg/${version}" /opt/homebrew/opt/mwe-ffmpeg
+        fi
+        python3 scripts/install_ffmpeg.py
+
+    - name: Route the C++ compilers through ccache
+      shell: bash
+      # CMake reads these on the first configure of a build tree; the renderer cache
+      # prefix changed with their introduction so no tree configured without them is
+      # restored. `%compiler% -v` keys objects on the real clang behind the
+      # /usr/bin shims, which an Xcode update changes without touching the shims.
+      run: |
+        set -euo pipefail
+        {
+          echo "CCACHE_DIR=${HOME}/.ccache"
+          echo "CCACHE_BASEDIR=${GITHUB_WORKSPACE}"
+          echo "CCACHE_COMPILERCHECK=%compiler% -v"
+          echo "CCACHE_MAXSIZE=2G"
+          for language in C CXX OBJC OBJCXX; do
+            echo "CMAKE_${language}_COMPILER_LAUNCHER=ccache"
+          done
+        } >> "$GITHUB_ENV"
+
+    - name: Restore the C++ object cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.ccache
+        key: ccache-macos-15-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: ccache-macos-15-
+
+    - name: Reset the C++ object cache statistics
+      shell: bash
+      run: ccache --zero-stats
+
+    - name: Restore the renderer build
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          upstream/renderer/target
+        key: renderer-ccache-macos-15-${{ hashFiles('upstream/renderer/Cargo.lock', 'upstream/renderer/rust-toolchain.toml', 'upstream/provenance.json') }}
+        restore-keys: renderer-ccache-macos-15-
