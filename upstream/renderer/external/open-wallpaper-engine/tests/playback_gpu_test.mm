@@ -3,6 +3,8 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <IOSurface/IOSurface.h>
+#import <QuartzCore/CAMetalLayer.h>
+#import <QuartzCore/CATransaction.h>
 
 #include <gtest/gtest.h>
 #include <algorithm>
@@ -21,6 +23,7 @@
 #include "Interface/IShaderValueUpdater.h"
 #include "Runtime/RuntimeImageSource.hpp"
 #include "Platform/Apple/FfmpegVideoInterop.hpp"
+#include "Platform/Apple/SceneWallpaperBindings.h"
 #include "Shader/RustShaderBridge.hpp"
 #include "Video/VideoColorConversion.hpp"
 #include "Video/VideoConversionBudget.hpp"
@@ -2025,6 +2028,31 @@ TEST_F(PlaybackGPU, CopyPreservesNonuniformPatternBeforeSampling) {
         EXPECT_EQ(Read(copy.desc().vk_dst),expected);
         EXPECT_EQ(Read(consumer.desc().vk_output),expected);
     }
+}
+
+TEST(SceneSurface, DeferredBackendRetainsTheLayerUntilTheSceneIsDeleted) {
+    owe_scene_wallpaper* raw = nullptr;
+    ASSERT_EQ(owe_scene_wallpaper_new(&raw), 0);
+    std::unique_ptr<owe_scene_wallpaper, decltype(&owe_scene_wallpaper_delete)>
+        scene(raw, owe_scene_wallpaper_delete);
+    ASSERT_EQ(owe_scene_wallpaper_init(scene.get()), 0);
+    __weak CAMetalLayer* weak_layer = nil;
+    @autoreleasepool {
+        CAMetalLayer* layer = [CAMetalLayer layer];
+        weak_layer = layer;
+        // No scene or window: initialization queues the layer without creating
+        // a GPU backend, as it does while startup is still loading a wallpaper.
+        ASSERT_EQ(owe_scene_wallpaper_init_metal_vulkan(
+            scene.get(), (__bridge void*)layer, 32, 32, 0, 0, 1.0), 0);
+    }
+    // Drain Core Animation's implicit transaction so only the scene owns it.
+    [CATransaction flush];
+    @autoreleasepool {
+        EXPECT_TRUE(weak_layer != nil);
+        ASSERT_EQ(owe_scene_wallpaper_shutdown(scene.get()), 0);
+        scene.reset();
+    }
+    EXPECT_TRUE(weak_layer == nil);
 }
 
 TEST_F(PlaybackGPU, CopyPreparesAgainAfterRenderTargetsAreDroppedAndResized) {

@@ -395,6 +395,12 @@ Puppets, videos, sprite sheets and opaque formats keep the rectangle test.
 
 ### Startup and staging buffers
 
+`SceneSurface.DeferredBackendRetainsTheLayerUntilTheSceneIsDeleted` in
+`playback_gpu_test` checks that deferred backend selection keeps its
+`CAMetalLayer` alive after the host releases it, then releases it with the scene.
+It uses no window or GPU backend and flushes Core Animation's implicit
+transaction so that the transaction cannot mask missing scene ownership.
+
 Quadratic staging-buffer growth caused the original Sparkle apply timeout: each
 fixed-size extension zeroed a temporary CPU vector and copied the entire
 previous allocation twice. Geometric blocks plus direct replacement-buffer

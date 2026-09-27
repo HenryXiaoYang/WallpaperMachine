@@ -15,6 +15,15 @@ renderer behaviour and known-failing tests into
 [../renderer.md](../renderer.md), build and code-signing traps into
 [../../build.md](../../build.md).
 
+## 2026-09-27 — Energy readout: grade, battery share, before/after, per-wallpaper rating
+
+- python3 scripts/test.py: 640 passed, 0 failed, 11 skipped (Python script tests all OK).
+- Targeted: EnergyUsageMonitorTests, WallpaperEnergyRatingsTests, WebPanelEnergyUsageTests, WebPanelPerformanceSettingsTests passed (31).
+- WebUI smoke in headless Chromium (throwaway harness, removed): Performance order energy→quality→playback; readout states measuring/ready/pending/after/contended in en and zh-Hans; inspector energy line rated/unrated.
+- BatteryCapacity.fullChargeWattHours on this MacBook Pro: 98.5 Wh (8,532 mAh × 3 × 3.85 V).
+- Not run: live app (no desktop authorization); background recorder and settingChanged wiring unobserved in the running app. Not rebuilt (no Release build).
+- Gap: WKWebView rendering not checked; Chromium only.
+
 ## 2026-09-27 — Native refresh default fps; welcome guide Performance step
 
 - cargo test -p wallpaper-bridge --release: 343 passed, 0 failed (new: native-refresh default per descriptor, legacy fps/target_fps migration, top-of-range stored as follow-native).
