@@ -249,9 +249,10 @@ final class DesktopWallpaperLedger {
                 obsolete += names.filter { !referenced.contains($0) }
                 continue
             }
-            let newestFirst = names.map { ($0, modificationDate(of: $0)) }
-                .sorted { $0.1 != $1.1 ? $0.1 > $1.1 : $0.0 < $1.0 }
-                .map(\.0)
+            let dated: [(name: String, date: Date)] = names.map { ($0, modificationDate(of: $0)) }
+            let newestFirst: [String] = dated
+                .sorted { (a, b) -> Bool in a.date != b.date ? a.date > b.date : a.name < b.name }
+                .map { $0.name }
             obsolete += newestFirst.dropFirst(Self.retainedPostersPerIncompleteDisplay)
                 .filter { !referenced.contains($0) }
         }
