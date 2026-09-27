@@ -7,6 +7,37 @@ sections list the commits. The GitHub Release body and the app's What's new card
 repeat the section, so the three always say the same thing. See
 [docs/release.md](docs/release.md) for how a version is cut.
 
+## 1.0.1 — 2026-09-27
+
+WallpaperMachine now checks for updates on its own, adds a rebuilt Performance page with an energy readout and battery options, and fixes a launch crash after changing the render scale.
+
+### New
+
+- WallpaperMachine checks for updates after the library loads and every six hours, and where it can update in place it downloads them and offers Restart to Update
+- WallpaperMachine runs on macOS 15 Sequoia
+- Settings → Performance shows the app's CPU and GPU power, a grade, its share of the battery and a before/after comparison when you change a setting
+- On battery you can choose to keep running, drop to a render scale and frame rate you pick, or pause, and this stays off until you choose
+- Playback rules can pause or mute wallpapers while chosen apps are frontmost or another app is playing audio
+- The menu bar item adds Next Wallpaper, which applies the next playable library wallpaper to the target display, and Lock Screen
+- Settings → General adds Hide window after applying a wallpaper, on by default, which you can turn off to keep the window open for previewing
+- The inspector shows each wallpaper's energy rating
+- Settings can save a redacted diagnostics report to attach to a GitHub issue
+- The welcome guide gains a Performance step
+
+### Improved
+
+- Settings → Performance is rebuilt as a single page covering energy use first, then quality, then playback
+- The frame-rate cap now follows the display's native refresh rate by default
+- A display that goes to sleep now stops its wallpaper
+- After choosing Later on an update, the menu bar item keeps offering it until the app restarts
+
+### Fixed
+
+- The app no longer crashes at launch right after applying a render scale
+- Reopening the app from the Dock now keeps you on the page you were viewing
+
+**Full changelog**: https://github.com/WallpaperMachine/WallpaperMachine/compare/v1.0.0...v1.0.1
+
 ## 1.0.0 — 2026-09-26
 
 WallpaperMachine 1.0 ships as a drag-to-install disk image and adds a first-run guide with Steam sign-in, optional now-playing support for music wallpapers and many scene rendering fixes.
