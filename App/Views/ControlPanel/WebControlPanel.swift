@@ -105,6 +105,9 @@ final class WebPanelController: NSObject, WKNavigationDelegate {
     "installed": "WallpaperMachine.installedFiltersCollapsed",
   ]
   static let welcomeSeenKey = "WallpaperMachine.welcomeSeen"
+  static let hideAfterActivatingKey = "WallpaperMachine.hideAfterActivating"
+  /// Whether applying a wallpaper hides the app so the result is visible; on unless turned off.
+  var hidesAfterActivating: Bool { defaults.object(forKey: Self.hideAfterActivatingKey) as? Bool ?? true }
   /// Earlier builds stored a dragged inspector width here; the width now follows the
   /// window alone, so the key is cleared rather than read.
   static let legacyInspectorWidthKey = "WallpaperMachine.inspectorWidth"

@@ -526,6 +526,7 @@ export default {
   'Move the app to Applications to enable.': '将应用移到“应用程序”文件夹后即可启用。',
   'Pause on battery': '使用电池时暂停',
   'Keep windows in place when clicking the wallpaper': '点击壁纸时保持窗口不动',
+  'Hide window after applying a wallpaper': '应用壁纸后隐藏窗口',
   'Turns off macOS’s “Click wallpaper to reveal desktop” so clicks reach interactive wallpapers.': '关闭 macOS 的“点按墙纸以显示桌面”，让点击可以传到可交互的壁纸。',
   'Animate lock screen': '锁定屏幕动态壁纸',
   'Experimental': '实验性',

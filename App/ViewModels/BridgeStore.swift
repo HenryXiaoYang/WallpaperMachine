@@ -144,6 +144,17 @@ final class BridgeStore {
         apply(bundle)
     }
 
+    /// The playable wallpaper after the one on `displayId`, in library order and
+    /// wrapping around; the first one when that display shows none. Nil when there
+    /// is nothing else to switch to.
+    func nextWallpaperID(displayId: String) -> String? {
+        let candidates = librarySnapshot.wallpapers.filter(\.supported).map(\.id)
+        let current = monitorInformationSnapshot.rows.first { $0.displayId == displayId }?.wallpaperId
+        guard let index = current.flatMap(candidates.firstIndex(of:)) else { return candidates.first }
+        let next = candidates[(index + 1) % candidates.count]
+        return next == current ? nil : next
+    }
+
     func activateWallpaperAsync(id: String, displayId: String) async throws {
         try requireIdleActivation()
         try requireIdleWallpaperEdits(id: id)

@@ -519,15 +519,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         menu.removeAllItems()
         menu.addItem(menuItem("Control Panel", action: #selector(openControlPanel)))
 
+        var actions: [NSMenuItem] = []
         if let store,
            playbackSnapshotCurrent,
            !store.appSnapshot.activeWallpaperIds.isEmpty
         {
-            menu.addItem(.separator())
             let playbackTitle: String.LocalizationValue = store.appSnapshot.playbackState == .paused ? "Play" : "Pause"
-            let playbackItem = menuItem(playbackTitle, action: #selector(togglePlayback))
-            playbackItem.isEnabled = true
-            menu.addItem(playbackItem)
+            actions.append(menuItem(playbackTitle, action: #selector(togglePlayback)))
+        }
+        if let store, !shutdownInProgress, !shutdownComplete,
+           store.activatingWallpaperID == nil,
+           store.nextWallpaperID(displayId: controlPanelNavigation.targetDisplayID) != nil
+        {
+            actions.append(menuItem("Next Wallpaper", action: #selector(activateNextWallpaper)))
+        }
+        if ScreenLock.isAvailable {
+            actions.append(menuItem("Lock Screen", action: #selector(lockScreen)))
+        }
+        if !actions.isEmpty {
+            menu.addItem(.separator())
+            actions.forEach(menu.addItem)
         }
 
         if let error = startupError ?? lastError {
@@ -639,6 +650,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 NSAlert(error: error).runModal()
             }
         }
+    }
+
+    @objc private func activateNextWallpaper() {
+        let displayId = controlPanelNavigation.targetDisplayID
+        guard let store, !shutdownInProgress, !shutdownComplete,
+              let id = store.nextWallpaperID(displayId: displayId)
+        else {
+            return
+        }
+
+        Task {
+            do {
+                try await store.activateWallpaperAsync(id: id, displayId: displayId)
+                lastError = nil
+            } catch {
+                lastError = error
+            }
+            rebuildMenu()
+        }
+    }
+
+    @objc private func lockScreen() {
+        ScreenLock.lock()
     }
 
     @objc private func exitApplication() {

@@ -42,7 +42,11 @@ rather than the whole file:
 `NSApplication.didChangeScreenParametersNotification`, opens the control-panel window, and
 drives an ordered asynchronous shutdown (lock screen, desktop poster sync, SteamCMD setup,
 downloader, then the renderer bridge). The app runs in `.accessory` activation policy while no
-control-panel window is visible and switches to `.regular` when one is. Under a hosted test run
+control-panel window is visible and switches to `.regular` when one is. The status item's menu
+offers Control Panel, Play/Pause while something is active, **Next Wallpaper** (the next playable
+library wallpaper, in library order, on the panel's target display; `BridgeStore.nextWallpaperID`),
+**Lock Screen** (the private `SACLockScreenImmediate` in login.framework, resolved with `dlsym` and
+left out when missing; `App/Services/Desktop/ScreenLock.swift`) and Exit. Under a hosted test run
 (`NSClassFromString("XCTestCase") != nil`) the delegate short-circuits: no services are created
 against the user's real app-support folder.
 

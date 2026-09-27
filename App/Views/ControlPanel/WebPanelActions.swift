@@ -141,7 +141,7 @@ extension WebPanelController {
       try await store.activateWallpaperAsync(
         id: try wallpaperID(request), displayId: navigation.targetDisplayID)
       // Get out of the way so the freshly applied wallpaper is visible.
-      NSApp.hide(nil)
+      if hidesAfterActivating { NSApp.hide(nil) }
     case "apply": try await store.applyWallpaperOptionsAsync(wallpaperId: try wallpaperID(request))
     case "revert":
       try await store.cancelWallpaperOptionsAsync(wallpaperId: try wallpaperID(request))
@@ -243,6 +243,8 @@ extension WebPanelController {
         try await store.setPauseOnBatteryPowerAsync(enabled: try request.boolean("value"))
       case "keepWindowsOnWallpaperClick":
         try DesktopClickRevealPreference.setEnabled(!(try request.boolean("value")))
+      case "hideAfterActivating":
+        defaults.set(try request.boolean("value"), forKey: Self.hideAfterActivatingKey)
       case "concurrentDownloads":
         let range = WorkshopDownloadManager.concurrentDownloadRange
         let value = try request.number(

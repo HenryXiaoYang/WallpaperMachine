@@ -25,6 +25,14 @@ move the oldest entries verbatim into
 (or a new dated archive file) first, and promote anything durable before it
 goes. Trimming is allowed; editing an entry's recorded result is not.
 
+## 2026-09-27 — Hide-after-apply setting; Next Wallpaper and Lock Screen menu items
+
+- Settings > General gains 'Hide window after applying a wallpaper' (default on, UserDefaults WallpaperMachine.hideAfterActivating); activate only calls NSApp.hide when it is on.
+- Status menu: Next Wallpaper (BridgeStore.nextWallpaperID: next supported library wallpaper on the target display, wrapping) and Lock Screen (SACLockScreenImmediate via dlsym, omitted if missing).
+- New tests: NextWallpaperTests (order, skip unsupported, wrap, single wallpaper), WebPanelGeneralSettingsTests (default on, persists off).
+- python3 scripts/test.py: 585 passed, 0 failed, 11 skipped.
+- Checked only that the lock symbol resolves (dlsym); the lock itself, the menu and the settings row were not exercised on the desktop. No Release build.
+
 ## 2026-09-27 — Deployment target lowered to macOS 15
 
 - Change: project.yml/build.py target 26.0 -> 15.0; release runner macos-26 -> macos-15 with Xcode 26 selected; lock screen off below macOS 26 (app skips the service, extension rejects the host).
@@ -103,9 +111,3 @@ The distributable is now WallpaperMachine-<version>-arm64.dmg (scripts/lib/dmg.p
 - `release_notes.py --ai --tag v0.6.0 --to HEAD` against the gateway — 93 commits, summary plus 14 New / 8 Improved / 20 Fixed, streamed in 44 s
 - Finder window of that image — checked and confirmed by the user on macOS 27.2 beta; not checked on macOS 26.x
 - Not run: the CI workflows (Build stays behind the LICENSING.md gate; the RELEASE_NOTES_API_KEY repository secret is not set yet)
-
-## 2026-09-26 — Hide app after wallpaper activation
-
-- python3 scripts/test.py: 574 passed, 0 failed, 11 skipped
-- python3 scripts/build.py --swift-only --configuration Release: OK
-- Manual check of hide-on-activate pending (user verifying)

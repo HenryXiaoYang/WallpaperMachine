@@ -388,6 +388,7 @@ extension WebPanelController {
         "batteryTargetFps": Int(settings.batteryTargetFps),
         "onBatteryPower": settings.onBatteryPower,
         "keepWindowsOnWallpaperClick": !DesktopClickRevealPreference.isEnabled,
+        "hideAfterActivating": hidesAfterActivating,
         "lockScreenEnabled": lock?.isRequested ?? false, "lockScreenAvailable": lock != nil,
         "lockScreenBusy": lock?.isBusy ?? false, "lockScreenStatus": lock?.status
           ?? (LockScreenConfiguration.isSupportedBySystem

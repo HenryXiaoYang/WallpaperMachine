@@ -1404,6 +1404,12 @@
     "Restoration also failed: %@" : {
       "localizations" : {"en" : {"stringUnit" : {"state" : "translated", "value" : "Restoration also failed: %@"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "恢复也失败了：%@"}}}
     },
+    "Next Wallpaper" : {
+      "localizations" : {"en" : {"stringUnit" : {"state" : "translated", "value" : "Next Wallpaper"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "下一张壁纸"}}}
+    },
+    "Lock Screen" : {
+      "localizations" : {"en" : {"stringUnit" : {"state" : "translated", "value" : "Lock Screen"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "锁定屏幕"}}}
+    },
     "Requires macOS 26 or later" : {
       "localizations" : {"en" : {"stringUnit" : {"state" : "translated", "value" : "Requires macOS 26 or later"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "需要 macOS 26 或更高版本"}}}
     },

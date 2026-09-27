@@ -130,6 +130,7 @@ function draw(view) {
   const general = group('general-language', t('Interface'), row('language', t('Language'), select('language', t('Language'), languageValue, languageOptions, 'data-language-setting', view.pending.has('language')), t('The interface switches at once. Menus and dialogs follow the next time you open the app.')))
     + group('general-behavior', t('Startup & desktop'), settingToggle('launchAtLogin', 'Launch at login', !settings.launchAtLoginAvailable, !settings.launchAtLoginAvailable ? t('Move the app to Applications to enable.') : '')
       + settingToggle('pauseOnBattery', 'Pause on battery')
+      + settingToggle('hideAfterActivating', 'Hide window after applying a wallpaper')
       + settingToggle('keepWindowsOnWallpaperClick', 'Keep windows in place when clicking the wallpaper', false, t('Turns off macOS’s “Click wallpaper to reveal desktop” so clicks reach interactive wallpapers.')))
     + group('general-lock', t('Lock screen'), settingToggle('lockScreenEnabled', 'Animate lock screen', lockUnavailable || settings.lockScreenBusy, t('Experimental'))
       + row('lock-status', t('Lock screen status'), `<span class="settings-status" role="status">${e(lockUnavailable ? (settings.lockScreenAvailable === false && settings.lockScreenStatus) || t('Unavailable') : settings.lockScreenBusy ? `${settings.lockScreenStatus || t('Updating')}…` : settings.lockScreenStatus)}</span>${settings.lockScreenError ? button(t('Retry'), 'lockScreenRetry', {}, busy || settings.lockScreenBusy) : ''}`, '', 'settings-readout')
