@@ -360,7 +360,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        showControlPanel(selection: .wallpaper)
+        // A Dock click returns to the panel as the user left it; only a fresh panel starts on the library.
+        showControlPanel(selection: controlPanelNavigation.selection ?? .wallpaper)
         return false
     }
 
