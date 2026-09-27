@@ -30,10 +30,23 @@ __pycache__/
 # macOS
 .DS_Store
 
-# Local agent tooling: harness state, rules and vendored skills stay on the
-# developer's machine. Only AGENTS.md (and its CLAUDE.md symlink) is tracked.
+# Agent tooling: commit policy, never state. Shared agent rules live in tracked
+# AGENTS.md (CLAUDE.md is its symlink) and docs/. These dirs hold machine-local
+# sessions, caches, workspaces and personal rules; never `git add -f` them.
+# Adding a new agent tool? Ignore its dir here in the same change.
+#
+# Exception recipe (list any exception in AGENTS.md). `!` cannot re-include a
+# file whose parent dir is excluded, so switch `dir/` to `dir/*` and re-include
+# each parent level, e.g. to share only .agents/skills/sources.json:
+#   .agents/*
+#   !.agents/skills/
+#   .agents/skills/*
+#   !.agents/skills/sources.json
 .pi/
 .omp/
+.omo/
 .claude/
 .agents/
+.conductor/
 .commandcode/
+CLAUDE.local.md

@@ -67,6 +67,14 @@ generates the Xcode project and builds the app. Details, flags and failure modes
   `--all` removes `build/` entirely, `--dry-run` lists only). Screenshots,
   traces, wallpaper payloads, Steam session data and personal paths stay out of
   Git too.
+- **Commit agent policy, never agent state.** Shared rules for AI agents live in
+  tracked files only: `AGENTS.md` (plus its `CLAUDE.md` symlink) and `docs/`.
+  Agent tool directories (`.agents/`, `.claude/`, `.commandcode/`, `.conductor/`,
+  `.omo/`, `.omp/`, `.pi/`) and `CLAUDE.local.md` are Git-ignored: they hold
+  per-machine sessions, caches, workspaces and personal rules. Never `git add -f`
+  them or link to them from tracked docs. Using a new agent tool? Ignore its
+  directory in the same change. To share one policy file from such a directory,
+  follow the exception recipe in `.gitignore` and list the file in `AGENTS.md`.
 - **Routine verification never takes over the desktop.** No screen capture, no
   synthetic input, no opening app windows, no changing the user's wallpapers
   unless a desktop run was explicitly requested. `scripts/test.py --ui` is that

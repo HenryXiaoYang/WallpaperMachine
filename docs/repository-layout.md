@@ -66,7 +66,8 @@ upstream/                          vendored third-party code only
   mediaremote-adapter/             ungive/mediaremote-adapter, BSD-3-Clause, unmodified; built as an embedded framework
 artifacts/                         Git-ignored: all test and verification evidence
 build/                             Git-ignored: Xcode derived data and built products only
-.agents/, .omp/, .commandcode/    Git-ignored: local agent skills, rules and tooling notes
+.agents/ .claude/ .commandcode/    Git-ignored: machine-local agent harness state, rules and skills;
+.conductor/ .omo/ .omp/ .pi/       never committed (see AGENTS.md)
 .github/workflows/                 CI: build.yml, release.yml, version.yml, warm-caches.yml
 .github/actions/prepare-build/     composite action: Xcode, Homebrew packages, LGPL FFmpeg and the build caches
 ```

@@ -37,6 +37,15 @@ the whole file. `.ignore` keeps `rg` out of `docs/archive/`, `docs/testing/archi
   durable evidence or committable; keep secrets/private assets/screenshots/traces out too.
   Coordinate cleanup; preview with `python3 scripts/clean.py --dry-run`, then use
   `python3 scripts/clean.py` (keeps built apps). `--all` deletes the delivered app.
+- Agent files: commit policy, never state. Shared agent policy lives only in tracked
+  files: `AGENTS.md` (the `CLAUDE.md` symlink) and `docs/`. Agent tool dirs (`.agents/`,
+  `.claude/`, `.commandcode/`, `.conductor/`, `.omo/`, `.omp/`, `.pi/`) and
+  `CLAUDE.local.md` are Git-ignored and machine-local: sessions, caches, workspaces,
+  `*.local.*` and personal rules. Never `git add -f` them or link them from tracked
+  docs; a rule the team needs goes into `AGENTS.md`/`docs/`. New agent tool → ignore
+  its dir in the same change. Sharing one policy file inside an ignored dir is a
+  deliberate exception: follow the recipe in `.gitignore` and list it here.
+  Check `git status` for agent paths before every commit.
 
 ## Skills and permissions
 
@@ -47,7 +56,7 @@ the whole file. `.ignore` keeps `rg` out of `docs/archive/`, `docs/testing/archi
 - `impeccable` → UI/UX; `swiftui-webkit` → primary WebKit; `webkit-integration` →
   explicit-only reference. Use each only for its concern. The selected SDK and
   `project.yml` decide APIs/deployment target, not examples; no skill-driven migration.
-  Preserve [local adaptations and source pins](.agents/README.md).
+  Local skill adaptations and source pins live in each developer's own `.agents/`.
 - No desktop control, opening windows, screenshots, wallpaper/appearance changes, audio
   hardware, permission prompts, live Steam login or app install/restart without explicit
   authorization. Feature/test approval is not desktop approval. Peekaboo and
@@ -71,8 +80,8 @@ the whole file. `.ignore` keeps `rg` out of `docs/archive/`, `docs/testing/archi
   no app build or desktop test. Scripts print only failures and a verdict; the full
   tool output is in the `artifacts/` log they name. Do not rerun with `--verbose`
   unless the filtered output is not enough to act on.
-- Release builds on request, not by default (`.omp/rules/release-build-on-request.md`):
-  build when the user asks to build, deliver, install or try it, and when a change
+- Release builds on request, not by default: build when the user asks to build,
+  deliver, install or try it, and when a change
   cannot be verified any other way. Otherwise finish at the gate and say the app was
   not rebuilt.
   `python3 scripts/build.py --swift-only --configuration Release` for Swift/WebUI/resources/config
