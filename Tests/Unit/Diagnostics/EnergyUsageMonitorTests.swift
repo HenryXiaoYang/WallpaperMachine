@@ -197,6 +197,12 @@ final class EnergyUsageMonitorTests: XCTestCase {
   /// Guards the private struct layout: if a macOS update moved the fields, CPU energy
   /// would read as zero or as some unrelated counter.
   func testKernelCountersForThisProcessAdvanceWithCPUWork() throws {
+    // A virtual machine (the CI runners) reports no energy at all: the guest's
+    // coalitions read 0 nJ however busy it is.
+    var hypervisor: Int32 = 0
+    var size = MemoryLayout<Int32>.size
+    let virtualised = sysctlbyname("kern.hv_vmm_present", &hypervisor, &size, nil, 0) == 0 && hypervisor == 1
+    try XCTSkipIf(virtualised, "energy counters are not modelled in a virtual machine")
     let source = try XCTUnwrap(
       CoalitionEnergySource(), "coalition accounting is expected on the deployment target")
     let before = try XCTUnwrap(source.sample())
