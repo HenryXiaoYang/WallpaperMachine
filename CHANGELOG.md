@@ -7,6 +7,33 @@ sections list the commits. The GitHub Release body and the app's What's new card
 repeat the section, so the three always say the same thing. See
 [docs/release.md](docs/release.md) for how a version is cut.
 
+## 1.0.2 — 2026-09-27
+
+WallpaperMachine 1.0.2 adds drag selection in Installed, makes in-app updates safer and keeps macOS privacy permissions across updates. Wallpapers and the control panel also do less repeated and background work.
+
+### New
+
+- Hold a tile in Installed and drag across others to select a run of wallpapers, with auto-scroll at the edges
+- A tip in the selection row explains drag selection until you use it once or dismiss it
+
+### Improved
+
+- Wallpapers skip redrawing frames that would repeat an unchanged picture, and scenes follow the Scene render optimisation setting for this
+- Sound output starts only while a wallpaper is playing unmuted, and system audio is captured only for scenes or web wallpapers that use it
+- Paused or covered scenes stop tracking the pointer, and web wallpapers track it only while a page is live
+- Video and scene playback do less background work, with fewer decode wakes and hidden particles skipped while their simulation continues
+- The control panel does less work while inactive, and Discover samples colours only while it is visible
+- Reselecting the same lock screen wallpaper no longer repeats the compatibility check
+- Tiles in Installed no longer enlarge on hover
+
+### Fixed
+
+- Restarting to install an update no longer removes the current version first, and reopens the previous version if the install fails
+- macOS privacy permissions granted to the app are no longer lost after an update
+- Scene wallpapers no longer risk failing when their display surface is replaced while the scene is still loading at startup
+
+**Full changelog**: https://github.com/WallpaperMachine/WallpaperMachine/compare/v1.0.1...v1.0.2
+
 ## 1.0.1 — 2026-09-27
 
 WallpaperMachine now checks for updates on its own, adds a rebuilt Performance page with an energy readout and battery options, and fixes a launch crash after changing the render scale.
