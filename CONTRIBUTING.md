@@ -7,7 +7,7 @@ topic; it does not repeat them.
 
 ## Setup
 
-Apple Silicon, macOS 26 or later, and a full Xcode selected with
+Apple Silicon, macOS 15.6 or later, and a full Xcode 26 selected with
 `xcode-select`. Then:
 
 ```sh

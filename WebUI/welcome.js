@@ -290,7 +290,7 @@ export function createWelcome(helpers) {
     const unavailable = !settings || settings.lockScreenAvailable === false || settings.lockScreenStatus == null;
     const working = pending.has('lockScreen') || Boolean(settings?.lockScreenBusy);
     const status = settings?.lockScreenStatus || t('Updating');
-    const note = unavailable ? t('Unavailable') : working ? (status.endsWith('…') ? status : `${status}…`) : t('Experimental. Applies right away.');
+    const note = unavailable ? (settings?.lockScreenAvailable === false && settings.lockScreenStatus) || t('Unavailable') : working ? (status.endsWith('…') ? status : `${status}…`) : t('Experimental. Applies right away.');
     const off = unavailable || working || pending.has('preferences');
     return `<label class="welcome-pref" data-key="pref-lockScreen"><span class="dialog-guide-icon">${icon('lock', 18)}</span><span class="welcome-pref-body"><span class="welcome-pref-title">${e(t('Animate lock screen'))}</span><span class="welcome-pref-note">${e(note)}</span></span><span class="settings-switch"><input type="checkbox" role="switch" data-lock-screen aria-label="${e(t('Animate lock screen'))}"${lockScreenValue() ? ' checked' : ''}${off ? ' disabled' : ''}><span aria-hidden="true"></span></span></label>`;
   }

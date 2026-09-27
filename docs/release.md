@@ -208,7 +208,8 @@ Release for hand-pushed ones.
 
 The licensing gate that used to fail this workflow's first step was removed for
 1.0.0 by maintainer decision; the questions in [../LICENSING.md](../LICENSING.md)
-are still open. On a `macos-26` runner (150-minute timeout) it:
+are still open. On a `macos-15` runner (150-minute timeout; the oldest that carries
+Xcode 26, whose Homebrew bottles set the published app's minimum macOS) it:
 
 1. checks out the tag with full history, which the notes need;
 2. writes the release body with `scripts/release_notes.py --release-body --ai
@@ -216,14 +217,16 @@ are still open. On a `macos-26` runner (150-minute timeout) it:
    Version had the model write, or for a hand-pushed tag without one, notes the
    model writes now. It runs before anything is built, so a notes problem fails in
    seconds rather than after the macOS build;
-3. `brew install --quiet` the XcodeGen/CMake/renderer package set and
+3. selects the newest non-beta `/Applications/Xcode_26*.app`, then
+   `brew install --quiet` the XcodeGen/CMake/renderer package set and
    `python3 scripts/install_ffmpeg.py` for the project's LGPL FFmpeg build;
 4. restores an `actions/cache` entry for `~/.cargo/registry`, `~/.cargo/git` and
-   `upstream/renderer/target`, keyed `renderer-${{ hashFiles('upstream/renderer/Cargo.lock') }}`
-   with the `renderer-` prefix as a restore key, so an unchanged lock file reuses
-   the previous renderer build;
+   `upstream/renderer/target`, keyed `renderer-macos-15-${{ hashFiles('upstream/renderer/Cargo.lock') }}`
+   with the `renderer-macos-15-` prefix as a restore key, so an unchanged lock file
+   reuses the previous renderer build and never one made on another runner;
 5. runs `python3 scripts/build.py --configuration Release`, then
-   `python3 scripts/test.py`, then `python3 scripts/package.py --configuration Release`.
+   `python3 scripts/test.py`, then `python3 scripts/package.py --configuration Release --require-deployment-target`,
+   which fails if a bundled library needs a newer macOS than the deployment target.
    The test gate runs against the renderer and generated bridge the build step
    already produced, so it adds the test target rather than a second renderer
    build; a published binary has passed the same gate a change has to pass.

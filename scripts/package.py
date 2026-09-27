@@ -10,6 +10,11 @@ scripts/lib/dmg.py, which is mounted and verified before its `.sha256` sidecar i
 written. The image is for local use; LICENSING.md records why it is not cleared for
 distribution.
 
+Every bundled dylib keeps the minimum macOS it was built for, which for a Homebrew
+bottle is the host's release. When one is newer than the app's deployment target the
+bundle's `LSMinimumSystemVersion` is raised to match, so macOS refuses to open it
+instead of it failing at launch; `--require-deployment-target` makes that an error.
+
 `--check` runs the preflight against the built bundle and exits without changing it.
 """
 import argparse
@@ -87,6 +92,29 @@ def resolve_libraries(roots, seeds, prefix):
     if relocated:
         raise PackagingError(f"{FRESH_BUILD}\n  " + "\n  ".join(relocated))
     return libraries
+
+
+def minimum_system_version(file):
+    """The `minos` a Mach-O file records in its LC_BUILD_VERSION load command."""
+    for line in output(["vtool", "-show-build", file]).splitlines():
+        fields = line.split()
+        if fields[:1] == ["minos"]:
+            return fields[1]
+    raise PackagingError(f"No minimum macOS version recorded in {file}")
+
+
+def version_key(version):
+    return tuple(int(part) for part in version.split("."))
+
+
+def raised_minimum(target, minimums):
+    """The lowest macOS every file can load on, and the files that need more than `target`.
+
+    `minimums` maps a file name to its `minos`; the floor never drops below `target`.
+    """
+    newer = {name: version for name, version in minimums.items() if version_key(version) > version_key(target)}
+    floor = max([target, *newer.values()], key=version_key)
+    return floor, newer
 
 
 def ffmpeg_configuration(data):
@@ -217,6 +245,14 @@ def package(args):
     for extension in extensions:
         notices[extension / "Contents/Resources/Phosphene-LICENSE.txt"] = ROOT / "Extension/Phosphene-LICENSE.txt"
     licenses = preflight(notices, libraries)
+    info = app / "Contents/Info.plist"
+    target = output(["/usr/libexec/PlistBuddy", "-c", "Print :LSMinimumSystemVersion", info]).strip()
+    floor, newer = raised_minimum(target, {name: minimum_system_version(source) for name, source in libraries.items()})
+    if newer:
+        detail = ", ".join(f"{name} ({version})" for name, version in sorted(newer.items()))
+        if args.require_deployment_target:
+            raise PackagingError(f"Bundled libraries need a newer macOS than the deployment target {target}; build them on macOS {target}: {detail}")
+        print(f"{MARK.missing} Bundled libraries need macOS {floor}, above the deployment target {target}; the app will require macOS {floor}: {detail}")
     # The image's art and volume icon are inputs too: a missing or mismatched one must
     # stop packaging while the bundle is untouched, not after it is relocated and signed.
     dmg.check_inputs(icon=resources / "AppIcon.icns")
@@ -243,6 +279,8 @@ def package(args):
         extension_resources.mkdir(exist_ok=True)
         (extension_resources / "MoltenVK_icd.json").write_text(icd("../../../.."))
     write_licenses(resources, licenses)
+    if floor != target:
+        run(["/usr/libexec/PlistBuddy", "-c", f"Set :LSMinimumSystemVersion {floor}", info])
     for file in frameworks.glob("*.dylib"):
         run(["codesign", "--force", "--sign", "-", file])
     for extension in extensions:
@@ -255,7 +293,6 @@ def package(args):
                 raise PackagingError(f"Unbundled dependency: {file}: {dependency}")
             if dependency.startswith("@rpath/") and not (frameworks / Path(dependency).name).exists() and "libswift" not in dependency:
                 raise PackagingError(f"Missing bundled dependency: {dependency}")
-    info = app / "Contents/Info.plist"
     version = output(["/usr/libexec/PlistBuddy", "-c", "Print :CFBundleShortVersionString", info]).strip()
     image = dmg.build(app, app.parent / dmg.image_name(version), dmg.volume_name(version), icon=resources / "AppIcon.icns")
     # Prove the image, not the build tree: users and the in-app updater install
@@ -288,6 +325,7 @@ def main():
     parser.add_argument("--configuration", default="Debug", choices=["Debug", "Release"])
     parser.add_argument("--install", action="store_true")
     parser.add_argument("--check", action="store_true", help="Run the license preflight against the built bundle and change nothing.")
+    parser.add_argument("--require-deployment-target", action="store_true", help="Fail instead of raising the app's minimum macOS when a bundled library needs a newer one.")
     args = parser.parse_args()
     try:
         package(args)

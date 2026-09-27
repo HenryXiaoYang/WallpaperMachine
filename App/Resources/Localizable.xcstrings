@@ -1404,6 +1404,9 @@
     "Restoration also failed: %@" : {
       "localizations" : {"en" : {"stringUnit" : {"state" : "translated", "value" : "Restoration also failed: %@"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "恢复也失败了：%@"}}}
     },
+    "Requires macOS 26 or later" : {
+      "localizations" : {"en" : {"stringUnit" : {"state" : "translated", "value" : "Requires macOS 26 or later"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "需要 macOS 26 或更高版本"}}}
+    },
     "Unavailable" : {
       "localizations" : {"en" : {"stringUnit" : {"state" : "translated", "value" : "Unavailable"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "不可用"}}}
     }

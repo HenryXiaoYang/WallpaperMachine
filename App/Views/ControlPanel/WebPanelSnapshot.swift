@@ -389,7 +389,9 @@ extension WebPanelController {
         "onBatteryPower": settings.onBatteryPower,
         "keepWindowsOnWallpaperClick": !DesktopClickRevealPreference.isEnabled,
         "lockScreenEnabled": lock?.isRequested ?? false, "lockScreenAvailable": lock != nil,
-        "lockScreenBusy": lock?.isBusy ?? false, "lockScreenStatus": lock?.status ?? String(localized: "Unavailable"),
+        "lockScreenBusy": lock?.isBusy ?? false, "lockScreenStatus": lock?.status
+          ?? (LockScreenConfiguration.isSupportedBySystem
+            ? String(localized: "Unavailable") : String(localized: "Requires macOS 26 or later")),
         "lockScreenError": lock?.errorMessage as Any? ?? null,
         "sceneAssetsReady": workshop.sceneAssetsReady,
         "sceneAssetsWarning": workshop.sceneAssetsFailure as Any? ?? null,

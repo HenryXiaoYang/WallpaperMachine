@@ -75,19 +75,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         installApplicationMenu()
         logStartup("application menu installed")
         if let store {
-            let lockScreen = LockScreenWallpaperService(bridge: store.bridge)
-            store.lockScreenWallpaper = lockScreen
-            lockScreen.beforeActivation = { [weak self] in
-                guard let self else { return }
-                if self.desktopWallpaperSync == nil {
-                    self.desktopWallpaperSync = try DesktopWallpaperSync(
-                        folder: ClientPaths.supportURL.appendingPathComponent("DesktopPosters"))
+            let lockScreen = LockScreenConfiguration.isSupportedBySystem
+                ? LockScreenWallpaperService(bridge: store.bridge) : nil
+            if let lockScreen {
+                store.lockScreenWallpaper = lockScreen
+                lockScreen.beforeActivation = { [weak self] in
+                    guard let self else { return }
+                    if self.desktopWallpaperSync == nil {
+                        self.desktopWallpaperSync = try DesktopWallpaperSync(
+                            folder: ClientPaths.supportURL.appendingPathComponent("DesktopPosters"))
+                    }
+                    self.desktopWallpaperSync?.suspendForNativeProvider()
                 }
-                self.desktopWallpaperSync?.suspendForNativeProvider()
-            }
-            lockScreen.afterDeactivation = { [weak self] in
-                self?.desktopWallpaperSync = nil
-                try self?.startDesktopWallpaperSync()
+                lockScreen.afterDeactivation = { [weak self] in
+                    self?.desktopWallpaperSync = nil
+                    try self?.startDesktopWallpaperSync()
+                }
             }
             let mediaScheduler = FoundationMediaTimerScheduler()
             let mediaSession = DesktopMediaSession(
@@ -222,8 +225,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             presentationPolicy = policy
             policy.start()
             do {
-                try lockScreen.start()
-                if !lockScreen.isRequested { try startDesktopWallpaperSync() }
+                try lockScreen?.start()
+                if lockScreen?.isRequested != true { try startDesktopWallpaperSync() }
             } catch {
                 lastError = error
                 logStartup("Native wallpaper recovery failed: \(error.localizedDescription)")

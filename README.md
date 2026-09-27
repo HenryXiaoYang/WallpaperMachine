@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <sub>macOS 26 Tahoe or later&ensp;·&ensp;Apple silicon (M1 or later)&ensp;·&ensp;<a href="https://github.com/WallpaperMachine/WallpaperMachine/releases/latest">Free signed download</a></sub>
+  <sub>macOS 15 Sequoia or later&ensp;·&ensp;Apple silicon (M1 or later)&ensp;·&ensp;<a href="https://github.com/WallpaperMachine/WallpaperMachine/releases/latest">Free signed download</a></sub>
 </p>
 
 <p align="center">
@@ -95,8 +95,8 @@ wallpaper, Aurora Drift, plays without either. More in
 <details>
 <summary><b>Which Macs is it built for?</b></summary>
 
-Macs with Apple silicon (M1 or later) running macOS 26 Tahoe or later. Intel
-Macs aren't supported.
+Macs with Apple silicon (M1 or later) running macOS 15 Sequoia or later. The
+animated lock screen needs macOS 26 Tahoe or later. Intel Macs aren't supported.
 
 </details>
 
@@ -137,7 +137,7 @@ is the same with or without it.
 
 ## Open source. Free to build.
 
-The complete source is here. It builds on a Mac with Apple silicon, macOS 26, a
+The complete source is here. It builds on a Mac with Apple silicon, Xcode 26 (macOS 15.6 or later), a
 full Xcode selected with `xcode-select` and the Homebrew packages listed under
 [Prerequisites](docs/build.md#prerequisites); the renderer and scene engine are
 vendored under [`upstream/`](upstream), not pulled in as submodules.

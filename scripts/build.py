@@ -59,7 +59,7 @@ def build_environment():
     result["SDKROOT"] = subprocess.check_output(["xcrun", "--sdk", "macosx", "--show-sdk-path"], text=True).strip()
     result["CC"] = "/usr/bin/clang"
     result["CXX"] = "/usr/bin/clang++"
-    result["MACOSX_DEPLOYMENT_TARGET"] = "26.0"
+    result["MACOSX_DEPLOYMENT_TARGET"] = "15.0"
     result["GIT_SHORT_COMMIT"] = repository_commit()
     return result
 

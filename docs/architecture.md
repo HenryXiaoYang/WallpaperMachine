@@ -238,7 +238,7 @@ See [features/lock-screen.md](features/lock-screen.md) for the user-facing behav
 
 `scripts/build.py` is the whole chain. It builds a Homebrew-rooted environment
 (`CMAKE_PREFIX_PATH`, `PKG_CONFIG_PATH`, `OWE_NIX_LIBRARY_PATH`, `LIBCLANG_PATH`, `SDKROOT`,
-`CC`/`CXX`, `MACOSX_DEPLOYMENT_TARGET=26.0`, `GIT_SHORT_COMMIT`), then:
+`CC`/`CXX`, `MACOSX_DEPLOYMENT_TARGET=15.0`, `GIT_SHORT_COMMIT`), then:
 
 1. `cargo build --workspace --release` in `upstream/renderer` — which also bindgen-generates the
    Open Wallpaper Engine bindings and CMake-builds `wescene-renderer` — producing

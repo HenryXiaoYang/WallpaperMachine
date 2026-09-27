@@ -15,6 +15,12 @@ renderer behaviour and known-failing tests into
 [../renderer.md](../renderer.md), build and code-signing traps into
 [../../build.md](../../build.md).
 
+## 2026-09-26 — Release build after syncing origin/main (6106f50)
+
+- python3 scripts/test.py: 574 passed, 0 failed, 11 skipped
+- python3 scripts/build.py --configuration Release: OK (renderer changes pulled, full build)
+- Not launched; check_renderer.py not run
+
 ## 2026-09-25 — Release build at 6106f50 (Lucy renderer fix on origin/main)
 
 - `python3 scripts/build.py --configuration Release` — exit 0 at 6106f50, which carries the Lucy renderer fix and the first-seen displays and Discover commits; delivered `build/Build/Products/Release/WallpaperMachine.app`

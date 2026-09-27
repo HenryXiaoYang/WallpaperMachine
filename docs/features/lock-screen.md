@@ -29,6 +29,11 @@ well inside that; see
 
 ## Caveats
 
+- It requires macOS 26 or later. On earlier releases the app does not start the
+  service, Settings reports "Requires macOS 26 or later", and the extension
+  refuses the system's connection: the private protocol it speaks has only been
+  verified on macOS 26 and 27.
+
 - Lock-screen animation uses private macOS wallpaper APIs and wallpaper-store
   formats that may change; it may stop working after an OS update, and rendering
   is not guaranteed on every macOS release.

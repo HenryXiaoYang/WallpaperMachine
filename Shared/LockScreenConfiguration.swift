@@ -7,6 +7,11 @@ struct LockScreenConfiguration: Codable, Equatable {
   static let changedNotification = "app.wallpapermachine.lock-screen.changed"
   static let fileName = "configuration.json"
   static let supportedVersion = 1
+  /// The private `com.apple.wallpaper` protocol the extension speaks has only been
+  /// verified on macOS 26 and later; earlier releases keep the feature off.
+  static var isSupportedBySystem: Bool {
+    ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26
+  }
 
   var version: Int = supportedVersion
   var revision: String = UUID().uuidString

@@ -25,6 +25,15 @@ move the oldest entries verbatim into
 (or a new dated archive file) first, and promote anything durable before it
 goes. Trimming is allowed; editing an entry's recorded result is not.
 
+## 2026-09-27 — Deployment target lowered to macOS 15
+
+- Change: project.yml/build.py target 26.0 -> 15.0; release runner macos-26 -> macos-15 with Xcode 26 selected; lock screen off below macOS 26 (app skips the service, extension rejects the host).
+- Probe: xcodebuild with MACOSX_DEPLOYMENT_TARGET=14.0 built with 0 errors; 13.0 fails on @Observable and WKWebView.inactiveSchedulingPolicy.
+- package.py now compares bundled dylib minos with LSMinimumSystemVersion; raises it locally, --require-deployment-target (CI) fails instead. scripts/tests/test_package.py covers the floor.
+- python3 scripts/test.py: 581 passed, 0 failed, 11 skipped. Debug app and extension binaries report minos 15.0.
+- Not run: Release build, package.py, CI on macos-15. Local Homebrew dylibs are minos 26/27, so a local package still requires this host's release.
+- Gap: nothing was launched on macOS 15; WebUI on Safari 18 WebKit, MediaRemote adapter and the Liquid Glass fallback are unchecked there.
+
 ## 2026-09-26 — Release build: welcome guide changes
 
 - python3 scripts/build.py --swift-only --configuration Release: OK after the passing full gate (581 passed, 0 failed, 11 skipped).
@@ -100,9 +109,3 @@ The distributable is now WallpaperMachine-<version>-arm64.dmg (scripts/lib/dmg.p
 - python3 scripts/test.py: 574 passed, 0 failed, 11 skipped
 - python3 scripts/build.py --swift-only --configuration Release: OK
 - Manual check of hide-on-activate pending (user verifying)
-
-## 2026-09-26 — Release build after syncing origin/main (6106f50)
-
-- python3 scripts/test.py: 574 passed, 0 failed, 11 skipped
-- python3 scripts/build.py --configuration Release: OK (renderer changes pulled, full build)
-- Not launched; check_renderer.py not run

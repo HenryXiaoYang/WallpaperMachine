@@ -46,6 +46,10 @@ private final class WallpaperHandler: NSObject, WallpaperExtensionXPCProtocol {
 
 private struct NativeWallpaperConfiguration: AppExtensionConfiguration {
   func accept(connection: NSXPCConnection) -> Bool {
+    guard LockScreenConfiguration.isSupportedBySystem else {
+      WallpaperRuntime.log("Rejected wallpaper host: this macOS release is not supported.")
+      return false
+    }
     guard WallpaperRuntime.accepts(connection) else {
       WallpaperRuntime.log("Rejected untrusted wallpaper host.")
       return false

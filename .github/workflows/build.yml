@@ -25,7 +25,10 @@ permissions:
 
 jobs:
   publish:
-    runs-on: macos-26
+    # The oldest runner that carries Xcode 26. Homebrew pours bottles built for the
+    # runner's own release, and the app bundles those dylibs, so the runner's macOS
+    # is the lowest release the published app can launch on (docs/build.md).
+    runs-on: macos-15
     timeout-minutes: 150
     permissions:
       contents: write
@@ -53,6 +56,12 @@ jobs:
             --built-from "$(git rev-parse HEAD)" --output "${RUNNER_TEMP}/notes.md"
           cat "${RUNNER_TEMP}/notes.md" >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Select Xcode 26
+        run: |
+          set -euo pipefail
+          xcode="$(ls -d /Applications/Xcode_26*.app | grep -iv beta | sort -V | tail -n 1)"
+          sudo xcode-select -s "${xcode}"
+
       - name: Install renderer and Xcode project dependencies
         run: |
           set -euo pipefail
@@ -69,8 +78,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             upstream/renderer/target
-          key: renderer-${{ hashFiles('upstream/renderer/Cargo.lock') }}
-          restore-keys: renderer-
+          key: renderer-macos-15-${{ hashFiles('upstream/renderer/Cargo.lock') }}
+          restore-keys: renderer-macos-15-
 
       - name: Build
         run: |
@@ -88,7 +97,7 @@ jobs:
         # Relocates and signs the bundle, wraps it in the drag-to-install disk image,
         # mounts that image to check the app's identifier, version, signature and the
         # Applications link, and writes the .sha256 sidecar (docs/build.md).
-        run: python3 scripts/package.py --configuration Release
+        run: python3 scripts/package.py --configuration Release --require-deployment-target
 
       - name: Match the disk image to the tag
         id: image

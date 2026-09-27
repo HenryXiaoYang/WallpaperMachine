@@ -9,7 +9,7 @@ Authoritative build document. Everything here is driven by `scripts/build.py` an
 | Requirement | Detail |
 |---|---|
 | Hardware | Apple Silicon only. `project.yml` sets `ARCHS: arm64`, and release disk images are named `-arm64`. |
-| macOS | 26 or later. `project.yml` pins `deploymentTarget.macOS` and `MACOSX_DEPLOYMENT_TARGET` to `26.0`; `scripts/build.py` passes the same value to the renderer as `OWE_MACOSX_DEPLOYMENT_TARGET`. |
+| macOS | The app runs on 15 or later; building needs Xcode 26, so macOS 15.6 or later. `project.yml` pins `deploymentTarget.macOS` and `MACOSX_DEPLOYMENT_TARGET` to `15.0`; `scripts/build.py` passes the same value to the renderer as `OWE_MACOSX_DEPLOYMENT_TARGET`. Bundled Homebrew dylibs keep the release they were built on, so a package made on a newer macOS requires that newer release (see [packaging](#packaging-and-installing)); the published build is made on a `macos-15` runner for that reason. The lock-screen extension stays off below macOS 26. |
 | Xcode | A full Xcode selected with `xcode-select`. The build reads `xcode-select -p` for the toolchain and `xcrun --sdk macosx --show-sdk-path` for the SDK. Command Line Tools alone are not enough. |
 | Homebrew | Provides every renderer dependency; `brew --prefix` is queried at build time. |
 | XcodeGen | `xcodegen` must be on `PATH`. The build regenerates the project on every run. |
@@ -75,8 +75,8 @@ command produces the same build from a terminal, an editor, or CI.
 | `LIBCLANG_PATH` | `$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib` | Rust `bindgen`/`uniffi` need `libclang` from the selected Xcode toolchain. |
 | `SDKROOT` | `xcrun --sdk macosx --show-sdk-path` | Pins C/C++/Rust compilation to the selected macOS SDK. |
 | `CC` / `CXX` | `/usr/bin/clang`, `/usr/bin/clang++` | Apple Clang, not a Homebrew LLVM that happens to be first on `PATH`. |
-| `MACOSX_DEPLOYMENT_TARGET` | `26.0` | Set for `xcodegen` and `xcodebuild`. Deliberately **not** in cargo's environment: cargo builds proc-macro crates for the host and dlopens them in the running compiler, and a pinned host dylib is rejected at load with `mis-aligned LINKEDIT`, which the compiler reports as `can't find crate for <macro>`. |
-| `OWE_MACOSX_DEPLOYMENT_TARGET` | `26.0` | The same value under a name cargo ignores. The renderer crate's build script passes it as `CMAKE_OSX_DEPLOYMENT_TARGET`, so the C++ engine keeps the minimum the app links against. |
+| `MACOSX_DEPLOYMENT_TARGET` | `15.0` | Set for `xcodegen` and `xcodebuild`. Deliberately **not** in cargo's environment: cargo builds proc-macro crates for the host and dlopens them in the running compiler, and a pinned host dylib is rejected at load with `mis-aligned LINKEDIT`, which the compiler reports as `can't find crate for <macro>`. |
+| `OWE_MACOSX_DEPLOYMENT_TARGET` | `15.0` | The same value under a name cargo ignores. The renderer crate's build script passes it as `CMAKE_OSX_DEPLOYMENT_TARGET`, so the C++ engine keeps the minimum the app links against. |
 | `GIT_SHORT_COMMIT` | `git rev-parse --short HEAD` in the repository root | Stamps the build with the revision it was built from; Settings shows it as `Git revision`. The renderer build runs with `upstream/renderer` as its working directory, so HEAD is resolved against the repository root explicitly. |
 
 ## Stages and outputs
@@ -186,6 +186,14 @@ bundle is absent.
      `Resources/AppIcon.icns`. Otherwise `Missing disk image input:` or
      `… not twice …` names the file, and since nothing has been touched yet,
      regenerating the art and rerunning is enough.
+   - Every library to bundle is checked with `vtool -show-build` against the
+     bundle's `LSMinimumSystemVersion` (the deployment target). A Homebrew
+     bottle records the release it was built for, so on a newer host some
+     libraries need a newer macOS than the app claims. By default packaging
+     prints `MISSING Bundled libraries need macOS <version>…` and later raises
+     `LSMinimumSystemVersion` to that release, so macOS declines to open the app
+     instead of it failing to load a library. `--require-deployment-target`,
+     which the release workflow passes, exits 1 instead.
 1. **Dylib relocation.** Starting from `libMoltenVK.dylib` and the app and
    extension binaries, it walks `otool -L` transitively. Every dependency under
    the Homebrew prefix is copied into `Contents/Frameworks`, given an
