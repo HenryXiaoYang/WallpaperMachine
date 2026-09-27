@@ -342,6 +342,88 @@ extension WebPanelController {
         "optimizationApplied": report.optimizationApplied as Any? ?? null,
       ]
     }
+    // The sections are built separately: as one literal, the Swift compiler on the
+    // macOS 15 release runner gives up type-checking it in reasonable time.
+    let settingsSnapshot: [String: Any] = [
+      "launchAtLogin": settings.launchAtLoginEnabled,
+      "launchAtLoginAvailable": settings.launchAtLoginAvailable,
+      "verboseLogging": settings.verboseLogging,
+      "videoBackend": settings.videoBackend, "videoBackends": videoBackends,
+      "contentPacing": settings.contentPacingEnabled,
+      "sharedVideoDecode": settings.sharedVideoDecodeEnabled,
+      "sceneOptimization": settings.sceneOptimizationEnabled,
+      "sceneOnDemand": settings.sceneOnDemandEnabled,
+      "sceneVideoPlaneSampling": settings.sceneVideoPlaneSamplingEnabled,
+      "sceneUpdateModes": sceneUpdateModes,
+      "sceneRenderer": settings.sceneRenderer, "sceneRenderers": sceneRenderers,
+      "sharedVideoDecodeSessions": Int(settings.sharedVideoDecodeSessions),
+      "sharedVideoDecodeConsumers": Int(settings.sharedVideoDecodeConsumers),
+      "renderScale": Double(settings.renderScale),
+      "preferredRenderScale": Double(settings.preferredRenderScale),
+      "renderScaleSupported": settings.renderScaleSupported,
+      "batteryMode": Self.batteryMode(settings.batteryMode),
+      "batteryRenderScale": Double(settings.batteryRenderScale),
+      "batteryTargetFps": Int(settings.batteryTargetFps),
+      "onBatteryPower": settings.onBatteryPower,
+      "frameRateCap": settings.frameRateCap.map { Int($0) } as Any? ?? null,
+      "frameRateCapMax": Self.frameRateCapMax(settings),
+      "displaySleepAction": playback.displaySleepAction.rawValue,
+      "otherAudioAction": playback.otherAudioAction.rawValue,
+      "appRules": playback.appRules.map { rule in
+        [
+          "id": rule.id.uuidString,
+          "name": rule.name,
+          "bundleID": rule.bundleIdentifier,
+          "condition": rule.condition.rawValue,
+          "action": rule.action.rawValue,
+        ]
+      },
+      "keepWindowsOnWallpaperClick": !DesktopClickRevealPreference.isEnabled,
+      "hideAfterActivating": hidesAfterActivating,
+      "lockScreenEnabled": lock?.isRequested ?? false, "lockScreenAvailable": lock != nil,
+      "lockScreenBusy": lock?.isBusy ?? false, "lockScreenStatus": lock?.status
+        ?? (LockScreenConfiguration.isSupportedBySystem
+          ? String(localized: "Unavailable") : String(localized: "Requires macOS 26 or later")),
+      "lockScreenError": lock?.errorMessage as Any? ?? null,
+      "sceneAssetsReady": workshop.sceneAssetsReady,
+      "sceneAssetsWarning": workshop.sceneAssetsFailure as Any? ?? null,
+      "concurrentDownloads": workshop.downloader.maximumConcurrentDownloads,
+      "concurrentDownloadsMax": WorkshopDownloadManager.concurrentDownloadRange.upperBound,
+      "assetsPath": ClientPaths.assetsURL.path, "libraryPath": ClientPaths.libraryURL.path,
+      "shaderCacheBytes": settings.storage.shaderCacheSizeBytes,
+      "logBytes": settings.storage.logs.activeFileSizeBytes,
+      "userAssetsPath": settings.userAssetsPath,
+      "userAssetsReleasedBytes": userAssetsReleasedBytes as Any? ?? null,
+      "bridgeVersion": settings.bridgeVersion, "coreVersion": settings.coreVersion,
+      "shaderVersion": settings.shaderPipelineVersion, "gitSha": settings.gitSha,
+    ]
+    let workshopSnapshot: [String: Any] = [
+      "text": workshop.searchText, "kind": workshop.kind.rawValue, "sort": workshop.sort.rawValue,
+      "tags": workshop.tags, "excludedTags": workshop.excludedTags,
+      "items": workshop.items.map(Self.workshopItem),
+      "selectedID": workshop.selectedItem?.id as Any? ?? null, "page": workshop.page,
+      "totalPages": workshop.totalPages, "totalCount": workshop.totalCount,
+      "reachable": workshop.reachableCount, "pageSize": WorkshopStore.pageSize,
+      "maxPages": WorkshopStore.maxPages,
+      "loading": workshop.isLoading, "loaded": workshop.hasLoaded,
+      "error": workshop.errorMessage as Any? ?? null,
+    ]
+    let setupSnapshot: [String: Any] = [
+      "status": setupStatus, "busy": setup.isBusy, "ready": setup.selectedRuntime != nil,
+      "error": setupError as Any? ?? null, "canApprove": canApprove,
+      "candidatePath": setup.retainedCandidateURL?.path as Any? ?? null,
+      "canCancel": setup.isBusy && setup.state != .committing,
+      "progress": setupProgress as Any? ?? null,
+    ]
+    let error: String? = actionError ?? (libraryError == dismissedLibraryError ? nil : libraryError)
+      ?? (store.latestBridgeErrorRevision > dismissedErrorRevision
+        ? store.latestBridgeErrorMessage : nil)
+    let options: Any? = store.wallpaperOptionsSnapshot.map {
+      Self.options(
+        $0, titles: titles, assets: measuredAssets(for: $0),
+        errors: propertyPathErrors[$0.wallpaperId] ?? [:],
+        delivery: store.webWallpaperDeliveryStatus?(), sceneMedia: store.sceneMediaAvailability?())
+    }
     return [
       "version": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
         ?? "",
@@ -355,90 +437,15 @@ extension WebPanelController {
       "selectedID": store.appSnapshot.selectedWallpaperId as Any? ?? null,
       "paused": store.appSnapshot.playbackState == .paused,
       "busy": commandBusy || store.activatingWallpaperID != nil || store.applyingWallpaperID != nil,
-      "error": actionError ?? (libraryError == dismissedLibraryError ? nil : libraryError)
-        ?? (store.latestBridgeErrorRevision > dismissedErrorRevision
-        ? store.latestBridgeErrorMessage : nil) as Any? ?? null,
+      "error": error as Any? ?? null,
       "libraryLoading": loading, "favorites": favoriteIDs.sorted(), "wallpapers": wallpapers,
       "filtersCollapsed": filtersCollapsed,
       "welcomeSeen": welcomeSeen,
       "displays": displays,
-      "options": store.wallpaperOptionsSnapshot.map {
-        Self.options(
-          $0, titles: titles, assets: measuredAssets(for: $0),
-          errors: propertyPathErrors[$0.wallpaperId] ?? [:],
-          delivery: store.webWallpaperDeliveryStatus?(), sceneMedia: store.sceneMediaAvailability?())
-      } as Any? ?? null,
-      "settings": [
-        "launchAtLogin": settings.launchAtLoginEnabled,
-        "launchAtLoginAvailable": settings.launchAtLoginAvailable,
-        "verboseLogging": settings.verboseLogging,
-        "videoBackend": settings.videoBackend, "videoBackends": videoBackends,
-        "contentPacing": settings.contentPacingEnabled,
-        "sharedVideoDecode": settings.sharedVideoDecodeEnabled,
-        "sceneOptimization": settings.sceneOptimizationEnabled,
-        "sceneOnDemand": settings.sceneOnDemandEnabled,
-        "sceneVideoPlaneSampling": settings.sceneVideoPlaneSamplingEnabled,
-        "sceneUpdateModes": sceneUpdateModes,
-        "sceneRenderer": settings.sceneRenderer, "sceneRenderers": sceneRenderers,
-        "sharedVideoDecodeSessions": Int(settings.sharedVideoDecodeSessions),
-        "sharedVideoDecodeConsumers": Int(settings.sharedVideoDecodeConsumers),
-        "renderScale": Double(settings.renderScale),
-        "preferredRenderScale": Double(settings.preferredRenderScale),
-        "renderScaleSupported": settings.renderScaleSupported,
-        "batteryMode": Self.batteryMode(settings.batteryMode),
-        "batteryRenderScale": Double(settings.batteryRenderScale),
-        "batteryTargetFps": Int(settings.batteryTargetFps),
-        "onBatteryPower": settings.onBatteryPower,
-        "frameRateCap": settings.frameRateCap.map { Int($0) } as Any? ?? null,
-        "frameRateCapMax": Self.frameRateCapMax(settings),
-        "displaySleepAction": playback.displaySleepAction.rawValue,
-        "otherAudioAction": playback.otherAudioAction.rawValue,
-        "appRules": playback.appRules.map { rule in
-          [
-            "id": rule.id.uuidString,
-            "name": rule.name,
-            "bundleID": rule.bundleIdentifier,
-            "condition": rule.condition.rawValue,
-            "action": rule.action.rawValue,
-          ]
-        },
-        "keepWindowsOnWallpaperClick": !DesktopClickRevealPreference.isEnabled,
-        "hideAfterActivating": hidesAfterActivating,
-        "lockScreenEnabled": lock?.isRequested ?? false, "lockScreenAvailable": lock != nil,
-        "lockScreenBusy": lock?.isBusy ?? false, "lockScreenStatus": lock?.status
-          ?? (LockScreenConfiguration.isSupportedBySystem
-            ? String(localized: "Unavailable") : String(localized: "Requires macOS 26 or later")),
-        "lockScreenError": lock?.errorMessage as Any? ?? null,
-        "sceneAssetsReady": workshop.sceneAssetsReady,
-        "sceneAssetsWarning": workshop.sceneAssetsFailure as Any? ?? null,
-        "concurrentDownloads": workshop.downloader.maximumConcurrentDownloads,
-        "concurrentDownloadsMax": WorkshopDownloadManager.concurrentDownloadRange.upperBound,
-        "assetsPath": ClientPaths.assetsURL.path, "libraryPath": ClientPaths.libraryURL.path,
-        "shaderCacheBytes": settings.storage.shaderCacheSizeBytes,
-        "logBytes": settings.storage.logs.activeFileSizeBytes,
-        "userAssetsPath": settings.userAssetsPath,
-        "userAssetsReleasedBytes": userAssetsReleasedBytes as Any? ?? null,
-        "bridgeVersion": settings.bridgeVersion, "coreVersion": settings.coreVersion,
-        "shaderVersion": settings.shaderPipelineVersion, "gitSha": settings.gitSha,
-      ],
-      "workshop": [
-        "text": workshop.searchText, "kind": workshop.kind.rawValue, "sort": workshop.sort.rawValue,
-        "tags": workshop.tags, "excludedTags": workshop.excludedTags,
-        "items": workshop.items.map(Self.workshopItem),
-        "selectedID": workshop.selectedItem?.id as Any? ?? null, "page": workshop.page,
-        "totalPages": workshop.totalPages, "totalCount": workshop.totalCount,
-        "reachable": workshop.reachableCount, "pageSize": WorkshopStore.pageSize,
-        "maxPages": WorkshopStore.maxPages,
-        "loading": workshop.isLoading, "loaded": workshop.hasLoaded,
-        "error": workshop.errorMessage as Any? ?? null,
-      ],
-      "setup": [
-        "status": setupStatus, "busy": setup.isBusy, "ready": setup.selectedRuntime != nil,
-        "error": setupError as Any? ?? null, "canApprove": canApprove,
-        "candidatePath": setup.retainedCandidateURL?.path as Any? ?? null,
-        "canCancel": setup.isBusy && setup.state != .committing,
-        "progress": setupProgress as Any? ?? null,
-      ],
+      "options": options ?? null,
+      "settings": settingsSnapshot,
+      "workshop": workshopSnapshot,
+      "setup": setupSnapshot,
       "downloads": downloads, "downloadRequests": downloadRequests,
       "downloadSlots": workshop.downloader.slotLimit,
       "account": workshop.suggestedAccount,
