@@ -80,7 +80,8 @@ assembles; run the Rust commands from `upstream/renderer`. Build prerequisites
 are in [../build.md](../build.md).
 
 `Tests/Unit/` is grouped by domain: Appearance, Desktop, Diagnostics, GitHub,
-Library, LockScreen, NativeVideo, Panel, Steam, WebWallpaper, Workshop.
+Library, Localization, LockScreen, NativeVideo, Panel, Steam, SystemMedia,
+UserAssets, WebWallpaper, Workshop; shared fixtures live in `Support/`.
 
 ### Opt-in layers
 
@@ -89,9 +90,11 @@ reach past this tree: they depend on the machine's media hardware and on Valve's
 live pages, so a failure there is not evidence about the code and a red gate
 invites a pointless re-run.
 
-- `WALLPAPER_MACHINE_MEDIA_TESTS=1` — `NativeVideoPlayerMediaTests` decodes
-  real video. It still opens no window, changes no wallpaper and configures no
-  audio session; it is not a desktop test and not a substitute for one.
+- `WALLPAPER_MACHINE_MEDIA_TESTS=1` — `NativeVideoPlayerMediaTests` drives the
+  real `AVQueuePlayer`, `AVPlayerLooper` and `AVPlayerLayer` against generated
+  silent clips, decoding real video. It still opens no window, changes no
+  wallpaper and configures no audio session; it is not a desktop test and not a
+  substitute for one.
 - `WALLPAPER_MACHINE_NETWORK_TESTS=1` — the two `testLive…` cases in
   `WorkshopTests` fetch Steam's real community pages. Steam's page *format*
   stays covered offline: `decodePage` runs against recorded markup in
@@ -162,14 +165,6 @@ identical run adds minutes and no information. `xcodegen generate --use-cache`
 (what `scripts/test.py` now runs) leaves the project untouched when
 `project.yml` has not changed, so Xcode's incremental build survives between
 runs.
-
-`NativeVideoPlayerMediaTests` is the one opt-in layer inside `Tests/Unit/`. It
-drives the real `AVQueuePlayer`, `AVPlayerLooper`, `AVPlayerLayer` and video
-output against generated silent clips, which means real video decoding on this
-machine's media hardware, so it skips itself unless
-`WALLPAPER_MACHINE_MEDIA_TESTS=1` is set. It still opens no window, changes
-no wallpaper and configures no audio session; it is not a desktop test and is
-not a substitute for one.
 
 ## Evidence
 
