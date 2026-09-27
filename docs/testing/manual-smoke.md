@@ -22,7 +22,8 @@ when no manual or explicitly requested desktop check was performed.
       six Settings categories: General, Appearance, Displays, Library & Steam,
       Storage, About.
 - [ ] Command-comma reuses the existing window.
-- [ ] Close and reopen the window without quitting or crashing.
+- [ ] Close the window with its close button and with Command-W, and reopen it
+      each time, without quitting or crashing.
 
 ## Appearance
 
@@ -40,7 +41,9 @@ when no manual or explicitly requested desktop check was performed.
       collection returns.
 - [ ] Select a wallpaper and refresh: the selection survives.
 - [ ] Selecting must not activate a wallpaper. Apply/Reapply and double-click
-      activate it, and double-click must not close the window.
+      activate it, and double-click must not close the window. The window stays
+      open after applying unless Settings → General → Hide window after applying
+      a wallpaper is on.
 - [ ] Try invalid media and missing scene assets: actionable failures appear
       without blocking videos or losing an already downloaded scene, and a valid
       wallpaper remains usable.

@@ -115,8 +115,9 @@ final class WebPanelController: NSObject, WKNavigationDelegate {
   static let welcomeSeenKey = "WallpaperMachine.welcomeSeen"
   static let dragSelectLearnedKey = "WallpaperMachine.dragSelectLearned"
   static let hideAfterActivatingKey = "WallpaperMachine.hideAfterActivating"
-  /// Whether applying a wallpaper hides the app so the result is visible; on unless turned off.
-  var hidesAfterActivating: Bool { defaults.object(forKey: Self.hideAfterActivatingKey) as? Bool ?? true }
+  /// Whether applying a wallpaper hides the app so the result is visible; off unless turned on,
+  /// so the panel stays open until the user closes it.
+  var hidesAfterActivating: Bool { defaults.object(forKey: Self.hideAfterActivatingKey) as? Bool ?? false }
   /// Earlier builds stored a dragged inspector width here; the width now follows the
   /// window alone, so the key is cleared rather than read.
   static let legacyInspectorWidthKey = "WallpaperMachine.inspectorWidth"

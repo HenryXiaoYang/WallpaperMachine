@@ -999,6 +999,12 @@
     "macOS did not let this app read what is playing. Since macOS 15.4 only Apple-signed apps may." : {
       "localizations" : {"en" : {"stringUnit" : {"state" : "translated", "value" : "macOS did not let this app read what is playing. Since macOS 15.4 only Apple-signed apps may."}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "macOS 不允许本应用读取正在播放的内容。从 macOS 15.4 起，只有 Apple 签名的应用可以读取。"}}}
     },
+    "File" : {
+      "localizations" : {"en" : {"stringUnit" : {"state" : "translated", "value" : "File"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "文件"}}}
+    },
+    "Close" : {
+      "localizations" : {"en" : {"stringUnit" : {"state" : "translated", "value" : "Close"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "关闭"}}}
+    },
     "Edit" : {
       "localizations" : {"en" : {"stringUnit" : {"state" : "translated", "value" : "Edit"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "编辑"}}}
     },

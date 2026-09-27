@@ -25,6 +25,15 @@ move the oldest entries verbatim into
 (or a new dated archive file) first, and promote anything durable before it
 goes. Trimming is allowed; editing an entry's recorded result is not.
 
+## 2026-09-28 — Panel stays open after applying; Command-W closes it
+
+Settings → General → Hide window after applying a wallpaper now defaults to off (a stored choice is kept). The main menu gains File → Close (Command-W), which goes through the panel's windowShouldClose like the close button.
+
+- `python3 scripts/test.py --only WebPanelGeneralSettingsTests` — exit 0; 1 passed (first attempt stopped at CodeSign on Finder/file-provider xattrs on the Debug bundle; cleared with `xattr -cr`)
+- `python3 scripts/test.py` — exit 0; Python suites OK; native 661: 650 passed, 11 skipped, 0 failed
+- `xcodebuild build-for-testing -scheme WallpaperMachineUI` — TEST BUILD SUCCEEDED; the new `testCommandWClosesLikeTheCloseButton` compiles but was not run
+- Not exercised: Command-W and the panel staying open after Apply on the desktop (no desktop run requested); no Release build
+
 ## 2026-09-28 — Rebase of the power change set onto origin/main f383bbd
 
 Conflicts only in verification logs (entries unioned verbatim, oldest six archived) and provenance.json (sceneEngine.equalQualityPerformanceChanges keeps upstream's 2026-09-24 note followed by ours; upstream deferredSurfaceLifetimeChanges kept). Upstream 36359b3 SceneWallpaperBindings.mm and 2d1322a panel.js/WebControlPanel.swift touch disjoint hunks; no bridge API change upstream.
@@ -105,15 +114,3 @@ R25 PowerWatcher restored to its original 5 s run_in_mode loop and its drop test
 - Cargo, default target dir: cargo test --release -p wallpaper-core --lib 220 passed; cargo test --release -p wallpaper-bridge 351 passed (lib incl. api_smoke, playback, display_presentation, power_settings), 0 failed in either.
 - Not changed: R11 (frame-clock drift), R19, R20, N1-N6.
 - No desktop, visual or power verification; no Release build. Evidence is workload only; no energy saving is claimed.
-
-## 2026-09-27 — Renderer power: R15/R22 revert, R26/R28 fixes, final gate
-
-- R22 reverted to HEAD (generation-keyed audio array rewrite, recorded before the script runs); R15 script-property skip reverted (primitive-only skip is not less work); R15 FillDynamicValueFromJS kept (allocation-neutral refactor). resolve_auto_setting broadening, fprintf and 'false &&' removed; three tests with non-HEAD expectations removed.
-- R26: rebaseline after any uncounted update and seed the selection tracker; TurningCountersOnDoesNotReportWorkAlreadyDone extended to off-then-on (mutation without the stale mark fails: 40 decodes, 8 skipped reported). Unneeded MetalVideoTextures baseline change reverted.
-- R28: index overflow latch re-arms only when the unclamped count fits (the landed clamped comparison re-armed every frame).
-- Targeted: playback_gpu_test 50/50, audio_tests 45/45, particle_rope_geometry_test 26/26, particle_mouse_controlpoint_test 39/39, scene_schema_tests 91/91, timer_tests 29/29, video_source_input_test 12/12, metal_video_texture_test 14/14; script_runtime_compat_test 78/79 (known HEAD failure HostVectorUpdatesDoNotCallMutableGlobalVectorConstructors).
-- python3 scripts/check_renderer.py: exit 0, 24 binaries exit 0, 10/10 cases pixel-equal, reload cycles 0 (artifacts/renderer/adaptive-20260927-232229).
-- python3 scripts/test.py first run: 644 passed, 1 failed, 11 skipped. ControlPanelDiscoverTests...AnimatedPreviewOnlyWhileItIsBrightWithoutWindow failed deterministically: the app-side panel sampler now runs only while !document.hidden and a windowless WKWebView reports hidden.
-- Test now asserts no sampling while hidden, then simulates visibility (hidden getter + visibilitychange) before the brightness checks; removing the hidden gate fails the new assertion.
-- python3 scripts/test.py rerun: 645 passed, 0 failed, 11 skipped of 656 (9 NativeVideoPlayerMediaTests + 2 WorkshopTests live, opt-in); Python script tests 187 OK. Cargo tests not run this pass.
-- Not run: desktop runtime, visual and power verification.

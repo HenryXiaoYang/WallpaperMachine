@@ -15,6 +15,18 @@ renderer behaviour and known-failing tests into
 [../renderer.md](../renderer.md), build and code-signing traps into
 [../../build.md](../../build.md).
 
+## 2026-09-27 — Renderer power: R15/R22 revert, R26/R28 fixes, final gate
+
+- R22 reverted to HEAD (generation-keyed audio array rewrite, recorded before the script runs); R15 script-property skip reverted (primitive-only skip is not less work); R15 FillDynamicValueFromJS kept (allocation-neutral refactor). resolve_auto_setting broadening, fprintf and 'false &&' removed; three tests with non-HEAD expectations removed.
+- R26: rebaseline after any uncounted update and seed the selection tracker; TurningCountersOnDoesNotReportWorkAlreadyDone extended to off-then-on (mutation without the stale mark fails: 40 decodes, 8 skipped reported). Unneeded MetalVideoTextures baseline change reverted.
+- R28: index overflow latch re-arms only when the unclamped count fits (the landed clamped comparison re-armed every frame).
+- Targeted: playback_gpu_test 50/50, audio_tests 45/45, particle_rope_geometry_test 26/26, particle_mouse_controlpoint_test 39/39, scene_schema_tests 91/91, timer_tests 29/29, video_source_input_test 12/12, metal_video_texture_test 14/14; script_runtime_compat_test 78/79 (known HEAD failure HostVectorUpdatesDoNotCallMutableGlobalVectorConstructors).
+- python3 scripts/check_renderer.py: exit 0, 24 binaries exit 0, 10/10 cases pixel-equal, reload cycles 0 (artifacts/renderer/adaptive-20260927-232229).
+- python3 scripts/test.py first run: 644 passed, 1 failed, 11 skipped. ControlPanelDiscoverTests...AnimatedPreviewOnlyWhileItIsBrightWithoutWindow failed deterministically: the app-side panel sampler now runs only while !document.hidden and a windowless WKWebView reports hidden.
+- Test now asserts no sampling while hidden, then simulates visibility (hidden getter + visibilitychange) before the brightness checks; removing the hidden gate fails the new assertion.
+- python3 scripts/test.py rerun: 645 passed, 0 failed, 11 skipped of 656 (9 NativeVideoPlayerMediaTests + 2 WorkshopTests live, opt-in); Python script tests 187 OK. Cargo tests not run this pass.
+- Not run: desktop runtime, visual and power verification.
+
 ## 2026-09-27 — Renderer power batch 2 (R7, R8, R9, R10, R14, R18)
 
 - python3 scripts/check_renderer.py: exit 0; 24 test binaries exit 0; 10/10 cases pixel-equal pooled vs isolated; reload cycles 0 (artifacts/renderer/adaptive-20260927-211358).

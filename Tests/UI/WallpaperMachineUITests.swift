@@ -175,6 +175,15 @@ final class WallpaperMachineUITests: XCTestCase {
     XCTAssertEqual(app.alerts.count, 0)
   }
 
+  func testCommandWClosesLikeTheCloseButton() {
+    app.typeKey("w", modifierFlags: .command)
+    XCTAssertTrue(app.wait(for: .runningBackground, timeout: 10), "Command-W must close the panel")
+    app.activate()
+    XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 10))
+    XCTAssertTrue(panel.waitForExistence(timeout: 10))
+    XCTAssertEqual(app.alerts.count, 0)
+  }
+
   func testApplyPauseResumeAndRelaunch() {
     applyAurora()
     button("Pause wallpaper playback").click()

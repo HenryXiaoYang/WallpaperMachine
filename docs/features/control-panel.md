@@ -266,9 +266,11 @@ screen. Activation is explicit.
   [Workshop downloads](workshop-downloads.md#one-decision-per-download).
 - Apply is unavailable when the target display is disabled, is mirroring another
   display, or when the wallpaper kind cannot be rendered (Application or Unknown).
-- A successful apply hides the app so the new wallpaper is visible. **Settings ->
-  General -> Hide window after applying a wallpaper** turns that off (it is on by
-  default); the choice is stored in the app's defaults, not the engine.
+- A successful apply leaves the window open; it stays until the user closes it
+  (close button or Command-W). **Settings -> General -> Hide window after
+  applying a wallpaper** (off by default) hides the app after each successful
+  apply instead, so the new wallpaper is visible; the choice is stored in the
+  app's defaults, not the engine.
 
 The inspector follows Wallpaper Engine's centered hierarchy: square preview,
 title, creator (Discover), facts (type, size, subscribers), utility actions and tags. For

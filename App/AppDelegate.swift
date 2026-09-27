@@ -621,6 +621,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         applicationItem.submenu = applicationMenu
         menu.addItem(applicationItem)
 
+        // Command-W reaches the key window, so the panel hides exactly as its close button does.
+        let fileItem = NSMenuItem()
+        let fileMenu = NSMenu(title: String(localized: "File"))
+        fileMenu.addItem(
+            withTitle: String(localized: "Close"), action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        fileItem.submenu = fileMenu
+        menu.addItem(fileItem)
+
         // Keep standard text editing shortcuts in search and setup fields.
         let editItem = NSMenuItem()
         let editMenu = NSMenu(title: String(localized: "Edit"))

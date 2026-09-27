@@ -46,7 +46,10 @@ control-panel window is visible and switches to `.regular` when one is. The stat
 offers Control Panel, Play/Pause while something is active, **Next Wallpaper** (the next playable
 library wallpaper, in library order, on the panel's target display; `BridgeStore.nextWallpaperID`),
 **Lock Screen** (the private `SACLockScreenImmediate` in login.framework, resolved with `dlsym` and
-left out when missing; `App/Services/Desktop/ScreenLock.swift`) and Exit. Under a hosted test run
+left out when missing; `App/Services/Desktop/ScreenLock.swift`) and Exit. The application menu
+bar holds the app menu (Settings…, Check for Updates…, Quit), **File → Close** (Command-W, which
+reaches `windowShouldClose` and hides the control panel exactly as its close button does) and
+**Edit** (text editing). Under a hosted test run
 (`NSClassFromString("XCTestCase") != nil`) the delegate short-circuits: no services are created
 against the user's real app-support folder.
 
