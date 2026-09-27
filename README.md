@@ -10,11 +10,12 @@
 </p>
 
 <p align="center">
-  <sub>macOS 26 Tahoe or later&ensp;·&ensp;Apple silicon (M1 or later)&ensp;·&ensp;Signed download coming soon</sub>
+  <sub>macOS 26 Tahoe or later&ensp;·&ensp;Apple silicon (M1 or later)&ensp;·&ensp;<a href="https://github.com/WallpaperMachine/WallpaperMachine/releases/latest">Free signed download</a></sub>
 </p>
 
 <p align="center">
   <a href="https://www.wallpapermachine.app">Website</a>&ensp;·&ensp;
+  <a href="https://www.wallpapermachine.app/guides/">Guides</a>&ensp;·&ensp;
   <a href="#the-app">The app</a>&ensp;·&ensp;
   <a href="#good-to-know">FAQ</a>&ensp;·&ensp;
   <a href="#open-source-free-to-build">Build it</a>&ensp;·&ensp;
@@ -75,7 +76,8 @@ browsing and downloads built in.
 Wallpaper Engine itself is made for Windows. WallpaperMachine is an independent
 Mac app built to play its scene, video and web wallpapers, with Steam Workshop
 browsing built in; compatibility varies by wallpaper. It is not affiliated with
-Wallpaper Engine or Valve.
+Wallpaper Engine or Valve. More in
+[Wallpaper Engine on a Mac](https://www.wallpapermachine.app/guides/wallpaper-engine-on-mac/).
 
 </details>
 
@@ -111,18 +113,22 @@ with its details filled in, for you to check and send.
 </details>
 
 <details>
-<summary><b>When can I get it?</b></summary>
+<summary><b>How do I get it?</b></summary>
 
-WallpaperMachine is in development. A public download and launch date have not
-been announced. The signed download will be free, and you can
-[build it from the source](#open-source-free-to-build) today.
+Download the signed build free from the
+[latest release](https://github.com/WallpaperMachine/WallpaperMachine/releases/latest),
+or [build it from the source](#open-source-free-to-build). The build is not
+notarized, so macOS holds its first launch until you click Open Anyway in
+System Settings → Privacy & Security. The
+[install guide](https://www.wallpapermachine.app/guides/install/) walks through
+it, from the download to the first-run guide.
 
 </details>
 
 <details>
 <summary><b>Is WallpaperMachine really free?</b></summary>
 
-Yes. The signed download will be free, and the complete source is here if you
+Yes. The signed download is free, and the complete source is here if you
 would rather build it yourself. Becoming a Supporter adds a sponsor place on the
 website and in this README, plus priority support. It buys no license: the app
 is the same with or without it.
@@ -201,7 +207,7 @@ Engine you own; the app bundles neither.
 
 <p align="center">
   <b>A new view.</b><br>
-  Coming to your Mac.
+  Now on your Mac.
 </p>
 
 <p align="center">
