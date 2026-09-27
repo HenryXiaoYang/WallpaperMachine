@@ -15,6 +15,21 @@ renderer behaviour and known-failing tests into
 [../renderer.md](../renderer.md), build and code-signing traps into
 [../../build.md](../../build.md).
 
+## 2026-09-27 — Deployment target lowered to macOS 15
+
+- Change: project.yml/build.py target 26.0 -> 15.0; release runner macos-26 -> macos-15 with Xcode 26 selected; lock screen off below macOS 26 (app skips the service, extension rejects the host).
+- Probe: xcodebuild with MACOSX_DEPLOYMENT_TARGET=14.0 built with 0 errors; 13.0 fails on @Observable and WKWebView.inactiveSchedulingPolicy.
+- package.py now compares bundled dylib minos with LSMinimumSystemVersion; raises it locally, --require-deployment-target (CI) fails instead. scripts/tests/test_package.py covers the floor.
+- python3 scripts/test.py: 581 passed, 0 failed, 11 skipped. Debug app and extension binaries report minos 15.0.
+- Not run: Release build, package.py, CI on macos-15. Local Homebrew dylibs are minos 26/27, so a local package still requires this host's release.
+- Gap: nothing was launched on macOS 15; WebUI on Safari 18 WebKit, MediaRemote adapter and the Liquid Glass fallback are unchecked there.
+
+## 2026-09-27 — Release build for energy readout verification
+
+- python3 scripts/build.py --configuration Release: OK (full build; renderer sources have uncommitted changes in the tree).
+- Bundle check: WebUI settings.js, panel.js, settings.css, panel.css, locales/zh-Hans.js identical to WebUI/; binary contains EnergyRatings.json and AppleSmartBattery strings.
+- Delivered: build/Build/Products/Release/WallpaperMachine.app. Not launched; user verifies after quitting and reopening.
+
 ## 2026-09-27 — Energy readout: grade, battery share, before/after, per-wallpaper rating
 
 - python3 scripts/test.py: 640 passed, 0 failed, 11 skipped (Python script tests all OK).

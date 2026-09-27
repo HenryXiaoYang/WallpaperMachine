@@ -18,7 +18,7 @@ source is linked.
 | Under which license is this repository's source offered? | GNU GPL version 2 only, the text in the root [`LICENSE`](LICENSE). See [Source license](#source-license-gpl-20-only). |
 | Is anything sold? | Only the Supporter purchase: a one-time payment for a sponsor place and priority support. The signed download is free and no copy of the software is sold. See [Supporter model](#supporter-model-free-signed-download-paid-sponsorship-and-support). |
 | Can it be distributed today? | No. Homebrew's GPLv3 FFmpeg was replaced, but Apache-2.0 components remain in the link closure of every build. See [Remaining blockers](#remaining-blockers). |
-| Is a Developer ID signed, notarized build available? | No. `scripts/package.py` signs ad hoc. Signing is a platform mechanism, not a license grant. See [Signing and notarization](#signing-and-notarization). |
+| Is a Developer ID signed, notarized build available? | No. `scripts/package.py` signs ad hoc, or with a self-signed project certificate for releases. Signing is a platform mechanism, not a license grant. See [Signing and notarization](#signing-and-notarization). |
 | Can it be listed on the Mac App Store? | Not as the app is built today, and not without first settling the GPLv2 question. See [Mac App Store](#mac-app-store). |
 | Does publishing this source resolve the blockers? | No. Distribution of the combined program is what the licenses govern; posting the repository changes nothing about it. |
 
@@ -183,16 +183,19 @@ open questions of its own, independent of the Apache-2.0 blockers:
 ## Signing and notarization
 
 Not implemented. `scripts/package.py` signs every bundled dylib, each extension
-and the app with the ad-hoc identity (`codesign --sign -`), which lets the
-bundle run locally and be checked with `codesign --verify --deep --strict`. No
-Developer ID certificate is used, no notarization request is submitted, and
-`.github/workflows/build.yml` contains no signing or notarization step.
+and the app ad hoc (`codesign --sign -`) by default; release builds sign them with
+a self-signed project certificate instead
+([docs/build.md](docs/build.md#release-signing)), only so the designated
+requirement, and with it macOS privacy permissions, survives in-app updates. Both
+let the bundle be checked with `codesign --verify --deep --strict`. No Developer
+ID certificate is used and no notarization request is submitted.
 Implementing them is engineering work that comes after distribution is cleared.
 
 A signature can verify bundle integrity; Developer ID additionally authenticates
-the developer through Apple's certificate chain. An ad-hoc signature does not
-authenticate a developer identity. Neither signing nor notarization grants
-third-party copyright permissions or establishes license compatibility.
+the developer through Apple's certificate chain. Neither an ad-hoc signature nor
+the self-signed certificate authenticates a developer identity. Neither signing
+nor notarization grants third-party copyright permissions or establishes license
+compatibility.
 
 ## Components and their licenses
 

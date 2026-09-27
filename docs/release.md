@@ -368,7 +368,10 @@ alert offers **View Update**, which opens About, because a download there opens
 the image in Finder. Each version prompts once per launch. After **Later**, the
 status menu keeps **Restart to Update to x.y.z** (or **WallpaperMachine x.y.z
 Available…**) until the app restarts. This path ships from 1.0.1; 1.0.0 only
-checks silently at launch and shows the result in About.
+checks silently at launch and shows the result in About. The install runs the
+*running* version's code, so the staged replacement and the writability check below
+apply from 1.0.2 on: 1.0.1 still deletes the old app before copying the new one and
+offers in-place installs to any copy under an Applications folder.
 
 The contract it relies on:
 
@@ -383,18 +386,30 @@ The contract it relies on:
   produces — is preferred, then another product disk image naming `arm64`, then
   any product disk image. Only `.dmg` assets qualify: the `.sha256` sidecar, zips,
   feeds and blockmaps are never downloaded;
-- downloads are restricted to `github.com` and
-  `objects.githubusercontent.com` over HTTPS, and a `sha256:` asset digest, when
-  GitHub supplies one, is verified;
+- downloads are restricted to HTTPS on `github.com`, `api.github.com` and the
+  `objects`, `release-assets` and `github-releases` hosts under
+  `githubusercontent.com` (GitHub now redirects assets to `release-assets`), and a
+  `sha256:` asset digest, when GitHub supplies one, is verified;
 - the image is attached read-only and out of sight (`hdiutil attach -nobrowse
   -readonly -noautoopen`) at a private mount point, its single
   `WallpaperMachine.app` is copied out with `ditto` without following the
   `Applications` link, the image is detached whatever happens, and the copy must
   carry `app.wallpapermachine` and its executable before the restart-install
   replaces the running app;
-- the installed copy must live in `/Applications` or `~/Applications`. A copy
-  anywhere else opens the downloaded image after the download, so Finder shows its
+- the restart-install waits for the app to exit, copies the new app beside the old
+  one as a hidden `.WallpaperMachine.app.update-<pid>`, renames the old one aside,
+  moves the new one in and only then deletes the old one. Any failed step puts the
+  old app back, removes the partial copy and reopens whichever version is in place,
+  so a failed install relaunches the previous version rather than leaving no app;
+- the installed copy must live in `/Applications` or `~/Applications`, and this
+  user must be able to write both the bundle and its folder. A copy anywhere else,
+  or one a standard account cannot replace (for example installed by an
+  administrator), opens the downloaded image after the download, so Finder shows its
   drag-to-Applications window for a manual install;
+- releases are signed with the project certificate
+  ([build.md](build.md#release-signing)), so the replacement keeps the designated
+  requirement and macOS keeps the app's privacy permissions. Updating from an
+  ad-hoc build (1.0.1 and older) asks for them once more;
 - the release body is shown as **What's new** in the About card. Headings become
   section titles, bullets become lines, Markdown emphasis, code fences and commit
   links are reduced to their text, the compare link is dropped, and everything
@@ -449,5 +464,7 @@ model (a free Developer ID signed and notarized download, and a one-time
 Supporter purchase for a sponsor place and priority support, under the GPL
 with corresponding source alongside). Neither Developer
 ID signing nor notarization exists in this pipeline yet; `scripts/package.py`
-signs ad hoc, a provenance attestation records who built an artifact rather than
-who vouches for it, and neither is license clearance.
+signs with a self-signed certificate that only keeps the designated requirement
+stable ([build.md](build.md#release-signing)), a provenance attestation records
+who built an artifact rather than who vouches for it, and neither is license
+clearance.

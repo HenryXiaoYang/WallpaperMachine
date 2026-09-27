@@ -25,6 +25,22 @@ move the oldest entries verbatim into
 (or a new dated archive file) first, and promote anything durable before it
 goes. Trimming is allowed; editing an entry's recorded result is not.
 
+## 2026-09-27 — Updater: staged restart-install, writability gate, release certificate signing
+
+- Fix 1: AppUpdateInstaller.canReplace requires a writable bundle and folder; startReplacement stages the new app beside the old, swaps by rename, restores and reopens the previous app on any failure.
+- Repro before: old script (rm -rf then ditto) with a missing source left Applications empty and never reopened.
+- python3 scripts/test.py --only AppUpdateTests: 33 passed (new: canReplace permission, successful swap, failed swap keeps and reopens old app).
+- Fix 2: package.py --sign-identity; build.yml imports SIGNING_CERTIFICATE_P12/PASSWORD (set on repo) into a temp keychain and fails without them.
+- Local CI-step replay on a copy of the Release app: import ok, codesign --verify --deep --strict ok, DR = identifier app.wallpapermachine and certificate root = H"2bdf...fa82" (was cdhash); extension keeps app-sandbox; missing-secret path exits 1.
+- python3 scripts/test.py: 648 passed, 0 failed, 11 skipped.
+- Not exercised: a real CI release run, launching a certificate-signed app, lock-screen extension loading under the new signature, TCC persistence across an actual update (no desktop run authorized); no Release build.
+- 1.0.1 -> 1.0.2 still uses 1.0.1's installer and ad-hoc grants; fixes apply from 1.0.2 onward.
+
+## 2026-09-27 — Release build
+
+- python3 scripts/test.py: 648 passed, 0 failed, 11 skipped
+- python3 scripts/build.py --configuration Release: OK; bundled WebUI matches WebUI/
+
 ## 2026-09-27 — Deferred Metal layer lifetime on upstream 1.0.1
 
 - Based on upstream main 5286e70 (1.0.1). Kept a97e1e1 CopyPass teardown and its regression unchanged; this patch only retains the layer during deferred backend selection and adds ownership coverage.
@@ -92,17 +108,3 @@ goes. Trimming is allowed; editing an entry's recorded result is not.
 - python3 scripts/test.py: 585 passed, 0 failed, 11 skipped.
 - Checked only that the lock symbol resolves (dlsym); the lock itself, the menu and the settings row were not exercised on the desktop. No Release build.
 
-## 2026-09-27 — Deployment target lowered to macOS 15
-
-- Change: project.yml/build.py target 26.0 -> 15.0; release runner macos-26 -> macos-15 with Xcode 26 selected; lock screen off below macOS 26 (app skips the service, extension rejects the host).
-- Probe: xcodebuild with MACOSX_DEPLOYMENT_TARGET=14.0 built with 0 errors; 13.0 fails on @Observable and WKWebView.inactiveSchedulingPolicy.
-- package.py now compares bundled dylib minos with LSMinimumSystemVersion; raises it locally, --require-deployment-target (CI) fails instead. scripts/tests/test_package.py covers the floor.
-- python3 scripts/test.py: 581 passed, 0 failed, 11 skipped. Debug app and extension binaries report minos 15.0.
-- Not run: Release build, package.py, CI on macos-15. Local Homebrew dylibs are minos 26/27, so a local package still requires this host's release.
-- Gap: nothing was launched on macOS 15; WebUI on Safari 18 WebKit, MediaRemote adapter and the Liquid Glass fallback are unchecked there.
-
-## 2026-09-27 — Release build for energy readout verification
-
-- python3 scripts/build.py --configuration Release: OK (full build; renderer sources have uncommitted changes in the tree).
-- Bundle check: WebUI settings.js, panel.js, settings.css, panel.css, locales/zh-Hans.js identical to WebUI/; binary contains EnergyRatings.json and AppleSmartBattery strings.
-- Delivered: build/Build/Products/Release/WallpaperMachine.app. Not launched; user verifies after quitting and reopening.

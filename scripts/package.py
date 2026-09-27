@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bundle Homebrew dylibs, configure MoltenVK, collect license notices, ad-hoc sign the local application, and wrap it in a disk image.
+"""Bundle Homebrew dylibs, configure MoltenVK, collect license notices, sign the local application, and wrap it in a disk image.
 
 Nothing in the bundle is touched until the preflight passes: the FFmpeg libraries
 the binaries actually link must be an LGPL build (Formula/mwe-ffmpeg.rb), never a
@@ -56,6 +56,18 @@ def output(args):
 
 def run(args):
     subprocess.run(list(map(str, args)), check=True)
+
+
+def sign(file, identity, *options):
+    """Ad hoc (`-`) by default. Release builds pass the project certificate, whose designated
+    requirement (identifier plus certificate) stays the same from one release to the next,
+    so macOS privacy permissions survive an update; an ad-hoc requirement is the build's
+    cdhash, which every release changes."""
+    command = ["codesign", "--force", "--sign", identity]
+    if identity != "-":
+        command.append("--timestamp=none")
+    run([*command, *options, file])
+
 
 
 def dependencies(file):
@@ -282,10 +294,10 @@ def package(args):
     if floor != target:
         run(["/usr/libexec/PlistBuddy", "-c", f"Set :LSMinimumSystemVersion {floor}", info])
     for file in frameworks.glob("*.dylib"):
-        run(["codesign", "--force", "--sign", "-", file])
+        sign(file, args.sign_identity)
     for extension in extensions:
-        run(["codesign", "--force", "--sign", "-", "--preserve-metadata=entitlements", extension])
-    run(["codesign", "--force", "--sign", "-", "--options", "0", app])
+        sign(extension, args.sign_identity, "--preserve-metadata=entitlements")
+    sign(app, args.sign_identity, "--options", "0")
     run(["codesign", "--verify", "--deep", "--strict", app])
     for file in [binary, *extension_binaries, *frameworks.glob("*.dylib")]:
         for dependency in dependencies(file):
@@ -326,6 +338,7 @@ def main():
     parser.add_argument("--install", action="store_true")
     parser.add_argument("--check", action="store_true", help="Run the license preflight against the built bundle and change nothing.")
     parser.add_argument("--require-deployment-target", action="store_true", help="Fail instead of raising the app's minimum macOS when a bundled library needs a newer one.")
+    parser.add_argument("--sign-identity", default="-", help="Code-signing identity for the dylibs, extensions and app; `-` (the default) signs ad hoc. Release builds pass the project certificate (docs/build.md).")
     args = parser.parse_args()
     try:
         package(args)

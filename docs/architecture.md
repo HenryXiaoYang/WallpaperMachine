@@ -314,8 +314,8 @@ Homebrew-prefixed dependency of the app binary, the `.appex` binaries and the co
 Homebrew and source-tree `LC_RPATH` entries and adds `@executable_path/../Frameworks`
 (`@executable_path/../../../../Frameworks` for extension binaries); writes a `MoltenVK_icd.json`
 next to both the app and each extension pointing at the bundled driver; writes the license
-payload; ad-hoc signs the dylibs, each extension (preserving entitlements) and the app (no
-Developer ID, no notarization); verifies with `codesign --verify --deep --strict`; fails if any
+payload; signs the dylibs, each extension (preserving entitlements) and the app, ad hoc or, for
+releases, with the project certificate (no Developer ID, no notarization); verifies with `codesign --verify --deep --strict`; fails if any
 dependency is still unbundled; and wraps the bundle in the drag-to-install disk image
 `WallpaperMachine-<version>-arm64.dmg` (`scripts/lib/dmg.py`: an `Applications` link, a laid-out
 window and a background, verified by mounting it), labelled as not cleared for distribution.

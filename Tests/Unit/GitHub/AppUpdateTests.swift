@@ -200,6 +200,44 @@ final class AppUpdateTests: XCTestCase {
         XCTAssertEqual(try Self.attachedDevices(of: image), [])
     }
 
+    func testOnlyACopyThisUserCanWriteIsReplacedInPlace() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("mwe-update-perm-\(UUID().uuidString)")
+        let app = root.appendingPathComponent("WallpaperMachine.app")
+        try FileManager.default.createDirectory(at: app, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: root.path)
+            try? FileManager.default.removeItem(at: root)
+        }
+        XCTAssertTrue(AppUpdateInstaller.canReplace(app))
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: root.path)
+        XCTAssertFalse(AppUpdateInstaller.canReplace(app))
+    }
+
+    func testReplacementSwapsInTheNewAppAndReopensIt() throws {
+        let fixture = try ReplacementFixture()
+        defer { fixture.remove() }
+        try fixture.makeApp(at: fixture.destination, marker: "old")
+        try fixture.makeApp(at: fixture.source, marker: "new")
+
+        try fixture.run()
+        XCTAssertEqual(try fixture.marker(), "new")
+        XCTAssertEqual(try fixture.leftovers(), [])
+        XCTAssertEqual(try fixture.reopened(), [fixture.destination.path])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.source.deletingLastPathComponent().path))
+    }
+
+    func testFailedReplacementKeepsAndReopensThePreviousApp() throws {
+        let fixture = try ReplacementFixture()
+        defer { fixture.remove() }
+        try fixture.makeApp(at: fixture.destination, marker: "old")
+        // No extracted copy: the copy step fails after the app has already quit.
+
+        try fixture.run()
+        XCTAssertEqual(try fixture.marker(), "old")
+        XCTAssertEqual(try fixture.leftovers(), [])
+        XCTAssertEqual(try fixture.reopened(), [fixture.destination.path])
+    }
+
     func testCheckFindsUpdateWithoutDownloading() async {
         let fixture = Fixture()
         fixture.client.release = fixture.release(version: "1.1.0")
@@ -393,6 +431,61 @@ final class AppUpdateTests: XCTestCase {
 
     private func expect(_ state: AppUpdateState, equals expected: AppUpdateState) {
         XCTAssertEqual(state, expected)
+    }
+}
+
+/// A destination folder, an extracted copy in its own work folder, and an `open` stand-in
+/// that records what the replacement script reopens instead of launching it.
+private struct ReplacementFixture {
+    let root: URL
+    let destination: URL
+    let source: URL
+    let opener: URL
+    let log: URL
+
+    init() throws {
+        root = FileManager.default.temporaryDirectory.appendingPathComponent("mwe-update-swap-\(UUID().uuidString)")
+        destination = root.appendingPathComponent("Applications/WallpaperMachine.app")
+        source = root.appendingPathComponent("work/WallpaperMachine.app")
+        opener = root.appendingPathComponent("open.sh")
+        log = root.appendingPathComponent("opened.log")
+        try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: source.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try "#!/bin/bash\necho \"$1\" >> \"\(log.path)\"\n".write(to: opener, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: opener.path)
+    }
+
+    func makeApp(at app: URL, marker: String) throws {
+        try FileManager.default.createDirectory(at: app.appendingPathComponent("Contents"), withIntermediateDirectories: true)
+        try Data(marker.utf8).write(to: app.appendingPathComponent("Contents/marker"))
+    }
+
+    /// Waits on an already-exited process, so the script starts at once.
+    func run() throws {
+        let exited = Process()
+        exited.executableURL = URL(fileURLWithPath: "/usr/bin/true")
+        try exited.run()
+        exited.waitUntilExit()
+        let script = try AppUpdateInstaller.startReplacement(
+            after: exited.processIdentifier, source: source, destination: destination, opener: opener.path)
+        script.waitUntilExit()
+    }
+
+    func marker() throws -> String {
+        try String(contentsOf: destination.appendingPathComponent("Contents/marker"), encoding: .utf8)
+    }
+
+    func leftovers() throws -> [String] {
+        try FileManager.default.contentsOfDirectory(atPath: destination.deletingLastPathComponent().path)
+            .filter { $0 != destination.lastPathComponent }
+    }
+
+    func reopened() throws -> [String] {
+        try String(contentsOf: log, encoding: .utf8).split(separator: "\n").map(String.init)
+    }
+
+    func remove() {
+        try? FileManager.default.removeItem(at: root)
     }
 }
 

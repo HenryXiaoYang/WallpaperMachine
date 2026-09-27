@@ -225,11 +225,12 @@ bundle is absent.
    under `Licenses/<formula>-<version>/`, and the vendored miniaudio and
    spirv_reflect notices under `Licenses/renderer-third-party/`. `Licenses/` is
    rebuilt on every run.
-4. **Ad-hoc signing.** Each bundled dylib, then each extension
-   (`--preserve-metadata=entitlements`), then the app are signed with `-`, and
-   the result is checked with `codesign --verify --deep --strict`. No Developer
-   ID identity is used and nothing is notarized; see
-   [../LICENSING.md](../LICENSING.md#signing-and-notarization).
+4. **Signing.** Each bundled dylib, then each extension
+   (`--preserve-metadata=entitlements`), then the app are signed with
+   `--sign-identity` (default `-`, ad hoc), and the result is checked with
+   `codesign --verify --deep --strict`. Release builds use the project
+   certificate; see [Release signing](#release-signing). Nothing is notarized;
+   see [../LICENSING.md](../LICENSING.md#signing-and-notarization).
 5. **Dependency audit.** Every binary is re-scanned. A remaining Homebrew-prefixed
    load command fails with `Unbundled dependency: …`; an `@rpath` dependency with
    no matching file in `Contents/Frameworks` fails with `Missing bundled
@@ -277,6 +278,28 @@ alias resolving to the file on the volume, the volume icon, the link, and
 verification passing for its version only.
 
 After a successful Release build, quit and reopen the app to load it.
+
+### Release signing
+
+The published image is signed with the self-signed code-signing certificate
+`WallpaperMachine Code Signing` (SHA-1 `2BDF4E2431B7EDEB731DE288726C896480A0FA82`,
+valid to 2046). Its designated requirement is
+`identifier "app.wallpapermachine" and certificate root = H"2bdf…fa82"`, the same
+for every release, so macOS keeps the system-audio and Apple Events permissions
+across an in-app update. An ad-hoc requirement is the build's cdhash, which every
+release changes, so each update used to ask for those permissions again. Builds
+up to 1.0.1 were ad hoc: the first update from one of them still asks once.
+
+The certificate is not trusted by Gatekeeper and replaces no Developer ID: the
+first launch still goes through **Open Anyway**. `.github/workflows/build.yml`
+imports it from the `SIGNING_CERTIFICATE_P12` (base64 PKCS#12, legacy 3DES
+encryption so `security import` reads it) and `SIGNING_CERTIFICATE_PASSWORD`
+repository secrets into a temporary keychain and fails when either is missing,
+rather than shipping an ad-hoc build. The private key is kept only by the
+maintainer, outside the repository. Replacing the certificate changes the
+requirement, so the release after a replacement asks for permissions once more.
+To sign locally with it, import the PKCS#12 into a keychain in the search list and
+pass `--sign-identity "WallpaperMachine Code Signing"`.
 
 ## Runtime data locations
 

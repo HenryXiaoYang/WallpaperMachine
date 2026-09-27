@@ -17,7 +17,7 @@ struct AppUpdateInstaller: AppUpdateInstalling {
     }
 
     var canInstallInPlace: Bool {
-        Self.isInstallableLocation(currentAppURL)
+        Self.isInstallableLocation(currentAppURL) && Self.canReplace(currentAppURL, fileManager: fileManager)
     }
 
     static func isInstallableLocation(_ url: URL) -> Bool {
@@ -26,6 +26,16 @@ struct AppUpdateInstaller: AppUpdateInstalling {
         let userApplications = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Applications", isDirectory: true).standardizedFileURL.path + "/"
         return path.hasPrefix(applications) || path.hasPrefix(userApplications)
+    }
+
+    /// The restart-install renames the bundle aside inside its folder and moves the new copy
+    /// in, so this user must be able to write both. A standard account running a copy an
+    /// administrator installed gets the manual drag-to-Applications path instead of an
+    /// install that cannot finish after the app has already quit.
+    static func canReplace(_ url: URL, fileManager: FileManager = .default) -> Bool {
+        let app = url.standardizedFileURL
+        return fileManager.isWritableFile(atPath: app.deletingLastPathComponent().path)
+            && fileManager.isWritableFile(atPath: app.path)
     }
 
     /// Copies the app out of the downloaded disk image into a private work directory and
@@ -48,31 +58,52 @@ struct AppUpdateInstaller: AppUpdateInstalling {
         guard canInstallInPlace else {
             throw AppUpdateIssue(code: .permission, detail: String(localized: "The updater doesn't have permission to install this update."))
         }
+        try Self.startReplacement(after: ProcessInfo.processInfo.processIdentifier,
+                                  source: extractedApp, destination: destination, fileManager: fileManager)
+    }
+
+    /// Starts the detached script that swaps the app once `pid` exits. The new copy is
+    /// completed beside the old one before either is moved, and whichever copy is in place
+    /// when the script stops is reopened, so a failure relaunches the previous version
+    /// instead of leaving no app behind. `opener` is `open`; tests pass a recorder.
+    @discardableResult
+    static func startReplacement(after pid: Int32, source: URL, destination: URL,
+                                 opener: String = "/usr/bin/open", fileManager: FileManager = .default) throws -> Process {
         let script = fileManager.temporaryDirectory.appendingPathComponent("mwe-install-\(UUID().uuidString).sh")
         let contents = """
         #!/bin/bash
-        set -euo pipefail
+        set -uo pipefail
         pid="$1"
         src="$2"
         dst="$3"
+        opener="$4"
         while kill -0 "$pid" 2>/dev/null; do sleep 0.2; done
         sleep 0.4
-        rm -rf "$dst"
-        /usr/bin/ditto "$src" "$dst"
-        /usr/bin/xattr -dr com.apple.quarantine "$dst" || true
-        /usr/bin/open "$dst"
-        rm -rf "$(dirname "$src")"
-        rm -f "$0"
+        staged="$(dirname "$dst")/.$(basename "$dst").update-$$"
+        previous="$(dirname "$dst")/.$(basename "$dst").previous-$$"
+        if /usr/bin/ditto "$src" "$staged" && /bin/mv "$dst" "$previous"; then
+            if /bin/mv "$staged" "$dst"; then
+                /bin/rm -rf "$previous"
+            else
+                /bin/mv "$previous" "$dst"
+            fi
+        fi
+        /bin/rm -rf "$staged"
+        /usr/bin/xattr -dr com.apple.quarantine "$dst" 2>/dev/null
+        "$opener" "$dst"
+        /bin/rm -rf "$(dirname "$src")"
+        /bin/rm -f "$0"
         """
         try contents.write(to: script, atomically: true, encoding: .utf8)
         try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
-        process.arguments = [script.path, String(ProcessInfo.processInfo.processIdentifier), extractedApp.path, destination.path]
+        process.arguments = [script.path, String(pid), source.path, destination.path, opener]
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         try process.run()
+        return process
     }
 
     static func copyApplication(fromDiskImage image: URL, into work: URL) throws -> URL {
