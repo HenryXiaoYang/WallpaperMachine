@@ -406,6 +406,78 @@ final class ControlPanelLibraryTests: ControlPanelTestCase {
     }
   }
 
+  /// Holding a tile and sweeping across others selects the whole run between them in grid
+  /// order; sweeping back gives the overshoot back, the click that ends the press changes
+  /// nothing, and a quick drag outside a selection is ignored. From a checked tile the sweep
+  /// clears instead. The selection row teaches the gesture until it has been used once, and
+  /// that is remembered natively.
+  func testHoldAndDragSelectsARunOfTilesWithoutWindow() async throws {
+    try await withPanel { panel in
+      try await panel.finishWelcome()
+      panel.show()
+      try await panel.waitJS("powerProbe.received.length >= 1")
+      XCTAssertFalse(panel.controller.dragSelectLearned)
+      let result = try await panel.js("""
+        const base = window.powerProbe.received.at(-1);
+        const wallpaper = id => ({ id, title: id.toUpperCase(), kind: 'Scene', approved: false, preview: null, active: false, supported: true, tags: [], size: 1, addedAt: 1 });
+        window.wallpaperUI.receive(Object.assign({}, base, { page: 'installed', libraryLoading: false, selectedID: null, dragSelectLearned: false, wallpapers: ['a', 'b', 'c', 'd', 'e', 'f'].map(wallpaper) }));
+        document.getAnimations().forEach(animation => animation.finish());
+        const tile = id => document.querySelector(`#wallpaper-grid .wallpaper-tile[data-key="${id}"]`);
+        const centre = (id, dx = 0) => { const box = tile(id).getBoundingClientRect(); return { clientX: box.left + box.width / 2 + dx, clientY: box.top + box.height / 2 }; };
+        const pointer = (type, at, buttons = 1) => document.elementFromPoint(at.clientX, at.clientY).dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, pointerId: 1, isPrimary: true, button: 0, buttons, ...at }));
+        const checked = () => [...document.querySelectorAll('#wallpaper-grid .wallpaper-tile.checked')].map(node => node.dataset.key);
+        const tip = () => !!document.querySelector('#browser-summary .selection-tip');
+        const hold = () => new Promise(resolve => setTimeout(resolve, 450));
+
+        pointer('pointerdown', centre('a'));
+        pointer('pointermove', centre('d'));
+        await hold();
+        pointer('pointerup', centre('d'), 0);
+        const strayDrag = checked();
+
+        pointer('pointerdown', centre('a'));
+        const arming = tile('a').classList.contains('arming');
+        pointer('pointermove', centre('a', 2));
+        await hold();
+        const held = checked();
+        const tipWhileHeld = tip();
+        pointer('pointermove', centre('d'));
+        const swept = checked();
+        pointer('pointermove', centre('b'));
+        const sweptBack = checked();
+        pointer('pointerup', centre('b'), 0);
+        tile('b').querySelector('.tile-select').click();
+        const afterClick = checked();
+        const inspectorUntouched = !document.querySelector('#wallpaper-grid .tile-select[aria-pressed="true"]');
+
+        pointer('pointerdown', centre('a'));
+        pointer('pointermove', centre('b'));
+        pointer('pointerup', centre('b'), 0);
+        const cleared = checked();
+        return { strayDrag, arming, held, tipWhileHeld, swept, sweptBack, afterClick, inspectorUntouched, cleared };
+        """) as? [String: Any]
+      XCTAssertEqual(result?["strayDrag"] as? [String], [], "A drag that does not hold first selects nothing")
+      XCTAssertEqual(result?["arming"] as? Bool, true, "The pressed tile shows the hold in progress")
+      XCTAssertEqual(result?["held"] as? [String], ["a"], "Holding still checks the pressed tile")
+      XCTAssertEqual(result?["tipWhileHeld"] as? Bool, true, "The selection row teaches the sweep until it is used")
+      XCTAssertEqual(result?["swept"] as? [String], ["a", "b", "c", "d"], "The sweep covers every tile between, in grid order")
+      XCTAssertEqual(result?["sweptBack"] as? [String], ["a", "b"], "Sweeping back gives the overshoot back")
+      XCTAssertEqual(result?["afterClick"] as? [String], ["a", "b"], "The click ending the press does not toggle the tile")
+      XCTAssertEqual(result?["inspectorUntouched"] as? Bool, true)
+      XCTAssertEqual(result?["cleared"] as? [String], [], "With a selection under way, sweeping from a checked tile clears at once")
+      try await panel.waitUntil { panel.controller.dragSelectLearned }
+      XCTAssertTrue(panel.defaults.bool(forKey: WebPanelController.dragSelectLearnedKey), "Learning the sweep is stored")
+      XCTAssertEqual(panel.controller.snapshot()["dragSelectLearned"] as? Bool, true)
+      try await panel.expectJS("""
+        const base = window.powerProbe.received.at(-1);
+        const wallpaper = id => ({ id, title: id.toUpperCase(), kind: 'Scene', approved: false, preview: null, active: false, supported: true, tags: [], size: 1, addedAt: 1 });
+        window.wallpaperUI.receive(Object.assign({}, base, { page: 'installed', libraryLoading: false, dragSelectLearned: true, wallpapers: ['a', 'b', 'c'].map(wallpaper) }));
+        document.querySelector('#wallpaper-grid .tile-check').click();
+        return !!document.querySelector('#browser-summary .selection-count') && !document.querySelector('#browser-summary .selection-tip');
+        """, equals: true)
+    }
+  }
+
   /// An installed wallpaper that can run offers a GitHub report beneath its compatibility note,
   /// prefilled with the running app's version and the backend drawing it. When applying it
   /// fails, the failure takes that link's place and its report carries the error.

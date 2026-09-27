@@ -441,6 +441,7 @@ extension WebPanelController {
       "libraryLoading": loading, "favorites": favoriteIDs.sorted(), "wallpapers": wallpapers,
       "filtersCollapsed": filtersCollapsed,
       "welcomeSeen": welcomeSeen,
+      "dragSelectLearned": dragSelectLearned,
       "displays": displays,
       "options": options ?? null,
       "settings": settingsSnapshot,

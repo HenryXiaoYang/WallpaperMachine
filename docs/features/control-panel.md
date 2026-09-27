@@ -67,9 +67,8 @@ while the animation is bright (see
 [Workshop downloads](workshop-downloads.md#tile-thumbnails)). Animations stop
 when the grid leaves Discover, so an installed copy of the same wallpaper shows
 its library preview on Installed.
-The whole tile, including its controls and marks, enlarges by 8% over 220ms on
-hover or visible keyboard focus. Selection alone does not enlarge it. Reduced
-Motion keeps the tile size fixed and retains border/shadow feedback.
+Tiles keep their size on hover or visible keyboard focus; they rise above their
+neighbours with a shadow instead of enlarging.
 Both tabs fill the grid with as many columns as the browser column can hold at a
 preferred tile size that shrinks with the column, and never fewer than three,
 so a narrower window shows smaller tiles and more of them rather than fewer,
@@ -300,6 +299,23 @@ playing on a display is ejected first.
   mode. One confirmation covers the whole batch, every wallpaper is trashed
   independently, the library refreshes once, and any wallpaper that could not
   be removed is reported in the error banner while the rest are gone.
+- Drag-select: holding a tile still for 350ms checks it (the tile sinks and its
+  check fills in during the hold) and sweeping on checks every tile from the
+  pressed one to the one under the pointer, in grid order; sweeping back
+  unchecks the overshoot, and resting near the grid's top or bottom edge
+  scrolls it. Starting on a checked tile clears instead. Once a selection is
+  under way, in selection mode, or when the press starts on a check box, moving
+  onto another tile starts the sweep without the hold; otherwise a drag that
+  moves before the hold completes does nothing. The click ending a sweep is
+  ignored, so it never toggles the last tile or changes the inspector.
+- Teaching it: the summary row shows a tip (**Hold a tile, then drag across
+  others…** with **Got it**) whenever a selection or selection mode is active,
+  until the user sweeps across two or more tiles or presses **Got it**; that is
+  stored natively (`dragSelectLearned` action and snapshot field, like
+  `welcomeSeen`), because the panel's web storage is not persistent. Afterwards
+  selection mode keeps a one-line reminder, **Click or drag across tiles to
+  select them.** The toolbar's **Select** tooltip and each check box's tooltip
+  mention the gesture too.
 
 ## Target display
 

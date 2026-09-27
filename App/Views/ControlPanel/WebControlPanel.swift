@@ -81,6 +81,9 @@ final class WebPanelController: NSObject, WKNavigationDelegate {
   /// the content while this is false and reports `welcomeSeen` once the user has read or
   /// skipped it, or started using the app; it is never shown again on its own.
   var welcomeSeen: Bool
+  /// Whether the user has swept across tiles to select them, or dismissed the tip that
+  /// teaches it. Installed's selection row carries that tip until then.
+  var dragSelectLearned: Bool
   /// Folder sizes and dates for Installed's sort menu, measured off the main thread.
   let libraryMetrics: LibraryMetricsService
   /// Energy readout on Settings › Performance; samples only while Settings is on screen.
@@ -110,6 +113,7 @@ final class WebPanelController: NSObject, WKNavigationDelegate {
     "installed": "WallpaperMachine.installedFiltersCollapsed",
   ]
   static let welcomeSeenKey = "WallpaperMachine.welcomeSeen"
+  static let dragSelectLearnedKey = "WallpaperMachine.dragSelectLearned"
   static let hideAfterActivatingKey = "WallpaperMachine.hideAfterActivating"
   /// Whether applying a wallpaper hides the app so the result is visible; on unless turned off.
   var hidesAfterActivating: Bool { defaults.object(forKey: Self.hideAfterActivatingKey) as? Bool ?? true }
@@ -146,6 +150,7 @@ final class WebPanelController: NSObject, WKNavigationDelegate {
     self.chooseApplication = chooseApplication
     filtersCollapsed = Self.filtersCollapsedKeys.mapValues { defaults.bool(forKey: $0) }
     welcomeSeen = defaults.bool(forKey: Self.welcomeSeenKey)
+    dragSelectLearned = defaults.bool(forKey: Self.dragSelectLearnedKey)
     self.libraryMetrics = libraryMetrics ?? LibraryMetricsService()
     self.energyUsage = energyUsage ?? EnergyUsageMonitor()
     defaults.removeObject(forKey: Self.legacyInspectorWidthKey)

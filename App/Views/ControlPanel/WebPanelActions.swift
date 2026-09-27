@@ -77,6 +77,10 @@ extension WebPanelController {
       welcomeSeen = true
       defaults.set(true, forKey: Self.welcomeSeenKey)
       return
+    case "dragSelectLearned":
+      dragSelectLearned = true
+      defaults.set(true, forKey: Self.dragSelectLearnedKey)
+      return
     case "workshopSelect":
       guard let id = body["id"] as? String, let item = workshop.workshopItem(id: id) else {
         throw WebPanelRequest.invalid

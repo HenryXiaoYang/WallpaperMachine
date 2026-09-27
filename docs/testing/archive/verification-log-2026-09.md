@@ -15,6 +15,14 @@ renderer behaviour and known-failing tests into
 [../renderer.md](../renderer.md), build and code-signing traps into
 [../../build.md](../../build.md).
 
+## 2026-09-27 — Hide-after-apply setting; Next Wallpaper and Lock Screen menu items
+
+- Settings > General gains 'Hide window after applying a wallpaper' (default on, UserDefaults WallpaperMachine.hideAfterActivating); activate only calls NSApp.hide when it is on.
+- Status menu: Next Wallpaper (BridgeStore.nextWallpaperID: next supported library wallpaper on the target display, wrapping) and Lock Screen (SACLockScreenImmediate via dlsym, omitted if missing).
+- New tests: NextWallpaperTests (order, skip unsupported, wrap, single wallpaper), WebPanelGeneralSettingsTests (default on, persists off).
+- python3 scripts/test.py: 585 passed, 0 failed, 11 skipped.
+- Checked only that the lock symbol resolves (dlsym); the lock itself, the menu and the settings row were not exercised on the desktop. No Release build.
+
 ## 2026-09-27 — Deployment target lowered to macOS 15
 
 - Change: project.yml/build.py target 26.0 -> 15.0; release runner macos-26 -> macos-15 with Xcode 26 selected; lock screen off below macOS 26 (app skips the service, extension rejects the host).

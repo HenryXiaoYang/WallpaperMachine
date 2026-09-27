@@ -25,6 +25,12 @@ move the oldest entries verbatim into
 (or a new dated archive file) first, and promote anything durable before it
 goes. Trimming is allowed; editing an entry's recorded result is not.
 
+## 2026-09-27 — Installed: hold-and-drag multi-select with in-context tip
+
+- python3 scripts/test.py --only ControlPanelLibraryTests: 9 passed (new testHoldAndDragSelectsARunOfTilesWithoutWindow: stray drag ignored, hold checks, range sweep + sweep-back, ending click swallowed, sweep from checked tile clears, dragSelectLearned stored in defaults + snapshot).
+- python3 scripts/test.py: 649 passed, 0 failed, 11 skipped; panel localization tests pass with the new zh-Hans strings.
+- Not exercised: real mouse sweep on a desktop, edge auto-scroll (rAF does not run in the offscreen test web view), hold animation visuals, reduced-motion appearance. No Release build.
+
 ## 2026-09-27 — Updater: staged restart-install, writability gate, release certificate signing
 
 - Fix 1: AppUpdateInstaller.canReplace requires a writable bundle and folder; startReplacement stages the new app beside the old, swaps by rename, restores and reopens the previous app on any failure.
@@ -99,12 +105,3 @@ goes. Trimming is allowed; editing an entry's recorded result is not.
 - Conflicts resolved: settings.js keeps 'Hide window after applying a wallpaper' and drops General 'Pause on battery' (now Performance battery mode); pbxproj regenerated with xcodegen; verification logs merged, oldest entries archived.
 - python3 scripts/test.py: 644 passed, 0 failed, 11 skipped of 655; Python script suites OK.
 - Not run: Release build, check_renderer.py (no renderer change in the merge), desktop checks.
-
-## 2026-09-27 — Hide-after-apply setting; Next Wallpaper and Lock Screen menu items
-
-- Settings > General gains 'Hide window after applying a wallpaper' (default on, UserDefaults WallpaperMachine.hideAfterActivating); activate only calls NSApp.hide when it is on.
-- Status menu: Next Wallpaper (BridgeStore.nextWallpaperID: next supported library wallpaper on the target display, wrapping) and Lock Screen (SACLockScreenImmediate via dlsym, omitted if missing).
-- New tests: NextWallpaperTests (order, skip unsupported, wrap, single wallpaper), WebPanelGeneralSettingsTests (default on, persists off).
-- python3 scripts/test.py: 585 passed, 0 failed, 11 skipped.
-- Checked only that the lock symbol resolves (dlsym); the lock itself, the menu and the settings row were not exercised on the desktop. No Release build.
-

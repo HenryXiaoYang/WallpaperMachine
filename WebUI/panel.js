@@ -49,6 +49,10 @@ const installedSorts = [['title', 'Name', false], ['type', 'Type', false], ['fav
 const selection = new Set();
 let selectionAnchor = null;
 let selecting = false; // Toolbar "Select" mode keeps every tile's check visible.
+// A press-and-drag selection in progress on Installed (see `beginSweep`), and whether the click
+// that ends it must be ignored because the press has already done its work.
+let sweep = null;
+let swallowClick = false;
 // Wallpaper Engine's own Workshop sidebar, tag for tag. "Show only" boxes start unchecked and
 // checking one sends the tag as `requiredtags[]`. Every other box starts checked and unchecking
 // it sends the tag as `excludedtags[]`, so a group with everything ticked filters nothing.
@@ -259,7 +263,7 @@ function filterButton(count) {
 function renderToolbar(discover) {
   const search = discover ? workshopDraft.text : installed.text;
   const sortLabel = t(installedSorts.find(([key]) => key === installed.sort)?.[1] || 'Name');
-  morph($('browser-toolbar'), `${filterButton(filterCount(discover))}<form class="search-form" data-form="search" ${keyAttr(discover ? 'workshop-search' : 'installed-search')}>${icon('search')}<label class="sr-only" for="wallpaper-search">${escapeHTML(discover ? t('Search Steam Workshop') : t('Search installed wallpapers'))}</label><input id="wallpaper-search" type="search" autocomplete="off" placeholder="${escapeHTML(discover ? t('Search Workshop') : t('Search wallpapers'))}" value="${escapeHTML(search)}" data-input="search">${discover ? `<button type="submit" title="${escapeHTML(t('Search Workshop'))}">${escapeHTML(t('Search'))}</button>` : ''}</form><div class="toolbar-tools"><label class="sr-only" for="browser-sort">${escapeHTML(t('Sort wallpapers'))}</label><select id="browser-sort" data-change="sort">${selectOptions((discover ? workshopSorts : installedSorts).map(([key, label]) => [key, t(label)]), discover ? workshopDraft.sort : installed.sort)}</select>${discover ? `${button('', 'refreshWorkshop', {}, { icon: 'refresh', title: t('Refresh Workshop'), disabled: state.workshop.loading })}` : `${button('', 'toggleSortDirection', {}, { icon: installed.descending ? 'sortDescending' : 'sortAscending', title: installed.descending ? t('{sort}, descending. Click to sort ascending', { sort: sortLabel }) : t('{sort}, ascending. Click to sort descending', { sort: sortLabel }), className: 'icon-button sort-direction' })}${button(selecting ? t('Done') : t('Select'), 'toggleSelecting', {}, { icon: selecting ? 'close' : 'check', title: selecting ? t('Leave selection mode') : t('Select wallpapers to move to Trash'), className: selecting ? 'selecting' : '' })}${button('', 'refresh', {}, { icon: 'refresh', title: t('Refresh library'), disabled: state.libraryLoading })}${button(t('Import'), 'openImport', {}, { icon: 'plus', className: 'import-button', title: t('Import wallpapers'), disabled: state.import?.busy })}`}</div>`);
+  morph($('browser-toolbar'), `${filterButton(filterCount(discover))}<form class="search-form" data-form="search" ${keyAttr(discover ? 'workshop-search' : 'installed-search')}>${icon('search')}<label class="sr-only" for="wallpaper-search">${escapeHTML(discover ? t('Search Steam Workshop') : t('Search installed wallpapers'))}</label><input id="wallpaper-search" type="search" autocomplete="off" placeholder="${escapeHTML(discover ? t('Search Workshop') : t('Search wallpapers'))}" value="${escapeHTML(search)}" data-input="search">${discover ? `<button type="submit" title="${escapeHTML(t('Search Workshop'))}">${escapeHTML(t('Search'))}</button>` : ''}</form><div class="toolbar-tools"><label class="sr-only" for="browser-sort">${escapeHTML(t('Sort wallpapers'))}</label><select id="browser-sort" data-change="sort">${selectOptions((discover ? workshopSorts : installedSorts).map(([key, label]) => [key, t(label)]), discover ? workshopDraft.sort : installed.sort)}</select>${discover ? `${button('', 'refreshWorkshop', {}, { icon: 'refresh', title: t('Refresh Workshop'), disabled: state.workshop.loading })}` : `${button('', 'toggleSortDirection', {}, { icon: installed.descending ? 'sortDescending' : 'sortAscending', title: installed.descending ? t('{sort}, descending. Click to sort ascending', { sort: sortLabel }) : t('{sort}, ascending. Click to sort descending', { sort: sortLabel }), className: 'icon-button sort-direction' })}${button(selecting ? t('Done') : t('Select'), 'toggleSelecting', {}, { icon: selecting ? 'close' : 'check', title: selecting ? t('Leave selection mode') : t('Select wallpapers to move to Trash. Holding a tile and dragging across others selects them too.'), className: selecting ? 'selecting' : '' })}${button('', 'refresh', {}, { icon: 'refresh', title: t('Refresh library'), disabled: state.libraryLoading })}${button(t('Import'), 'openImport', {}, { icon: 'plus', className: 'import-button', title: t('Import wallpapers'), disabled: state.import?.busy })}`}</div>`);
 }
 const filterGroup = (key, title, body, open, count = 0) => `<details class="filter-group"${open ? ' open' : ''} ${keyAttr(key)}><summary><span class="filter-group-title">${escapeHTML(t(title))}${filterCountPill(count)}</span>${icon('chevronRight', 13)}</summary><div class="filter-options">${body}</div></details>`;
 const filterHeading = (count, clearAction) => `<div class="filter-heading"><h3>${escapeHTML(t('Filters'))}${filterCountPill(count)}</h3>${button(t('Clear'), clearAction, {}, { className: 'link', disabled: !count })}</div>`;
@@ -358,12 +362,16 @@ function renderGrid(discover) {
   const target = state.displays.find(display => display.id === state.targetDisplayID);
   $('wallpaper-grid').setAttribute('aria-busy', String(Boolean(loading)));
   const count = t(items.length === 1 ? '{count} wallpaper' : '{count} wallpapers', { count: items.length.toLocaleString() });
-  morph($('browser-summary'), loading ? escapeHTML(discover ? t('Searching Steam Workshop…') : t('Loading your library…')) : discover ? escapeHTML(workshop.loaded ? t('{count} results', { count: Number(workshop.totalCount).toLocaleString() }) : t('Steam Workshop')) : selection.size ? `<div class="selection-bar"><span class="selection-count">${escapeHTML(t('{count} selected', { count: selection.size.toLocaleString() }))}</span>${button(t('Select all'), 'selectAllVisible', {}, { className: 'link', disabled: items.every(item => selection.has(item.id)) })}${button(t('Clear'), 'clearSelection', {}, { className: 'link' })}${button(selection.size === 1 ? t('Move to Trash') : t('Move {count} to Trash', { count: selection.size.toLocaleString() }), 'deleteSelected', {}, { icon: 'trash', className: 'danger', disabled: state.busy || busy('deleteMany') })}</div>` : `<div class="selection-bar"><span>${escapeHTML(count)}</span>${items.length && selecting ? `<span class="muted">${escapeHTML(t('Click tiles to select them.'))}</span>${button(t('Select all'), 'selectAllVisible', {}, { className: 'link' })}` : ''}</div>`);
+  // Drag-selecting is taught where selecting happens: until the user has swept once or said
+  // "Got it", every selection context carries the tip; afterwards a short reminder remains in
+  // selection mode only.
+  const sweepTip = !discover && items.length > 1 && !state.dragSelectLearned ? `<span class="selection-tip" role="note">${icon('mousePointerClick', 14)}<span>${escapeHTML(t('Tip: hold a tile, then drag across others to select them all at once.'))}</span>${button(t('Got it'), 'dragSelectLearned', {}, { className: 'link' })}</span>` : '';
+  morph($('browser-summary'), loading ? escapeHTML(discover ? t('Searching Steam Workshop…') : t('Loading your library…')) : discover ? escapeHTML(workshop.loaded ? t('{count} results', { count: Number(workshop.totalCount).toLocaleString() }) : t('Steam Workshop')) : selection.size ? `<div class="selection-bar"><span class="selection-count">${escapeHTML(t('{count} selected', { count: selection.size.toLocaleString() }))}</span>${button(t('Select all'), 'selectAllVisible', {}, { className: 'link', disabled: items.every(item => selection.has(item.id)) })}${button(t('Clear'), 'clearSelection', {}, { className: 'link' })}${button(selection.size === 1 ? t('Move to Trash') : t('Move {count} to Trash', { count: selection.size.toLocaleString() }), 'deleteSelected', {}, { icon: 'trash', className: 'danger', disabled: state.busy || busy('deleteMany') })}${sweepTip}</div>` : `<div class="selection-bar"><span>${escapeHTML(count)}</span>${items.length && selecting ? `${sweepTip ? '' : `<span class="muted">${escapeHTML(t('Click or drag across tiles to select them.'))}</span>`}${button(t('Select all'), 'selectAllVisible', {}, { className: 'link' })}${sweepTip}` : ''}</div>`);
   $('wallpaper-grid').classList.toggle('selecting', !discover && (selecting || selection.size > 0));
   // Animations belong to Discover. An installed wallpaper keeps its Workshop id, so a live entry
   // left over from Discover would mark its Installed tile as playing and hide that tile's still.
   retireLivePreviews(new Set(discover ? items.map(item => item.id) : []));
-  morph($('wallpaper-grid'), items.map(item => `<article class="wallpaper-tile${selection.has(item.id) ? ' checked' : ''}${live.get(item.id)?.playing ? ' playing' : ''}" ${keyAttr(item.id)}><button type="button" class="tile-select" data-action="${discover ? 'workshopSelect' : 'select'}" data-id="${escapeHTML(item.id)}" aria-pressed="${item.id === selectedID}" aria-label="${escapeHTML(item.title)}, ${escapeHTML(t(item.kind))}${tileMarkNames(item, discover).map(name => `, ${escapeHTML(t(tileMarkGlyphs[name][1]))}`).join('')}${item.id === selectedID ? `, ${escapeHTML(t('selected'))}` : ''}"><span class="tile-placeholder">${icon('image', 28)}</span>${discover && ['loading', 'ready'].includes(live.get(item.id)?.status) ? `<img ${keyAttr(`live-${item.id}`)} class="tile-live" src="${escapeHTML(safeImage(item.animated))}" alt="" decoding="async" crossorigin="anonymous" referrerpolicy="no-referrer">` : ''}${safeImage(item.thumbnail || item.preview) ? `<img ${keyAttr(item.thumbnail || item.preview)} class="tile-still" src="${escapeHTML(safeImage(item.thumbnail || item.preview))}" alt=""${discover ? '' : ' loading="lazy"'} decoding="async"${safeImage(item.thumbnail || item.preview).startsWith('mwe-ui:') ? ' crossorigin="anonymous"' : ''} referrerpolicy="no-referrer">` : ''}<span class="tile-caption"><span class="tile-title">${escapeHTML(item.title)}</span><span class="tile-kind">${escapeHTML(t(item.kind))}</span></span></button>${tileMarksMarkup(item, discover)}${discover ? tileDownloadMarkup(item) : ''}${!discover ? `<button type="button" class="tile-check" data-action="toggleSelect" data-id="${escapeHTML(item.id)}" aria-pressed="${selection.has(item.id)}" aria-label="${escapeHTML(selection.has(item.id) ? t('Deselect: {title}', { title: item.title }) : t('Select: {title}', { title: item.title }))}">${icon('check', 14)}</button><button type="button" class="tile-favorite" data-action="favorite" data-id="${escapeHTML(item.id)}" aria-pressed="${state.favorites.includes(item.id)}" aria-label="${escapeHTML(state.favorites.includes(item.id) ? t('Remove favorite: {title}', { title: item.title }) : t('Add favorite: {title}', { title: item.title }))}"${disabled(busy('favorite', { id: item.id }))}>${icon('heart', 14)}</button>${target?.wallpaperID === item.id ? `<span class="active-badge">${escapeHTML(t('Active'))}</span>` : item.active ? `<span class="active-badge">${escapeHTML(t('Other display'))}</span>` : ''}` : ''}</article>`).join(''));
+  morph($('wallpaper-grid'), items.map(item => `<article class="wallpaper-tile${selection.has(item.id) ? ' checked' : ''}${!discover && sweepArmingID() === item.id ? ' arming' : ''}${live.get(item.id)?.playing ? ' playing' : ''}" ${keyAttr(item.id)}><button type="button" class="tile-select" data-action="${discover ? 'workshopSelect' : 'select'}" data-id="${escapeHTML(item.id)}" aria-pressed="${item.id === selectedID}" aria-label="${escapeHTML(item.title)}, ${escapeHTML(t(item.kind))}${tileMarkNames(item, discover).map(name => `, ${escapeHTML(t(tileMarkGlyphs[name][1]))}`).join('')}${item.id === selectedID ? `, ${escapeHTML(t('selected'))}` : ''}"><span class="tile-placeholder">${icon('image', 28)}</span>${discover && ['loading', 'ready'].includes(live.get(item.id)?.status) ? `<img ${keyAttr(`live-${item.id}`)} class="tile-live" src="${escapeHTML(safeImage(item.animated))}" alt="" decoding="async" crossorigin="anonymous" referrerpolicy="no-referrer">` : ''}${safeImage(item.thumbnail || item.preview) ? `<img ${keyAttr(item.thumbnail || item.preview)} class="tile-still" src="${escapeHTML(safeImage(item.thumbnail || item.preview))}" alt=""${discover ? '' : ' loading="lazy"'} decoding="async"${safeImage(item.thumbnail || item.preview).startsWith('mwe-ui:') ? ' crossorigin="anonymous"' : ''} referrerpolicy="no-referrer">` : ''}<span class="tile-caption"><span class="tile-title">${escapeHTML(item.title)}</span><span class="tile-kind">${escapeHTML(t(item.kind))}</span></span></button>${tileMarksMarkup(item, discover)}${discover ? tileDownloadMarkup(item) : ''}${!discover ? `<button type="button" class="tile-check" data-action="toggleSelect" data-id="${escapeHTML(item.id)}" aria-pressed="${selection.has(item.id)}" aria-label="${escapeHTML(selection.has(item.id) ? t('Deselect: {title}', { title: item.title }) : t('Select: {title}', { title: item.title }))}" title="${escapeHTML(t('Click to select, or drag from here across other tiles to select them too.'))}">${icon('check', 14)}</button><button type="button" class="tile-favorite" data-action="favorite" data-id="${escapeHTML(item.id)}" aria-pressed="${state.favorites.includes(item.id)}" aria-label="${escapeHTML(state.favorites.includes(item.id) ? t('Remove favorite: {title}', { title: item.title }) : t('Add favorite: {title}', { title: item.title }))}"${disabled(busy('favorite', { id: item.id }))}>${icon('heart', 14)}</button>${target?.wallpaperID === item.id ? `<span class="active-badge">${escapeHTML(t('Active'))}</span>` : item.active ? `<span class="active-badge">${escapeHTML(t('Other display'))}</span>` : ''}` : ''}</article>`).join(''));
   const empty = $('browser-empty'); empty.hidden = items.length > 0;
   $('wallpaper-grid').hidden = !items.length;
   if (!items.length) {
@@ -998,6 +1006,7 @@ async function handleAction(action, data, element) {
     case 'toggleSelecting': selecting = !selecting; if (!selecting) { selection.clear(); selectionAnchor = null; } render(); return;
     case 'selectAllVisible': for (const item of visibleWallpapers()) selection.add(item.id); selectionAnchor ??= [...selection][0] ?? null; renderGrid(false); return;
     case 'clearSelection': selection.clear(); selectionAnchor = null; renderGrid(false); return;
+    case 'dragSelectLearned': learnSweep(); return;
     case 'deleteSelected': if (selection.size) await deliver('deleteMany', { ids: [...selection] }); return;
     case 'clearWorkshopSearch': workshopDraft.text = ''; // falls through to reset filters
     case 'clearWorkshop': workshopDraft.tags = []; workshopDraft.excludedTags = [...defaultExcludedTags]; render(); await searchWorkshop(); return;
@@ -1039,6 +1048,98 @@ function toggleSelection(id, { range = false } = {}) {
   selectionAnchor = selection.has(id) ? id : selectionAnchor;
   renderGrid(false);
 }
+// Press-and-sweep selection on Installed. Holding a tile still for a moment checks it (or, if it
+// was checked, clears it) and every tile the pointer then sweeps over follows suit. The swept
+// range runs from the pressed tile to the one under the pointer in grid order, so a fast sweep
+// never skips a tile and sweeping back gives the overshoot back. Outside a selection the hold is
+// required, so a stray drag changes nothing; once a selection is under way, or from a tile's check
+// box, moving onto another tile starts the sweep at once. Near the grid's top or bottom edge the
+// grid scrolls under the pointer.
+const SWEEP_HOLD_MS = 350, SWEEP_SLOP = 6, SWEEP_EDGE = 48, SWEEP_INSET = 16;
+function sweepArmingID() { return sweep && !sweep.painting && !sweep.moved ? sweep.startID : null; }
+function sweepTileAt(x, y) { return document.elementFromPoint(x, y)?.closest('#wallpaper-grid .wallpaper-tile')?.dataset.key ?? null; }
+function beginSweep() {
+  clearTimeout(sweep.timer);
+  Object.assign(sweep, { painting: true, ids: visibleWallpapers().map(item => item.id), base: new Set(selection), add: !selection.has(sweep.startID), spread: 0, last: null });
+  $('wallpaper-grid').classList.add('sweeping');
+  paintSweep(sweep.startID);
+  sweep.frame = requestAnimationFrame(sweepFrame);
+}
+function paintSweep(id) {
+  if (!id || id === sweep.last) return;
+  const from = sweep.ids.indexOf(sweep.startID), to = sweep.ids.indexOf(id);
+  if (from < 0 || to < 0) return;
+  sweep.last = id;
+  sweep.spread = Math.max(sweep.spread, Math.abs(to - from) + 1);
+  selection.clear();
+  for (const each of sweep.base) selection.add(each);
+  for (const each of sweep.ids.slice(Math.min(from, to), Math.max(from, to) + 1)) { if (sweep.add) selection.add(each); else selection.delete(each); }
+  if (sweep.add) selectionAnchor = sweep.startID; else if (!selection.has(selectionAnchor)) selectionAnchor = null;
+  renderGrid(false);
+}
+// The further past the edge band the pointer rests, the faster the grid scrolls; the tile that
+// scrolls beneath it joins the sweep.
+function sweepFrame() {
+  if (!sweep?.painting) return;
+  const grid = $('wallpaper-grid'), box = grid.getBoundingClientRect();
+  const below = sweep.y - (box.bottom - SWEEP_EDGE), above = box.top + SWEEP_EDGE - sweep.y;
+  const step = below > 0 ? Math.min(below, SWEEP_EDGE * 2) / 3 : above > 0 ? -Math.min(above, SWEEP_EDGE * 2) / 3 : 0;
+  const before = grid.scrollTop;
+  if (step) grid.scrollTop += step;
+  if (grid.scrollTop !== before) paintSweep(sweepTileAt(Math.min(Math.max(sweep.x, box.left + SWEEP_INSET), box.right - SWEEP_INSET), Math.min(Math.max(sweep.y, box.top + SWEEP_INSET), box.bottom - SWEEP_INSET)));
+  sweep.frame = requestAnimationFrame(sweepFrame);
+}
+function endSweep() {
+  if (!sweep) return;
+  const { painting, spread, timer, frame } = sweep;
+  clearTimeout(timer);
+  cancelAnimationFrame(frame);
+  sweep = null;
+  const grid = $('wallpaper-grid');
+  grid.classList.remove('sweeping');
+  for (const tile of grid.querySelectorAll('.wallpaper-tile.arming')) tile.classList.remove('arming');
+  if (!painting) return;
+  // The press already did its work; the click that ends it must not toggle the tile back.
+  swallowClick = true;
+  setTimeout(() => { swallowClick = false; }, 0);
+  if (spread > 1) learnSweep();
+}
+// Sweeping across two or more tiles once, or dismissing the tip, retires the tip for good.
+function learnSweep() {
+  if (!state || state.dragSelectLearned) return;
+  state.dragSelectLearned = true;
+  renderGrid(false);
+  run(send('dragSelectLearned'));
+}
+$('wallpaper-grid').addEventListener('pointerdown', event => {
+  endSweep();
+  if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || state?.page !== 'installed') return;
+  const tile = event.target.closest('.wallpaper-tile');
+  if (!tile || event.target.closest('.tile-favorite')) return;
+  sweep = { pointerId: event.pointerId, startID: tile.dataset.key, x0: event.clientX, y0: event.clientY, x: event.clientX, y: event.clientY, eager: selecting || selection.size > 0 || Boolean(event.target.closest('.tile-check')), painting: false, moved: false };
+  tile.classList.add('arming');
+  sweep.timer = setTimeout(beginSweep, SWEEP_HOLD_MS);
+});
+document.addEventListener('pointermove', event => {
+  if (!sweep || event.pointerId !== sweep.pointerId) return;
+  // The button came up outside the window, where no pointerup reached the page.
+  if (!(event.buttons & 1)) { endSweep(); return; }
+  sweep.x = event.clientX; sweep.y = event.clientY;
+  const id = sweepTileAt(sweep.x, sweep.y);
+  if (sweep.painting) { paintSweep(id); return; }
+  if (!sweep.moved && Math.hypot(sweep.x - sweep.x0, sweep.y - sweep.y0) > SWEEP_SLOP) {
+    // Moving gives up the hold: an ordinary drag outside a selection is left alone.
+    if (!sweep.eager) { endSweep(); return; }
+    sweep.moved = true;
+    clearTimeout(sweep.timer);
+    $('wallpaper-grid').querySelector('.wallpaper-tile.arming')?.classList.remove('arming');
+  }
+  if (sweep.eager && id && id !== sweep.startID) { beginSweep(); paintSweep(id); }
+});
+for (const type of ['pointerup', 'pointercancel']) document.addEventListener(type, event => { if (sweep && event.pointerId === sweep.pointerId) endSweep(); });
+window.addEventListener('blur', endSweep);
+// A tile's artwork would otherwise start a native image drag instead of the sweep.
+$('wallpaper-grid').addEventListener('dragstart', event => { if (state?.page === 'installed') event.preventDefault(); });
 // The top bar doubles as the window's title bar: plain presses on its background move the
 // window and double-clicks follow the system title-bar action. Controls keep their own clicks.
 function titleBarGesture(event) { return event.button === 0 && !event.target.closest('button, select, input, textarea, a, label, [role="dialog"]'); }
@@ -1047,6 +1148,7 @@ document.querySelector('.topbar').addEventListener('mousedown', event => { if (!
 document.querySelector('.topbar').addEventListener('dblclick', event => { if (titleBarGesture(event)) postTitleBarGesture('titleDoubleClick'); });
 function run(promise) { Promise.resolve(promise).catch(error => { localError = error?.message || String(error); renderError(); }); }
 document.addEventListener('click', event => {
+  if (swallowClick) { swallowClick = false; return; }
   if (event.target.closest('#settings-content, #welcome')) return;
   const control = event.target.closest('[data-action]');
   if (!control) {
@@ -1119,6 +1221,7 @@ document.addEventListener('submit', event => {
 document.addEventListener('keydown', event => {
   if (event.target.closest('#settings-content, #welcome')) return;
   if (event.key === 'Escape') {
+    endSweep();
     if (popover) closePopover(true);
     else if ((selection.size || selecting) && !dialogTarget) { selection.clear(); selectionAnchor = null; selecting = false; render(); }
   }

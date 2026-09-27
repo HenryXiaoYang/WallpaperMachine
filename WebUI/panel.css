@@ -294,6 +294,10 @@ small, .muted { color: var(--muted); }
 .selection-bar .selection-count { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
 .selection-bar button { font-size: 12px; min-height: var(--control-height-compact); padding: 2px 8px; }
 .selection-bar button.link { padding: 2px 0; }
+/* The drag-select tip trails the selection actions in the summary row, quiet enough to ignore
+   and gone for good once the user has swept once or pressed Got it. */
+.selection-tip { display: inline-flex; align-items: center; gap: 6px; min-width: 0; color: var(--muted); }
+.selection-tip > svg { flex: none; color: var(--accent); }
 /* Tiles are always square. The grid fills its width with as many columns as the preferred
    tile size allows and never fewer than three: the track minimum is the smaller of the
    preferred size and a third of the width, so the narrowest window still shows three
@@ -306,7 +310,7 @@ small, .muted { color: var(--muted); }
    whenever that check is showing on an Installed tile. --marks is the width the corner marks
    take so the Active badge sits after them. */
 .wallpaper-tile { position: relative; min-width: 0; --corner: 6px; --marks: 0px; scale: 1; z-index: 0; border-radius: var(--radius); transition: scale 220ms cubic-bezier(.2,.7,.2,1), box-shadow 220ms ease, z-index 0s linear 220ms; }
-.wallpaper-tile:is(:hover, :has(:focus-visible)) { scale: 1.08; z-index: 2; box-shadow: var(--shadow-menu); transition-delay: 0s; }
+.wallpaper-tile:is(:hover, :has(:focus-visible)) { z-index: 2; box-shadow: var(--shadow-menu); transition-delay: 0s; }
 .wallpaper-tile:has(> .tile-check):is(.checked, :hover, :focus-within), .wallpaper-grid.selecting .wallpaper-tile:has(> .tile-check) { --corner: 35px; }
 .wallpaper-tile:has(> .tile-marks) { --marks: 24px; }
 .tile-select { display: block; position: relative; width: 100%; aspect-ratio: 1; padding: 0; border: 1px solid transparent; border-radius: inherit; overflow: hidden; text-align: left; background: var(--media-well); }
@@ -364,6 +368,15 @@ small, .muted { color: var(--muted); }
 .tile-favorite[aria-pressed="true"] svg, .actions .favorite-selected svg { fill: currentColor; }
 .tile-check[aria-pressed="true"], .tile-check[aria-pressed="true"]:hover:not(:disabled) { background: var(--primary); color: var(--on-primary); }
 .wallpaper-tile.checked .tile-select { box-shadow: inset 0 0 0 2px var(--primary); border-color: var(--primary); }
+/* Press-and-sweep selection. While a press is held the tile sinks slightly and its check fills
+   in over the hold, so holding visibly does something before it selects; during the sweep the
+   tiles stop lifting under the pointer so the grid holds still, and nothing selects as text. */
+.wallpaper-grid { -webkit-user-select: none; user-select: none; }
+.wallpaper-tile.arming { scale: .97; transition: scale 350ms ease-out; }
+.wallpaper-tile.arming .tile-check { opacity: 1; }
+.wallpaper-tile.arming:not(.checked) .tile-check { animation: tile-arm 350ms ease-in forwards; }
+@keyframes tile-arm { to { box-shadow: inset 0 0 0 14px var(--primary); color: var(--on-primary); } }
+.wallpaper-grid.sweeping .wallpaper-tile { scale: 1; box-shadow: none; transition: none; }
 .active-badge { position: absolute; left: calc(var(--corner) + var(--marks)); top: 6px; border-radius: 3px; background: var(--media-badge); color: var(--media-badge-ink); font-size: 10px; padding: 3px 5px; pointer-events: none; }
 /* Discover download ring, sized the way Wallpaper Engine's own library draws it: the still dims
    behind it, the stroke carries progress, the middle carries the number and the transfer speed,
@@ -659,6 +672,6 @@ progress:indeterminate::-webkit-progress-bar { background: transparent; }
 @media (max-height: 640px) { .inspector-artwork { width: min(100%, 180px); } }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
-  .wallpaper-tile:is(:hover, :has(:focus-visible)) { scale: 1; }
+  .wallpaper-tile.arming { scale: 1; }
   progress:indeterminate { background-position: 50% 0; }
 }
