@@ -170,9 +170,10 @@ final class WebPanelController: NSObject, WKNavigationDelegate {
     configuration.websiteDataStore = .nonPersistent()
     configuration.userContentController = content
     configuration.setURLSchemeHandler(assets, forURLScheme: "mwe-ui")
-    // Same policy as a web wallpaper page: once this view is not in a visible
-    // window, WebKit suspends its timers, rAF and CSS animations. The view stays
-    // in the hierarchy; reveal still delivers the snapshot that was waiting.
+    // The panel sets WebKit's inactive scheduling policy. WebKit applies it when
+    // it considers the view inactive; the view stays in the window tree, so nothing
+    // relies on the page being suspended while hidden. A snapshot skipped while
+    // hidden is delivered on reveal.
     configuration.preferences.inactiveSchedulingPolicy = .suspend
     let view = WKWebView(frame: .zero, configuration: configuration)
     view.navigationDelegate = self
