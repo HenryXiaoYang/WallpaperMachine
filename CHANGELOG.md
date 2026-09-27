@@ -7,6 +7,34 @@ sections list the commits. The GitHub Release body and the app's What's new card
 repeat the section, so the three always say the same thing. See
 [docs/release.md](docs/release.md) for how a version is cut.
 
+## 1.0.1 — 2026-09-27
+
+WallpaperMachine now runs on macOS 15 Sequoia and adds a rebuilt Performance page with an energy readout, battery and playback rules, plus new menu bar shortcuts.
+
+### New
+
+- WallpaperMachine now runs on macOS 15 Sequoia
+- While Settings is open, an energy readout shows the app's CPU and GPU power, a grade, its battery share and a before-and-after comparison when a setting changes
+- A battery option, off until you pick it, keeps wallpapers running, drops to a render scale and frame rate you choose, or pauses them
+- Playback rules can pause or mute wallpapers while chosen apps are frontmost or while another app is playing audio
+- The menu bar item adds Next Wallpaper, which applies the next playable library wallpaper to the target display, and a Lock Screen item
+- Settings → General adds Hide window after applying a wallpaper, on by default, so you can turn it off and keep the window open while previewing
+- Settings can save a redacted diagnostics report for you to attach to a GitHub issue
+- The inspector shows each wallpaper's energy rating
+
+### Improved
+
+- Settings → Performance is rebuilt as one page, covering energy use first, then quality, then playback
+- The frame-rate cap now follows the display's native refresh rate by default
+- A display that goes to sleep now stops its wallpaper
+- The welcome guide gains a Performance step
+
+### Fixed
+
+- Reopening the control panel from the Dock now keeps you on the page you were viewing
+
+**Full changelog**: https://github.com/WallpaperMachine/WallpaperMachine/compare/v1.0.0...v1.0.1
+
 ## 1.0.0 — 2026-09-26
 
 WallpaperMachine 1.0 ships as a drag-to-install disk image and adds a first-run guide with Steam sign-in, optional now-playing support for music wallpapers and many scene rendering fixes.
