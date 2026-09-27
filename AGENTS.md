@@ -6,9 +6,10 @@ sandboxed ExtensionKit lock screen. `CLAUDE.md` must stay a relative symlink to 
 ## Read on demand
 
 Read only task-relevant sections; keep this file to durable rules and routing.
-For any doc over ~300 lines (`architecture.md`, `testing/renderer.md`, feature docs),
-use its section index or `rg -n '^##' <file>` and read with offset/limit; never read
-the whole file. `.ignore` keeps `rg` out of `docs/archive/`, `docs/testing/archive/`,
+For any doc over ~300 lines (`testing/renderer.md`, `release.md`, `LICENSING.md`,
+`architecture.md`, `build.md`, the larger feature docs), use its section index or
+`rg -n '^##' <file>` and read with offset/limit; never read the whole file.
+`.ignore` keeps `rg` out of `docs/archive/`, `docs/testing/archive/`,
 `App/Bridge/Generated/` and `upstream/`; use `rg -u` only when those are the target.
 
 - Placement / runtime: [layout](docs/repository-layout.md), [architecture](docs/architecture.md).
@@ -24,10 +25,13 @@ the whole file. `.ignore` keeps `rg` out of `docs/archive/`, `docs/testing/archi
   message-origin checks; new files need `WebPanelAssets` allowlisting. Network work stays in Swift.
 - `Extension/`: sandboxed extension; `Shared/`: only code compiled by both targets,
   extension-API-safe. Tests: `Tests/Unit/<Domain>/` and opt-in `Tests/UI/`.
-- `scripts/`: Python CLI; reuse `scripts/lib/` (paths, glyphs); tests in `scripts/tests/`.
+- `scripts/`: Python CLI; reuse `scripts/lib/` (paths, glyphs, `xcode.py` quiet tool
+  runner); tests in `scripts/tests/`.
 - `project.yml` owns targets/settings/versions: run `xcodegen generate`, never hand-edit
-  `WallpaperMachine.xcodeproj`. Regenerate `App/Bridge/Generated/` via
-  `scripts/build.py` after bridge changes; never patch generated bindings.
+  `WallpaperMachine.xcodeproj`; change versions only via `scripts/bump_version.py` or a
+  commit-message `release:` line ([release](docs/release.md)). Regenerate
+  `App/Bridge/Generated/` via `scripts/build.py` after bridge changes; never patch
+  generated bindings.
 - `upstream/` is vendored renderer code, not app code. Every change requires updating
   `upstream/provenance.json`; preserve notices and [licensing constraints](LICENSING.md).
 - Match surrounding conventions; reuse `ClientPaths`, `AppLog`, localization and
@@ -36,7 +40,9 @@ the whole file. `.ignore` keeps `rg` out of `docs/archive/`, `docs/testing/archi
 - `artifacts/` = disposable evidence; `build/` = disposable Xcode output. Neither is
   durable evidence or committable; keep secrets/private assets/screenshots/traces out too.
   Coordinate cleanup; preview with `python3 scripts/clean.py --dry-run`, then use
-  `python3 scripts/clean.py` (keeps built apps). `--all` deletes the delivered app.
+  `python3 scripts/clean.py` (keeps built apps). `--all` deletes the delivered app;
+  `--user-assets`/`--managed-user-assets` delete live user wallpaper data (the latter
+  irreversibly): only on explicit request.
 - Agent files: commit policy, never state. Shared agent policy lives only in tracked
   files: `AGENTS.md` (the `CLAUDE.md` symlink) and `docs/`. Agent tool dirs (`.agents/`,
   `.claude/`, `.commandcode/`, `.conductor/`, `.omo/`, `.omp/`, `.pi/`) and
@@ -73,13 +79,13 @@ the whole file. `.ignore` keeps `rg` out of `docs/archive/`, `docs/testing/archi
   or the fix changed a documented behavior. Feature or cross-domain change: full gate
   plus a log entry. Never run the full gate more than once per task unless it failed.
 - Routine gate: `python3 scripts/test.py` (Python → XcodeGen → native unit/integration).
-  Add `python3 scripts/check_renderer.py` for renderer changes; preserve applicable
+  Add `python3 scripts/check_renderer.py` for renderer/bridge changes; preserve applicable
   [renderer/download regressions](docs/testing/renderer.md#regression-areas-that-must-stay-covered).
   Report skipped asset checks as skipped; the [local corpus](docs/testing/wallpaper-corpus.md)
   is not a passing suite. Docs/skill-only changes: check links, paths and commands;
-  no app build or desktop test. Scripts print only failures and a verdict; the full
-  tool output is in the `artifacts/` log they name. Do not rerun with `--verbose`
-  unless the filtered output is not enough to act on.
+  no app build or desktop test. `test.py` and `build.py` print only failures and a
+  verdict; the full tool output is in the `artifacts/` log they name. Do not rerun with
+  `--verbose` unless the filtered output is not enough to act on.
 - Release builds on request, not by default: build when the user asks to build,
   deliver, install or try it, and when a change
   cannot be verified any other way. Otherwise finish at the gate and say the app was
@@ -93,8 +99,9 @@ the whole file. `.ignore` keeps `rg` out of `docs/archive/`, `docs/testing/archi
 - Commits: ask before committing unless the developer's local rules opt in. Whoever
   decides, commit only complete work whose gate passed; one commit per purpose
   (`git add -p` when purposes share a file); stage only this task's files and leave
-  others' edits unstaged; subjects follow
-  [conventions](docs/conventions.md#commits-and-pull-requests). Never push, amend,
+  others' edits unstaged; messages follow
+  [conventions](docs/conventions.md#commits-and-pull-requests) (`feat`/`fix`/`perf`
+  subjects and bodies feed the user-facing release notes). Never push, amend,
   rebase, force or rewrite history unless asked.
 - Personal opt-ins: a developer's local rules (`CLAUDE.local.md`, an agent tool dir)
   may enable exactly two things: committing without asking, and ending app-code tasks
