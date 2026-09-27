@@ -30,17 +30,10 @@ __pycache__/
 # macOS
 .DS_Store
 
-# Agent harness state. Local settings only; the rules themselves are tracked
-# in AGENTS.md, .omp/rules/ and .agents/README.md.
+# Local agent tooling: harness state, rules and vendored skills stay on the
+# developer's machine. Only AGENTS.md (and its CLAUDE.md symlink) is tracked.
 .pi/
-.omp/*
-!.omp/rules/
-.claude/skills/
-
-# Vendored agent skills: third-party copies stay local. Restore them from the
-# upstream commits pinned in .agents/skills/sources.json.
-.agents/*
-!.agents/README.md
-!.agents/skills/
-.agents/skills/*
-!.agents/skills/sources.json
+.omp/
+.claude/
+.agents/
+.commandcode/

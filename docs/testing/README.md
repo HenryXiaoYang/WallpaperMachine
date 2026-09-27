@@ -150,7 +150,7 @@ build. Match the effort to the change:
 | Change | While iterating | Before reporting |
 | --- | --- | --- |
 | Bug fix, refactor, test-only, one domain | `python3 scripts/test.py --only <TestClass>` (repeatable; `Class/testMethod` also works) | full gate once; no Release build, no log entry unless asked or a documented behavior changed |
-| New feature or cross-domain change | targeted runs as above | full gate once, log entry; Release build only if delivery was requested (`.omp/rules/release-build-on-request.md`) |
+| New feature or cross-domain change | targeted runs as above | full gate once, log entry; Release build only if delivery was requested |
 | Renderer / bridge | `cargo test` in the touched crate | full gate plus `scripts/check_renderer.py` |
 | Docs / skills only | link, path and command check | nothing else |
 

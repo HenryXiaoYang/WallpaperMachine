@@ -66,7 +66,7 @@ upstream/                          vendored third-party code only
   mediaremote-adapter/             ungive/mediaremote-adapter, BSD-3-Clause, unmodified; built as an embedded framework
 artifacts/                         Git-ignored: all test and verification evidence
 build/                             Git-ignored: Xcode derived data and built products only
-.agents/                           agent skills and agent-tooling notes
+.agents/, .omp/, .commandcode/    Git-ignored: local agent skills, rules and tooling notes
 .github/workflows/                 CI: build.yml, release.yml, version.yml
 ```
 
