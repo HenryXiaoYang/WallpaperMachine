@@ -25,6 +25,14 @@ move the oldest entries verbatim into
 (or a new dated archive file) first, and promote anything durable before it
 goes. Trimming is allowed; editing an entry's recorded result is not.
 
+## 2026-09-27 — Release CI: app icon compiled on macOS 26; 1.0.1 re-cut
+
+- Cause of the failed v1.0.1 build: on macos-15, Xcode 26.0.1-26.3 actool compiled AppIcon.icon in 6 of 30 probe attempts (exit 255); 30 of 30 on macos-26; Assets.xcassets alone 8 of 8 on macos-15.
+- Fix: build.yml app-icon job (macos-26) runs build.py --compile-app-icon; build (macos-15) uses --app-icon; test job moved to macos-26; cache keys carry the runner macOS; warm-caches runs both.
+- Branch validation runs (ci-probe-actool, deleted): app-icon OK; test on macos-26 643/1 failed -> EnergyUsageMonitorTests live-counter check now skipped in VMs; build failed on Xcode 26.3 type-check timeout in WebPanelSnapshot -> literal split.
+- Local: --app-icon Debug build carries the compiled Assets.car/AppIcon.icns, CFBundleIconName/File, codesign verify OK; Release type-check with 100 ms warning threshold clean; python3 scripts/test.py 645 passed, 0 failed, 11 skipped.
+- Bump f8c439b reverted and remote tag v1.0.1 deleted (no release existed); 1.0.1 re-released by the Version workflow from this push. Final proof is that run.
+
 ## 2026-09-27 — Automatic update check, background download and prompt
 
 - Live smoke (shipped 1.0.0 client code): GitHub API via bobbyhuang-dev rename redirect -> v1.0.0, asset WallpaperMachine-1.0.0-arm64.dmg downloaded (33426526 B, sha256 verified), hdiutil attach + ditto extract + validate passed.
@@ -96,12 +104,3 @@ goes. Trimming is allowed; editing an entry's recorded result is not.
 - BatteryCapacity.fullChargeWattHours on this MacBook Pro: 98.5 Wh (8,532 mAh × 3 × 3.85 V).
 - Not run: live app (no desktop authorization); background recorder and settingChanged wiring unobserved in the running app. Not rebuilt (no Release build).
 - Gap: WKWebView rendering not checked; Chromium only.
-
-## 2026-09-27 — Native refresh default fps; welcome guide Performance step
-
-- cargo test -p wallpaper-bridge --release: 343 passed, 0 failed (new: native-refresh default per descriptor, legacy fps/target_fps migration, top-of-range stored as follow-native).
-- python3 scripts/build.py --renderer-only: OK; bindings regenerated, API unchanged.
-- python3 scripts/check_renderer.py: all generated cases pooled/isolated exit 0, pixels equal, 0 reload-cycle failures.
-- python3 scripts/test.py: 630 passed, 0 failed, 11 skipped (641). First attempt failed to compile on a concurrent AppDelegate edit (startWallpaperEnergyRecorder) by another author; rerun after it landed.
-- ControlPanelShellTests welcome walkthrough: 6 steps; Performance page defaults to High with Native refresh rate readout; Low + 24 fps slider stays draft, Continue sends renderScale 0.5 and frameRateCap 24.
-- Not checked: visual layout of the welcome Performance page on a real display; no desktop run or Release build.

@@ -15,6 +15,15 @@ renderer behaviour and known-failing tests into
 [../renderer.md](../renderer.md), build and code-signing traps into
 [../../build.md](../../build.md).
 
+## 2026-09-27 — Native refresh default fps; welcome guide Performance step
+
+- cargo test -p wallpaper-bridge --release: 343 passed, 0 failed (new: native-refresh default per descriptor, legacy fps/target_fps migration, top-of-range stored as follow-native).
+- python3 scripts/build.py --renderer-only: OK; bindings regenerated, API unchanged.
+- python3 scripts/check_renderer.py: all generated cases pooled/isolated exit 0, pixels equal, 0 reload-cycle failures.
+- python3 scripts/test.py: 630 passed, 0 failed, 11 skipped (641). First attempt failed to compile on a concurrent AppDelegate edit (startWallpaperEnergyRecorder) by another author; rerun after it landed.
+- ControlPanelShellTests welcome walkthrough: 6 steps; Performance page defaults to High with Native refresh rate readout; Low + 24 fps slider stays draft, Continue sends renderScale 0.5 and frameRateCap 24.
+- Not checked: visual layout of the welcome Performance page on a real display; no desktop run or Release build.
+
 ## 2026-09-27 — Release build
 
 - python3 scripts/test.py: 630 passed, 0 failed, 11 skipped
