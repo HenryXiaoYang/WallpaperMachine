@@ -14,7 +14,7 @@ pub use types::{
     BridgeDisplaySettingsRow, BridgeFileFilter, BridgeLibraryScanStatus, BridgeLibrarySnapshot,
     BridgeLockScreenScene, BridgeLogLevel, BridgeLogStatus, BridgeMonitorInfoRow,
     BridgeNativeVideoWallpaper, BridgeMediaSnapshot,
-    BridgeMonitorInformationSnapshot, BridgePlaybackState, BridgePropertyDescriptor,
+    BridgeMonitorInformationSnapshot, BridgePlaybackState, BridgeBatteryMode, BridgePropertyDescriptor,
     BridgePropertyKind, BridgePropertyValue, BridgeRendererCountersReport,
     BridgeRendererSurfaceCounters, BridgeScalingMode, BridgeSceneBackendReport,
     BridgeSceneUpdateModeReport, BridgeSettingsSnapshot, BridgeUserShortcut,
@@ -23,6 +23,26 @@ pub use types::{
     BridgeWallpaperKind, BridgeWallpaperMutationBundle, BridgeWallpaperOptionsSnapshot,
     BridgeWebWallpaper,
 };
+
+impl From<crate::config::BatteryModeCfg> for BridgeBatteryMode {
+    fn from(mode: crate::config::BatteryModeCfg) -> Self {
+        match mode {
+            crate::config::BatteryModeCfg::KeepRunning => Self::KeepRunning,
+            crate::config::BatteryModeCfg::ReducedQuality => Self::ReducedQuality,
+            crate::config::BatteryModeCfg::Pause => Self::Pause,
+        }
+    }
+}
+
+impl From<BridgeBatteryMode> for crate::config::BatteryModeCfg {
+    fn from(mode: BridgeBatteryMode) -> Self {
+        match mode {
+            BridgeBatteryMode::KeepRunning => Self::KeepRunning,
+            BridgeBatteryMode::ReducedQuality => Self::ReducedQuality,
+            BridgeBatteryMode::Pause => Self::Pause,
+        }
+    }
+}
 use wallpaper_core::{
     DisplaySelector, FirstFrameCallback, WallpaperAssignment, WallpaperEngine,
     media::audio::AudioVolume,
@@ -52,8 +72,10 @@ use crate::{
             SetDisplayPresentationSuspended,
             SetFilter, SetGlobalPlayback, SetLaunchAtLogin, SetMirrorMuted, SetMirrorScalingFactor,
             SetMirrorScalingMode, SetMirrorTarget, SetMirrorTargetFps, SetMirrorVolume, SetMuted,
-            SetBatteryQualityProfile, SetContentPacingEnabled, SetMediaIntegrationEnabled,
-            SetPauseOnBatteryPower, SetPresentationSuspended, SetPropertyPath, SetRenderScale,
+            SetAudioSuppressed, SetBatteryMode, SetBatteryQualityProfile, SetContentPacingEnabled,
+            SetFrameRateCap, SetMediaIntegrationEnabled,
+            SetPresentationUnloaded, SetPresentationSuspended, SetPropertyPath, SetRenderScale,
+            SetVerboseLogging,
             SetRendererCountersEnabled, SetScalingFactor, SetScalingMode,
             SetSceneOnDemandEnabled, SetSceneOptimizationEnabled, SetSceneRenderer,
             SetSceneVideoPlaneSamplingEnabled, SetSharedVideoDecodeEnabled, SetTargetFps,
@@ -170,6 +192,33 @@ impl<E: EngineFacade> BridgeBuilder<E> {
         if let Some(source) = startup_power_source {
             state.apply_startup_power_source(source);
             log::info!("startup power source sampled: {source:?}");
+        }
+        {
+            let config = &state.app_config;
+            crate::logging::ApplicationLogger::set_verbose(config.diagnostics.verbose_logging);
+            // What the renderer was asked to do, so a report says which
+            // preferences were in force when a wallpaper misbehaved.
+            log::info!(
+                "configuration: scene renderer {:?}, video backend {:?}, render scale {}, \
+                 battery mode {:?} ({} fps, scale {}), frame-rate cap {}, scene optimization \
+                 {}, on-demand {}, content pacing {}, shared video decode {}, video plane \
+                 sampling {}",
+                config.scene_renderer,
+                config.video_backend,
+                config.quality.render_scale,
+                config.power.on_battery,
+                config.quality.battery.target_fps,
+                config.quality.battery.render_scale,
+                config
+                    .quality
+                    .frame_rate_cap
+                    .map_or_else(|| "none".to_string(), |cap| cap.to_string()),
+                config.quality.scene_optimization_enabled,
+                config.quality.scene_on_demand_enabled,
+                config.experimental.content_pacing,
+                config.experimental.shared_video_decode,
+                config.experimental.scene_video_plane_sampling,
+            );
         }
 
         let engine = ArcEngineFacade::new(self.engine);
@@ -799,6 +848,11 @@ impl WallpaperBridge {
         self.actor.ask(GetSettingsSnapshot).await
     }
 
+    /// Writes one line from the host. `load` attributes it to a wallpaper load
+    /// from [`Self::begin_host_load_log`]; `unix_millis` is when the host
+    /// produced it, so lines it buffered before the bridge existed keep their
+    /// time.
+    ///
     /// # Errors
     ///
     /// Returns an error when GUI log emission cannot be accepted.
@@ -809,6 +863,8 @@ impl WallpaperBridge {
         file: String,
         line: u32,
         message: String,
+        load: Option<u64>,
+        unix_millis: Option<i64>,
     ) -> Result<(), BridgeError> {
         let level = match level {
             BridgeLogLevel::Trace => log::Level::Trace,
@@ -817,8 +873,39 @@ impl WallpaperBridge {
             BridgeLogLevel::Warn => log::Level::Warn,
             BridgeLogLevel::Error => log::Level::Error,
         };
-        crate::logging::ApplicationLogger::emit_gui_log(level, &file, line, &message);
+        crate::logging::ApplicationLogger::emit_gui_log(
+            level,
+            &file,
+            line,
+            &message,
+            load,
+            unix_millis,
+        );
         Ok(())
+    }
+
+    /// Starts the log of a wallpaper load the host performs itself (web
+    /// pages, native video): allocates its `load#N` and writes the header
+    /// naming the project at `project_path` and the host's `detail`.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn begin_host_load_log(&self, kind: String, project_path: String, detail: String) -> u64 {
+        wallpaper_core::log_context::begin_load(
+            &kind,
+            std::path::Path::new(&project_path),
+            detail,
+        )
+    }
+
+    /// Records debug-level lines too, from now on and after relaunch.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the setting cannot be persisted.
+    pub async fn set_verbose_logging(
+        &self,
+        enabled: bool,
+    ) -> Result<BridgeSnapshotBundle, BridgeError> {
+        self.actor.ask(SetVerboseLogging { enabled }).await
     }
 
     /// # Errors
@@ -1162,15 +1249,68 @@ impl WallpaperBridge {
         self.actor.ask(SetLaunchAtLogin { enabled }).await
     }
 
+    /// Chooses what wallpapers do on battery: keep running, reduced quality,
+    /// or pause. Leaving pause resumes a pause this policy asked for. Leaving
+    /// reduced quality restores the saved scale and rates immediately.
+    ///
     /// # Errors
     ///
     /// Returns an error when the setting cannot be persisted or an immediate
     /// power-policy playback transition fails.
-    pub async fn set_pause_on_battery_power(
+    pub async fn set_battery_mode(
         &self,
-        enabled: bool,
+        mode: BridgeBatteryMode,
     ) -> Result<BridgeSnapshotBundle, BridgeError> {
-        self.actor.ask(SetPauseOnBatteryPower { enabled }).await
+        self.actor
+            .ask(SetBatteryMode {
+                mode: mode.into(),
+            })
+            .await
+    }
+
+    /// Sets the global frame-rate ceiling. `None` means no limit. A number is
+    /// stored at least 1. Open scenes take it live; saved per-display rates
+    /// are not rewritten.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the cap cannot be saved or a running scene
+    /// rejects the resulting rate.
+    pub async fn set_frame_rate_cap(
+        &self,
+        cap: Option<u32>,
+    ) -> Result<BridgeSnapshotBundle, BridgeError> {
+        self.actor.ask(SetFrameRateCap { cap }).await
+    }
+
+    /// Closes every scene runtime so the host can free wallpaper memory,
+    /// without changing assignments. Clearing it opens the configured scenes
+    /// again, paused if playback is paused.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the scene list cannot be reconciled. The previous
+    /// unload state is restored and a repair is scheduled.
+    pub async fn set_presentation_unloaded(
+        &self,
+        unloaded: bool,
+    ) -> Result<BridgeSnapshotBundle, BridgeError> {
+        self.actor
+            .ask(SetPresentationUnloaded { unloaded })
+            .await
+    }
+
+    /// Mutes or restores every open scene on top of its saved mute. Not
+    /// persisted. A user unmute while this is set stays muted until it clears.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a running scene rejects the mute.
+    pub async fn set_audio_suppressed(
+        &self,
+        suppressed: bool,
+    ) -> Result<BridgeSnapshotBundle, BridgeError> {
+        self.actor.ask(SetAudioSuppressed { suppressed }).await
     }
 
     /// Suspends or resumes rendering and system-audio capture for every
@@ -1299,12 +1439,10 @@ impl WallpaperBridge {
         self.actor.ask(SetRenderScale { scale }).await
     }
 
-    /// Sets the quality profile used while the machine is on battery power.
+    /// Sets the scale and frame rate used while battery mode is reduced quality.
     ///
-    /// Disabling it restores the user's saved render scale and per-display
-    /// target rates immediately, rather than waiting for the next power
-    /// transition. It never changes playback, so a pause the user asked for
-    /// survives.
+    /// Does not itself select that mode. A machine already on reduced quality
+    /// picks the new values up immediately.
     ///
     /// # Errors
     ///
@@ -1312,13 +1450,11 @@ impl WallpaperBridge {
     /// rejects the resulting scale or rate.
     pub async fn set_battery_quality_profile(
         &self,
-        enabled: bool,
         render_scale: f32,
         target_fps: u32,
     ) -> Result<BridgeSnapshotBundle, BridgeError> {
         self.actor
             .ask(SetBatteryQualityProfile {
-                enabled,
                 render_scale,
                 target_fps,
             })

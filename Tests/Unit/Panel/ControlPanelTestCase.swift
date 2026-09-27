@@ -74,15 +74,27 @@ final class LayoutSnapshotBridge: WallpaperBridge {
   @MainActor var holdOptions = false
   @MainActor var pendingOptions: [CheckedContinuation<BridgeWallpaperOptionsSnapshot, Error>] = []
   /// Settings writes the panel commits; a provider stands in for the engine's reply.
-  @MainActor var pauseOnBatteryCalls: [Bool] = []
+  @MainActor var batteryModeCalls: [BridgeBatteryMode] = []
+  @MainActor var renderScaleCalls: [Float] = []
+  @MainActor var frameRateCapCalls: [UInt32?] = []
   @MainActor var bundleProvider: (@MainActor () -> BridgeSnapshotBundle)?
 
-  override func setPauseOnBatteryPower(enabled: Bool) async throws -> BridgeSnapshotBundle {
-    try await MainActor.run {
-      pauseOnBatteryCalls.append(enabled)
-      guard let bundle = bundleProvider?() ?? snapshot else { throw CancellationError() }
-      return bundle
-    }
+  override func setBatteryMode(mode: BridgeBatteryMode) async throws -> BridgeSnapshotBundle {
+    try await reply { $0.batteryModeCalls.append(mode) }
+  }
+
+  override func setRenderScale(scale: Float) async throws -> BridgeSnapshotBundle {
+    try await reply { $0.renderScaleCalls.append(scale) }
+  }
+
+  override func setFrameRateCap(cap: UInt32?) async throws -> BridgeSnapshotBundle {
+    try await reply { $0.frameRateCapCalls.append(cap) }
+  }
+
+  @MainActor private func reply(_ record: @MainActor (LayoutSnapshotBridge) -> Void) throws -> BridgeSnapshotBundle {
+    record(self)
+    guard let bundle = bundleProvider?() ?? snapshot else { throw CancellationError() }
+    return bundle
   }
 
   override func wallpaperOptionsSnapshot(wallpaperId: String) async throws -> BridgeWallpaperOptionsSnapshot {
@@ -251,7 +263,7 @@ final class PanelFixture {
     _ = try await js("""
       const welcome = document.getElementById('welcome');
       if (!welcome.hidden) {
-        welcome.querySelector('[data-action="go"][data-step="4"]').click();
+        welcome.querySelector('[data-action="go"][data-step="5"]').click();
         welcome.querySelector('[data-action="finish"]').click();
       }
       """)

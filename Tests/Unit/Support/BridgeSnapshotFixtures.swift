@@ -49,11 +49,12 @@ enum BridgeSnapshotFixtures {
   }
 
   /// A settings snapshot carrying shipped defaults: compatibility backend, full
-  /// render scale, no battery profile, both experiments off and scene optimisation
-  /// on. Tests that care about one of those pass it explicitly.
+  /// render scale, keep-running on battery, no frame-rate cap, both experiments
+  /// off and scene optimisation on. Tests that care about one of those pass it
+  /// explicitly.
   static func settings(
     displays: [BridgeDisplaySettingsRow] = [],
-    pauseOnBatteryPower: Bool = false,
+    batteryMode: BridgeBatteryMode = .keepRunning,
     videoBackend: String = "compatibility",
     videoBackends: [BridgeVideoBackendReport] = [],
     contentPacingEnabled: Bool = false,
@@ -69,7 +70,7 @@ enum BridgeSnapshotFixtures {
     userAssetsPath: String = "/tmp/UserAssets",
     renderScale: Float = 1,
     preferredRenderScale: Float = 1,
-    batteryProfileEnabled: Bool = false,
+    frameRateCap: UInt32? = nil,
     batteryRenderScale: Float = 0.75,
     batteryTargetFps: UInt32 = 30,
     onBatteryPower: Bool = false,
@@ -79,7 +80,8 @@ enum BridgeSnapshotFixtures {
       displays: displays,
       launchAtLoginAvailable: false,
       launchAtLoginEnabled: false,
-      pauseOnBatteryPower: pauseOnBatteryPower,
+      batteryMode: batteryMode,
+      verboseLogging: false,
       gitSha: "",
       bridgeVersion: "",
       coreVersion: "",
@@ -100,7 +102,7 @@ enum BridgeSnapshotFixtures {
       userAssetsPath: userAssetsPath,
       renderScale: renderScale,
       preferredRenderScale: preferredRenderScale,
-      batteryProfileEnabled: batteryProfileEnabled,
+      frameRateCap: frameRateCap,
       batteryRenderScale: batteryRenderScale,
       batteryTargetFps: batteryTargetFps,
       onBatteryPower: onBatteryPower,

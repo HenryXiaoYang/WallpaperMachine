@@ -39,6 +39,16 @@ typedef void (*owe_user_shortcut_callback_drop)(void* user_data);
 
 void owe_set_log_callback(owe_log_callback callback);
 
+/*
+ * Log scopes: a host-assigned load number carried by every line a scene's
+ * threads log, zero meaning untagged. `owe_current_log_scope` reads the calling
+ * thread's scope, so the host's log sink can tag lines from renderer threads.
+ * `owe_scene_wallpaper_set_log_scope` must be called before
+ * `owe_scene_wallpaper_init`, which starts the scene's threads.
+ */
+uint64_t owe_current_log_scope(void);
+int owe_scene_wallpaper_set_log_scope(owe_scene_wallpaper* scene, uint64_t scope);
+
 /* Renderer lifetime. */
 int owe_scene_wallpaper_new(owe_scene_wallpaper** out_scene);
 int owe_scene_wallpaper_delete(owe_scene_wallpaper* scene);

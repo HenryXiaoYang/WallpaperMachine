@@ -32,6 +32,8 @@ final class BridgeStore {
     /// delivered".
     @ObservationIgnored var webWallpaperDeliveryStatus: (@MainActor () -> WebWallpaperHost.DeliveryStatus)?
     @ObservationIgnored var sceneMediaAvailability: (@MainActor () -> SystemMediaAvailability)?
+    /// Per-wallpaper energy ratings, owned by the app delegate's background recorder.
+    @ObservationIgnored var wallpaperEnergyRatings: WallpaperEnergyRatings?
     let editorState = WallpaperEditorState()
     private(set) var activatingWallpaperID: String?
     private(set) var applyingWallpaperID: String?
@@ -433,8 +435,13 @@ final class BridgeStore {
         apply(bundle)
     }
 
-    func setPauseOnBatteryPowerAsync(enabled: Bool) async throws {
-        let bundle = try await bridge.setPauseOnBatteryPower(enabled: enabled)
+    func setBatteryModeAsync(_ mode: BridgeBatteryMode) async throws {
+        let bundle = try await bridge.setBatteryMode(mode: mode)
+        apply(bundle)
+    }
+
+    func setVerboseLoggingAsync(enabled: Bool) async throws {
+        let bundle = try await bridge.setVerboseLogging(enabled: enabled)
         apply(bundle)
     }
 
@@ -448,9 +455,24 @@ final class BridgeStore {
         apply(bundle)
     }
 
-    func setBatteryQualityProfileAsync(enabled: Bool, renderScale: Float, targetFps: UInt32) async throws {
+    func setBatteryQualityProfileAsync(renderScale: Float, targetFps: UInt32) async throws {
         let bundle = try await bridge.setBatteryQualityProfile(
-            enabled: enabled, renderScale: renderScale, targetFps: targetFps)
+            renderScale: renderScale, targetFps: targetFps)
+        apply(bundle)
+    }
+
+    func setFrameRateCapAsync(_ cap: UInt32?) async throws {
+        let bundle = try await bridge.setFrameRateCap(cap: cap)
+        apply(bundle)
+    }
+
+    func setPresentationUnloadedAsync(_ unloaded: Bool) async throws {
+        let bundle = try await bridge.setPresentationUnloaded(unloaded: unloaded)
+        apply(bundle)
+    }
+
+    func setAudioSuppressedAsync(_ suppressed: Bool) async throws {
+        let bundle = try await bridge.setAudioSuppressed(suppressed: suppressed)
         apply(bundle)
     }
 
@@ -640,10 +662,6 @@ final class BridgeStore {
         URL(fileURLWithPath: try bridge.logFolderPath(), isDirectory: true)
     }
 
-    func emitLog(level: BridgeLogLevel, file: String, line: UInt32, message: String) throws {
-        try bridge.emitGuiLog(level: level, file: file, line: line, message: message)
-    }
-
     private struct Snapshots {
         let app: BridgeAppSnapshot
         let library: BridgeLibrarySnapshot
@@ -674,7 +692,8 @@ final class BridgeStore {
                 displays: [],
                 launchAtLoginAvailable: false,
                 launchAtLoginEnabled: false,
-                pauseOnBatteryPower: false,
+                batteryMode: .keepRunning,
+                verboseLogging: false,
                 gitSha: "",
                 bridgeVersion: "",
                 coreVersion: "",
@@ -703,7 +722,7 @@ final class BridgeStore {
                 userAssetsPath: "",
                 renderScale: 1,
                 preferredRenderScale: 1,
-                batteryProfileEnabled: false,
+                frameRateCap: nil,
                 batteryRenderScale: 0.75,
                 batteryTargetFps: 30,
                 onBatteryPower: false,

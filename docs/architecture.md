@@ -78,10 +78,22 @@ Protocol, both directions:
   hidden, miniaturized or occluded. Observation is installed with
   `withObservationTracking { trackSnapshotDependencies() }`, so any observed store property that
   the snapshot reads re-arms an update.
+  The one exception is the Settings energy readout, pushed every two seconds as
+  `window.wallpaperUI.energy(reading)` so it patches its own row instead of re-rendering the
+  panel. Sampling runs only while the window is visible on Settings. See
+  [features/performance.md](features/performance.md#energy-use). Separately, the app
+  delegate's `WallpaperEnergyRecorder` samples every 30 s while one wallpaper plays alone
+  with the panel off screen and keeps per-wallpaper ratings in `<support>/EnergyRatings.json`;
+  library items carry them as `energy`, read with the rest of the snapshot. See
+  [per-wallpaper energy rating](features/performance.md#per-wallpaper-energy-rating).
 - **Page to Swift.** `panel.js` calls `window.webkit.messageHandlers.native` with an `action`
   string plus arguments. The handler is a `WKScriptMessageHandlerWithReply`, so every action is
   answered with either a fresh snapshot or an error string. `WebPanelController.receive` rejects
   any message that is not from the main frame of the `mwe-ui://app` origin.
+  Do not post actions from the render path. An earlier version posted the visible Settings tab from
+  `settings.js` `draw()`, i.e. while rendering a native push, and hung the offscreen
+  `ControlPanelSyncTests`/`ControlPanelShellTests` panel suites until their time limit; the
+  cause was not isolated.
 - **Theme.** `theme.js` reads `window.__appTheme`, injected as the panel's only `WKUserScript` at
   document start so the resolved appearance is correct before first paint;
   `window.appTheme.apply(theme)` is called on every snapshot.
@@ -98,7 +110,8 @@ holds the `WallpaperBridge` handle and the cached snapshot values (`appSnapshot`
 `onSnapshotApplied` so `AppDelegate` can re-evaluate presentation policy and lock-screen state.
 `App/ViewModels/WallpaperEditorState.swift` holds transient editor drafts (scaling text,
 property text, expanded sections) that must not be pushed into the renderer on every keystroke.
-`App/Logging/AppLog.swift` forwards Swift log lines into the Rust log channel via the store.
+`App/Logging/AppLog.swift` writes Swift log lines straight into the bridge's log from any thread, holding
+those logged before the bridge exists; see [Logs and diagnostics reports](features/diagnostics.md).
 
 ### Service layer
 
@@ -107,7 +120,7 @@ Services are grouped by domain under `App/Services/`.
 | Domain | Types | Responsibility |
 |---|---|---|
 | `Appearance/` | `AppTheme` (`AppThemePreferences`, `AppThemeStore`) | Mode/accent/tone preferences shared by AppKit and the page |
-| `Desktop/` | `DesktopSpaceWallpaperAPI`, `DesktopWallpaperLedger`, `DesktopWallpaperSync`, `WallpaperPresentationPolicy` | Per-Space desktop picture control, original-wallpaper journal, still-poster sync, per-display renderer suspension |
+| `Desktop/` | `DesktopSpaceWallpaperAPI`, `DesktopWallpaperLedger`, `DesktopWallpaperSync`, `PlaybackPreferences`, `AppRuleMonitor`, `OtherAudioMonitor`, `WallpaperPresentationPolicy` | Per-Space desktop picture control, original-wallpaper journal, still-poster sync, playback rules, per-display renderer suspension |
 | `GitHub/` | `GitHubReleaseClient`, `AppUpdateModels`, `AppUpdateStore`, `AppUpdateInstaller` | GitHub Releases update check, download, in-place install |
 | `Library/` | `ClientPaths`, `WallpaperImportService`, `WallpaperDeletionService` | App-support layout, non-destructive import, guarded deletion |
 | `LockScreen/` | `LockScreenWallpaperSelection`, `LockScreenWallpaperService` | System lock-screen selection overrides and configuration publishing |
@@ -151,13 +164,17 @@ Swift keeps the *system* wallpaper consistent with that window:
   matches the animated one; a Space change or wake re-applies the existing poster instead of
   capturing another. It suspends itself while the native lock-screen provider owns the
   desktop.
-- `WallpaperPresentationPolicy` suspends presentation when no wallpaper pixel can reach a
-  display, without altering the user's play/pause choice. Display sleep and session lock are
-  global conditions and use `setPresentationSuspended`; occlusion is per display and uses
-  `setDisplayPresentationSuspended`, so one covered screen stops only its own decoding,
-  simulation and rendering and a visible screen never resumes a covered one. The bridge keeps
-  `suspended_displays` beside the global flag, resolves each scene's and web descriptor's paused
-  state from its own display, and re-applies the still-hidden displays after a global resume.
+- `WallpaperPresentationPolicy` suspends or unloads presentation when no wallpaper pixel can reach a
+  display, without altering the user's play/pause choice. The strongest global condition wins:
+  display sleep pauses (`setPresentationSuspended`) or stops and frees renderer memory
+  (`setPresentationUnloaded`) per `PlaybackPreferences.displaySleepAction`; session lock, an active
+  pause rule, or other-app audio set to pause suspend; an active stop rule unloads.
+  `AppRuleMonitor` and `OtherAudioMonitor` feed those conditions, and wallpaper audio is suppressed
+  separately (`setAudioSuppressed`) for a mute rule or other-app audio set to mute. Occlusion stays
+  per display via `setDisplayPresentationSuspended`, so one covered screen stops only its own
+  decoding, simulation and rendering and a visible screen never resumes a covered one. The bridge
+  keeps `suspended_displays` beside the global flag, resolves each scene's and web descriptor's
+  paused state from its own display, and re-applies the still-hidden displays after a global resume.
   System audio capture follows visible consumers — a presenting scene with audio response
   enabled — rather than the global pause flag.
 

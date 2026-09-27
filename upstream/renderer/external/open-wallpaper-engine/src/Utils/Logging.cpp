@@ -13,6 +13,7 @@ constexpr const char* level_fmt[]   = { "%-5s", "%-5s %s:%d " };
 namespace
 {
 std::atomic<WallpaperLogCallback> g_log_callback { nullptr };
+thread_local uint64_t             t_log_scope { 0 };
 
 std::string format_message(const char* fmt, std::va_list args)
 {
@@ -33,6 +34,10 @@ void SetWallpaperLogCallback(WallpaperLogCallback callback)
 {
     g_log_callback.store(callback, std::memory_order_release);
 }
+
+void SetWallpaperLogScope(uint64_t scope) { t_log_scope = scope; }
+
+uint64_t WallpaperLogScope() { return t_log_scope; }
 
 void WallpaperLog(int level, const char* file, int line, const char* fmt, ...) {
     std::va_list args;

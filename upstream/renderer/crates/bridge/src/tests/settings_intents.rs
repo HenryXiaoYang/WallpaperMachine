@@ -2535,7 +2535,7 @@ async fn mirrored_wallpaper_bridge() -> (WallpaperBridge, FakeEngineFacade, Stri
                 selector: secondary_selector,
                 scaling_mode: "fill".to_string(),
                 scaling_factor: 1.25,
-                target_fps: 30,
+                frame_rate: Some(30),
                 volume: 0.2,
                 muted: true,
             }],
@@ -2650,4 +2650,29 @@ fn assert_latest_scene(engine: &FakeEngineFacade, display_id: u32, workshop_id: 
         "display {display_id} should use wallpaper {workshop_id}, got {}",
         scene.scene_path
     );
+}
+
+#[tokio::test]
+async fn verbose_logging_persists_across_relaunch_and_can_be_turned_off() {
+    let root = tempfile::tempdir().unwrap();
+    let store = ConfigStore::open(root.path().to_path_buf());
+    let bridge = BridgeBuilder::new(FakeEngineFacade::default())
+        .with_config_store(store.clone())
+        .build()
+        .expect("tokio runtime and config load for wallpaper bridge");
+    assert!(!bridge.settings_snapshot().await.unwrap().verbose_logging);
+
+    let snapshot = bridge.set_verbose_logging(true).await.unwrap();
+    assert!(snapshot.settings.verbose_logging);
+    drop(bridge);
+
+    let relaunched = BridgeBuilder::new(FakeEngineFacade::default())
+        .with_config_store(ConfigStore::open(root.path().to_path_buf()))
+        .build()
+        .expect("tokio runtime and config load for wallpaper bridge");
+    assert!(relaunched.settings_snapshot().await.unwrap().verbose_logging);
+
+    let snapshot = relaunched.set_verbose_logging(false).await.unwrap();
+    assert!(!snapshot.settings.verbose_logging);
+    assert!(!store.load().unwrap().config.diagnostics.verbose_logging);
 }

@@ -339,6 +339,8 @@ extern "C" void owe_set_log_callback(owe_log_callback callback)
     SetWallpaperLogCallback(callback);
 }
 
+extern "C" uint64_t owe_current_log_scope(void) { return WallpaperLogScope(); }
+
 extern "C" int owe_scene_wallpaper_new(owe_scene_wallpaper** out_scene)
 {
     clear_last_error();
@@ -352,6 +354,15 @@ extern "C" int owe_scene_wallpaper_delete(owe_scene_wallpaper* scene)
 {
     clear_last_error();
     delete scene;
+    return 0;
+}
+
+extern "C" int owe_scene_wallpaper_set_log_scope(owe_scene_wallpaper* scene, uint64_t scope)
+{
+    clear_last_error();
+    if (!valid_scene(scene)) return finish_with_error("scene must not be null");
+    if (scene->scene.inited()) return finish_with_error("log scope must be set before init");
+    scene->scene.setLogScope(scope);
     return 0;
 }
 

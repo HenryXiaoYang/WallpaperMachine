@@ -19,10 +19,10 @@ async fn pause_on_battery_setting_persists_and_appears_in_settings_snapshot() {
         .build()
         .expect("tokio runtime and config load for wallpaper bridge");
 
-    let snapshot = bridge.set_pause_on_battery_power(true).await.unwrap();
+    let snapshot = bridge.set_battery_mode(crate::BridgeBatteryMode::Pause).await.unwrap();
 
-    assert!(snapshot.settings.pause_on_battery_power);
-    assert!(store.load().unwrap().config.power.pause_on_battery_power);
+    assert_eq!(snapshot.settings.battery_mode, crate::BridgeBatteryMode::Pause);
+    assert_eq!(store.load().unwrap().config.power.on_battery, crate::config::BatteryModeCfg::Pause);
 }
 
 #[test]
@@ -51,7 +51,8 @@ async fn startup_battery_sample_from_builder_waits_for_first_frame() {
     store
         .save_app_config(&AppConfig {
             power: PowerCfg {
-                pause_on_battery_power: true,
+                on_battery: crate::config::BatteryModeCfg::Pause,
+                ..PowerCfg::default()
             },
             ..AppConfig::default()
         })
@@ -84,7 +85,8 @@ async fn startup_battery_sample_from_builder_is_app_launch_only() {
     store
         .save_app_config(&AppConfig {
             power: PowerCfg {
-                pause_on_battery_power: true,
+                on_battery: crate::config::BatteryModeCfg::Pause,
+                ..PowerCfg::default()
             },
             ..AppConfig::default()
         })
@@ -118,7 +120,7 @@ async fn enabling_pause_on_battery_while_on_battery_auto_pauses_playback() {
         .expect("tokio runtime and config load for wallpaper bridge");
 
     bridge.set_power_source_for_test(PowerSource::Battery).await;
-    bridge.set_pause_on_battery_power(true).await.unwrap();
+    bridge.set_battery_mode(crate::BridgeBatteryMode::Pause).await.unwrap();
 
     assert_eq!(
         bridge.app_snapshot().await.unwrap().playback_state,
@@ -134,7 +136,7 @@ async fn external_power_resumes_only_when_bridge_auto_paused_playback() {
         .build()
         .expect("tokio runtime and config load for wallpaper bridge");
 
-    bridge.set_pause_on_battery_power(true).await.unwrap();
+    bridge.set_battery_mode(crate::BridgeBatteryMode::Pause).await.unwrap();
     bridge.set_power_source_for_test(PowerSource::Battery).await;
     wait_for_paused_calls(&engine, &[true]);
 
@@ -156,7 +158,7 @@ async fn manual_resume_on_battery_suppresses_auto_pause_until_next_battery_trans
         .build()
         .expect("tokio runtime and config load for wallpaper bridge");
 
-    bridge.set_pause_on_battery_power(true).await.unwrap();
+    bridge.set_battery_mode(crate::BridgeBatteryMode::Pause).await.unwrap();
     bridge.set_power_source_for_test(PowerSource::Battery).await;
     wait_for_paused_calls(&engine, &[true]);
 
@@ -183,7 +185,7 @@ async fn battery_transition_does_not_resume_playback_that_user_paused_first() {
         .expect("tokio runtime and config load for wallpaper bridge");
 
     bridge.pause_all().await.unwrap();
-    bridge.set_pause_on_battery_power(true).await.unwrap();
+    bridge.set_battery_mode(crate::BridgeBatteryMode::Pause).await.unwrap();
     bridge.set_power_source_for_test(PowerSource::Battery).await;
     bridge
         .set_power_source_for_test(PowerSource::External)
@@ -203,7 +205,7 @@ async fn startup_on_battery_defers_auto_pause_until_initial_frame_is_ready() {
         .build()
         .expect("tokio runtime and config load for wallpaper bridge");
 
-    bridge.set_pause_on_battery_power(true).await.unwrap();
+    bridge.set_battery_mode(crate::BridgeBatteryMode::Pause).await.unwrap();
     bridge
         .set_initial_power_source_for_test(PowerSource::Battery)
         .await;
@@ -230,7 +232,7 @@ async fn startup_on_battery_auto_pauses_after_engine_first_frame_callback() {
         .build()
         .expect("tokio runtime and config load for wallpaper bridge");
 
-    bridge.set_pause_on_battery_power(true).await.unwrap();
+    bridge.set_battery_mode(crate::BridgeBatteryMode::Pause).await.unwrap();
     bridge
         .set_initial_power_source_for_test(PowerSource::Battery)
         .await;
@@ -252,7 +254,7 @@ async fn startup_first_frame_after_manual_resume_on_battery_does_not_pause_again
         .build()
         .expect("tokio runtime and config load for wallpaper bridge");
 
-    bridge.set_pause_on_battery_power(true).await.unwrap();
+    bridge.set_battery_mode(crate::BridgeBatteryMode::Pause).await.unwrap();
     bridge
         .set_initial_power_source_for_test(PowerSource::Battery)
         .await;
@@ -278,7 +280,7 @@ async fn initial_battery_sample_after_first_frame_auto_pauses_immediately() {
         .build()
         .expect("tokio runtime and config load for wallpaper bridge");
 
-    bridge.set_pause_on_battery_power(true).await.unwrap();
+    bridge.set_battery_mode(crate::BridgeBatteryMode::Pause).await.unwrap();
     bridge.initial_frame_ready_for_test().await;
     bridge
         .set_initial_power_source_for_test(PowerSource::Battery)
@@ -298,7 +300,7 @@ async fn duplicate_initial_battery_sample_after_manual_resume_does_not_pause_aga
         .build()
         .expect("tokio runtime and config load for wallpaper bridge");
 
-    bridge.set_pause_on_battery_power(true).await.unwrap();
+    bridge.set_battery_mode(crate::BridgeBatteryMode::Pause).await.unwrap();
     bridge
         .set_initial_power_source_for_test(PowerSource::Battery)
         .await;
@@ -325,7 +327,7 @@ async fn scene_first_frame_after_manual_resume_on_battery_does_not_pause_again()
         .build()
         .expect("tokio runtime and config load for wallpaper bridge");
 
-    bridge.set_pause_on_battery_power(true).await.unwrap();
+    bridge.set_battery_mode(crate::BridgeBatteryMode::Pause).await.unwrap();
     bridge
         .set_initial_power_source_for_test(PowerSource::Battery)
         .await;

@@ -16,7 +16,7 @@ final class ControlPanelLibraryTests: ControlPanelTestCase {
       """
       const welcome = document.getElementById('welcome');
       if (!welcome.hidden) {
-        welcome.querySelector('[data-action="go"][data-step="4"]').click();
+        welcome.querySelector('[data-action="go"][data-step="5"]').click();
         welcome.querySelector('[data-action="finish"]').click();
       }
       const deadline = Date.now() + 5000;
@@ -403,6 +403,62 @@ final class ControlPanelLibraryTests: ControlPanelTestCase {
       XCTAssertEqual(discover?["x"] as? [String], ["approved"], "Steam's Approved tag marks a Discover tile")
       XCTAssertEqual(discover?["y"] as? [String], [])
       XCTAssertEqual(discover?["noCheck"] as? Bool, true, "Discover tiles have no select check to step past")
+    }
+  }
+
+  /// An installed wallpaper that can run offers a GitHub report beneath its compatibility note,
+  /// prefilled with the running app's version and the backend drawing it. When applying it
+  /// fails, the failure takes that link's place and its report carries the error.
+  func testInspectorReportLinkCarriesRendererAndApplyFailureWithoutWindow() async throws {
+    try await withPanel { panel in
+      try await panel.finishWelcome()
+      panel.show()
+      try await panel.waitJS("powerProbe.received.length >= 1")
+      let result = try await panel.js("""
+        const waitFor = async predicate => {
+          const deadline = Date.now() + 5000;
+          while (!predicate()) {
+            if (Date.now() > deadline) throw new Error('The inspector did not show the failure');
+            await new Promise(resolve => setTimeout(resolve, 20));
+          }
+        };
+        const base = window.powerProbe.received.at(-1);
+        const wallpaper = (id, title, kind) => ({ id, title, kind, size: 100, preview: null, active: false, supported: true, tags: [] });
+        const wallpapers = [wallpaper('tool', 'Tool', 'Application'), wallpaper('ghost', 'Ghost', 'Scene')];
+        const settings = Object.assign({}, base.settings, { sceneRenderers: [
+          { displayId: 1, display: 'Main', wallpaperId: 'ghost', wallpaperTitle: 'Ghost', backend: 'legacy_vulkan', fallbackReason: 'lit particles', videoPath: 'none', optimizationApplied: null },
+        ] });
+        const select = id => window.wallpaperUI.receive(Object.assign({}, base, { page: 'installed', wallpapers, selectedID: id, settings, targetDisplayID: 'primary' }));
+        const plainReport = () => document.querySelector('#inspector .inspector-report')?.dataset.url || '';
+        select('tool');
+        const application = plainReport();
+        select('ghost');
+        const plain = plainReport();
+        // Native knows no 'ghost', so applying it fails for real; held pushes keep this snapshot on screen.
+        window.powerProbe.hold = true;
+        document.querySelector('#inspector [data-action="activate"]').click();
+        await waitFor(() => document.querySelector('#inspector .inspector-failure'));
+        const failure = document.querySelector('#inspector .inspector-failure');
+        return { application, plain, plainAfter: plainReport(),
+                 failureText: failure.querySelector('p').textContent,
+                 failureReport: failure.querySelector('[data-action="openExternal"]')?.dataset.url || '' };
+        """) as? [String: Any]
+      // URLSearchParams writes spaces as `+`, which GitHub's form reads back as spaces.
+      let body = { (link: Any?) -> String in
+        let query = (link as? String ?? "").replacingOccurrences(of: "+", with: "%20")
+        return URLComponents(string: query)?.queryItems?.first { $0.name == "body" }?.value ?? ""
+      }
+      let version = try XCTUnwrap(
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)
+      XCTAssertEqual(result?["application"] as? String, "", "Application wallpapers cannot run, so none is offered")
+      let plain = body(result?["plain"])
+      XCTAssertTrue(plain.contains("**App version:** \(version)"), plain)
+      XCTAssertTrue(plain.contains("**Renderer:** legacy_vulkan (fallback: lit particles)"), plain)
+      XCTAssertFalse(plain.contains("**Error:**"), plain)
+      let failureText = try XCTUnwrap(result?["failureText"] as? String)
+      XCTAssertFalse(failureText.isEmpty, "The inspector names why applying failed")
+      XCTAssertTrue(body(result?["failureReport"]).contains("**Error:** \(failureText)"), "The report carries the failure")
+      XCTAssertEqual(result?["plainAfter"] as? String, "", "The failure's report replaces the plain link")
     }
   }
 

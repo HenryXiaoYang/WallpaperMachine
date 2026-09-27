@@ -1,13 +1,219 @@
 # Performance
 
-**Settings -> Performance** exposes the playback and quality controls that
-previously existed only as environment variables. Every control is applied
-through the bridge and the page re-renders from the snapshot the engine returns,
-so the page never shows a setting the engine did not accept.
+**Settings → Performance** is the first settings section and the one Settings
+opens on. It is a playback and quality page. Every engine control is applied
+through the bridge and the page re-renders from the snapshot the engine
+returns, so the page never shows a setting the engine did not accept. Playback
+choices that the app owns (other-app audio, display sleep, app rules) are
+stored in `PlaybackPreferences` and published on the same snapshot.
 
-Experimental content pacing, shared video decode and direct video plane
-sampling are grouped in the **Advanced** disclosure. Renderer feature support
-is under **Renderer compatibility**, beside the current scene backend report.
+Nothing on this page promises a measured power saving. A lower frame rate or
+render scale is a quality tradeoff the user chooses. The **Energy use** readout
+shows what the app draws now and, after a change, what it drew before; it is a
+measurement, not a promise about any setting.
+
+## Energy use
+
+The first group, placed directly above **Quality** so a change and its effect
+sit together, reads a grade and total such as **Medium energy use · 1.2 W**,
+then **CPU … · GPU …** for this app, averaged over the last few seconds (four
+samples two seconds apart, so up to six seconds). It is read
+without privileges from the kernel's resource-coalition accounting
+(`CoalitionEnergySource`, `EnergyUsageMonitor` in `App/Services/Diagnostics/`):
+
+- **What is counted.** The app's own coalition, which macOS also charges for
+  the XPC services the app starts: the panel's WebKit processes, the video
+  decoder service and the audio helper. The lock-screen extension runs in a
+  coalition of its own and is added when a process from this bundle's
+  `Contents/Extensions` is running.
+- **What is not.** WindowServer compositing the wallpaper (measured at about
+  0.2 W of GPU beside a 0.59 W scene), DRAM and the display panel. macOS
+  charges none of them to the app.
+- **How GPU energy is shared out.** The kernel splits the whole GPU's energy
+  between coalitions by GPU time. When other apps keep the GPU busy, this app's
+  frames run at their clock and share the GPU for longer, so the figure charged
+  to it rises without the app doing more work: 0.59 W alone, 4.6 W beside a
+  25 % GPU load and 15 W beside a saturating one on an M5 Pro. When other
+  coalitions together occupy 25 % or more of the window
+  (`EnergyUsageReading.contentionThreshold`), the readout says the GPU figure
+  reads high and gives no grade, battery share or comparison until the GPU is
+  free (`EnergyUsageReading.isComparable`).
+- **Grade.** `EnergyLevel` in Swift owns the thresholds: **Low** under 0.5 W,
+  **Medium** under 2 W, **High** at 2 W or more, of CPU plus GPU. A MacBook Air
+  doing light work draws roughly 3–5 W in total, so these read as about a tenth
+  and about half again on its battery drain. The page only names the grade it
+  was sent.
+- **Battery share.** On a Mac with a battery, the row adds **About N% of a full
+  battery charge per hour** (or less than 1%). `BatteryCapacity` reads today's
+  full charge (`AppleRawMaxCapacity`, mAh) from the `AppleSmartBattery`
+  registry entry, once per activation, and multiplies it by 3.85 V per cell;
+  a desktop Mac has no such entry and shows no line.
+- **Before and after.** A Performance setting that changes rendering work
+  (`WebPanelController.renderingSettings`: presets, frame-rate limit, render
+  scale, battery mode and quality, video backend, scene renderer and the scene
+  and experimental switches) calls `EnergyUsageMonitor.settingChanged()` once
+  the engine has accepted it. The window restarts, the row reads **Measuring…**
+  with the last settled figure as **Before it**, and once four uncontended
+  samples under the new setting exist it reads **Before your change: … Now: …
+  (−N%)**. A second change before the first settled keeps the original
+  "before". Without a settled, uncontended figure at the moment of the change
+  there is no comparison. Leaving Settings drops it.
+- **Cost.** One sample is about 3 ms of kernel calls (every coalition on the
+  Mac is read for the contention check), taken off the main thread. Sampling
+  runs only while the panel window is visible with Settings open; otherwise no
+  timer exists. Settings tabs switch inside the page without telling native,
+  so the other Settings tabs sample too. Readings reach the page through
+  `window.wallpaperUI.energy(reading)`, not the snapshot, so a two-second
+  update patches one row instead of re-rendering the panel. The object carries
+  `level`, `batteryPercentPerHour` and `comparison` (`beforeMilliwatts`,
+  `afterMilliwatts`) when they apply.
+- **Unavailable.** The interfaces are private libsystem exports resolved with
+  `dlsym`. If a macOS release removes one, the row reads **Unavailable on this
+  Mac**. `EnergyUsageMonitorTests` checks that CPU work in the test host moves
+  the CPU counter, which catches a moved struct field.
+
+The accounting was checked against `powermetrics` and IOReport: the sum over
+all coalitions matched the whole GPU within 5 % at idle and 6–9 % under load.
+[Power benchmarking](../testing/power-benchmark.md) remains the way to compare
+builds; this readout is for users.
+
+## Per-wallpaper energy rating
+
+The inspector of an installed wallpaper shows, once measured, a line such as
+**Medium energy use, about 1.2 W. Measured while it played alone on 1 display
+at 60 fps, 75% render scale, with this window closed.** It is measured in the
+background by `WallpaperEnergyRecorder` and kept by `WallpaperEnergyRatings`
+(both in `App/Services/Diagnostics/WallpaperEnergyRatings.swift`), owned by the
+app delegate and reachable from the panel as `BridgeStore.wallpaperEnergyRatings`:
+
+- **When a sample is credited.** Every 30 seconds the recorder asks the app
+  delegate for a `WallpaperEnergyContext`. There is none, and no sample is taken,
+  unless playback is playing, presentation is running (not display sleep, lock,
+  app rule or other-audio pause), no download is running SteamCMD, the panel
+  window is not on screen, and exactly one wallpaper is assigned across the
+  displays that are not suspended by occlusion. Energy is charged to the whole
+  app, so two different wallpapers cannot be told apart. An interval is
+  credited only when both ends saw the same context and the GPU was not
+  contended; any engine snapshot or presentation change in between invalidates
+  it, so a pause and resume inside one interval is not counted.
+- **Conditions.** The context records the displays showing it, the frame-rate
+  ceiling in force (the battery one included) and the effective render scale.
+  A measurement under other conditions replaces the rating rather than being
+  averaged in, so the line always names the settings it describes.
+- **Averaging.** Intervals combine as a time-weighted mean. History is weighted
+  as at most 30 minutes, so a rating follows a wallpaper whose cost changed. A
+  rating is shown after two minutes of credited time.
+- **Storage.** `<support>/EnergyRatings.json`, keyed by wallpaper id. It is
+  saved when a rating first appears or changes grade, at most every ten minutes
+  otherwise, and on quit. An unreadable file is logged and starts empty.
+- **Cost.** One coalition sample (about 3 ms of kernel calls) every 30 seconds
+  while a single wallpaper plays; only a state check otherwise.
+- **What it is not.** The figure includes everything in the app's coalition at
+  the time, as the readout above does. Discover items have no rating.
+
+## Playback
+
+Covered, full-screen and hidden wallpapers are **Paused automatically**. That
+is the existing occlusion policy. There is no control for it.
+
+| Setting | Values | Default |
+| --- | --- | --- |
+| When another app plays sound | **Keep running**, **Mute**, **Pause** | Keep running |
+| When displays sleep | **Pause**, **Stop (free memory)** | Pause |
+| On battery | **Keep running**, **Reduced quality**, **Pause** | Keep running |
+
+**Mute** affects scene and video wallpapers only. Web wallpapers have no mute
+channel, so Mute does not silence them. **Pause** applies to every wallpaper
+and does not change the user's own Play/Pause.
+
+Another app counts as playing sound while Core Audio reports it running audio
+output (`kAudioProcessPropertyIsRunningOutput`). This app and the processes it
+is responsible for, such as the WebKit processes playing a web wallpaper, are
+excluded. Sound must last 0.5 s before it counts and silence 2 s before it
+clears, so a gap between tracks does not restart the wallpaper. Nothing is
+observed while the choice is **Keep running**.
+
+**Stop** on display sleep frees renderer memory. The wallpaper is reloaded when
+the display wakes. **Pause** keeps it loaded.
+
+**On battery** is one choice. **Keep running** leaves quality alone. **Pause**
+stops wallpapers until the Mac is plugged in. **Reduced quality** shows the
+battery render scale (100% / 75% / 50%) and battery frame rate (1–240 fps,
+default 30) underneath, plus whether the Mac is on battery. Those two fields
+are sent together: changing one resends the other as the engine currently
+reports it. Reduced quality is in force only while that mode is selected and
+the Mac is on battery. A configuration saved before this choice existed keeps
+its behavior: the old pause-on-battery switch becomes **Pause**, otherwise the
+old battery profile switch becomes **Reduced quality**.
+
+### App rules
+
+**Edit…** opens an inline list. Each row is an app name, a condition
+(**Running** or **In front**), an action (**Pause**, **Mute** or **Stop**) and
+**Remove**. **Add app…** opens a native panel for one `.app` bundle. An app
+with no bundle identifier is refused. The same bundle is not added twice.
+Rules pause, mute or stop wallpapers while the chosen app matches. They do not
+change the user's own Play/Pause. Mute has the same limit as above: web
+wallpapers have no mute channel.
+
+## Quality
+
+Presets set the frame-rate limit and the internal render scale together.
+
+| Preset | Frame-rate limit | Render scale |
+| --- | --- | --- |
+| Low | 30 fps | 50% |
+| Medium | 60 fps | 75% |
+| High | Native refresh rate (no limit) | 100% (native) |
+
+High is the default. **Custom** is shown, and is not clickable, when the
+current frame-rate cap and preferred render scale match none of those pairs.
+The welcome guide's Performance page offers the same presets and slider
+before its Preferences page; see [First run](control-panel.md#first-run).
+
+**Frame rate limit** is a slider from 10 to the highest display refresh the
+snapshot reports (`frameRateCapMax`, or 60 when no display publishes one). The
+top of the slider reads **Native refresh rate** and sends null (no cap). Any
+lower value is the cap.
+The effective rate on a display is the minimum of the saved per-wallpaper rate,
+that display's refresh, the global cap, and the battery frame rate when
+reduced quality is in force. Saved per-wallpaper frame rates are never
+rewritten. When a Performance cap is below the saved rate, the inspector and
+**Settings → Displays** say so and offer **Open Performance**.
+
+**Internal render scale** is unchanged: 100% / 75% / 50%, with a hand-edited
+value carried as its own option. It is the internal rasterization size only.
+Output size and placement do not change. When no running wallpaper can honour
+a scale the control is disabled. Values from a stale page are clamped to
+`0.25...1.0`.
+
+Whenever the effective `renderScale` differs from the saved
+`preferredRenderScale`, **Effective now** shows the scale the engine published.
+It names battery as the cause only while reduced quality is actually in force.
+
+### Default per-display frame rate
+
+A display with no saved rate runs at its native refresh rate: 120 fps on a
+ProMotion MacBook Pro, 60 fps on a MacBook Air or a 60 Hz external display. The
+wallpaper config stores the rate as `frame_rate` in each `monitors` entry, and a
+mirror display stores it as `frame_rate` in its `[[monitor_settings]]` table;
+the key is omitted to follow the display. Choosing the top of a display's frame
+rate slider (its refresh) stores nothing, so the rate follows that display if its
+refresh changes; a lower value is saved as is.
+
+Earlier builds defaulted to 60 fps and wrote it as `fps` (wallpapers) or
+`target_fps` (mirror displays). Those keys are read once on load: a legacy `60`
+is indistinguishable from that old default and becomes "follow the display";
+any other legacy value is kept. The legacy keys are never written again, and an
+older build reading a new file falls back to its own 60 fps default.
+
+## Advanced
+
+Collapsed. It holds the video backend and its in-use report, the scene
+wallpaper controls (optimisation, update-only-on-change, scene renderer,
+reports and **Renderer compatibility**), and the experimental switches:
+content pacing, shared video decode and direct video plane sampling.
+**What these settings change** stays last, outside this disclosure.
 
 ## Repeated-work reduction
 
@@ -35,6 +241,8 @@ displayed FPS; a power claim still requires the matched conditions described in
 
 ## Video backend
 
+This control and its **In use now** report live in the **Advanced** disclosure.
+
 | Setting | Values | Default |
 | --- | --- | --- |
 | Video playback | **Compatibility**, **Native video preferred** | Compatibility |
@@ -48,7 +256,9 @@ reads `No video wallpaper is running.` when nothing is playing video.
 An unrecognised backend name is refused rather than silently mapped to
 Compatibility, so a stale page cannot report a choice that was never applied.
 
-## Render quality
+## Render scale details
+
+The select lives in **Quality**, beside the presets and the frame-rate limit.
 
 | Setting | Values | Default |
 | --- | --- | --- |
@@ -68,29 +278,6 @@ these tiers, so a hand-edited `config.toml` can hold a value between them. The
 control then carries that value as an extra leading option labelled
 `60% (from configuration)` and keeps it selected, rather than displaying a
 neighbouring tier the user never chose. Picking a tier replaces it.
-
-## Battery profile
-
-Off unless the user turns it on. While enabled and on battery power, the profile
-render scale and frame rate replace the saved quality. This is a quality tradeoff
-the user chooses. No power saving is measured or promised.
-
-Whenever the effective `renderScale` differs from the saved
-`preferredRenderScale`, the render-quality group shows an **Effective now** row
-with the scale the engine published. It names the battery profile as the cause
-only while that profile is actually in force; otherwise it reports the
-divergence without attributing a cause. Turning the profile off restores the
-saved scale on that same snapshot, so the row disappears with it.
-
-| Setting | Values | Default |
-| --- | --- | --- |
-| Use a reduced quality profile on battery | Off / On | Off |
-| Render scale on battery | **100%**, **75%**, **50%** | 75% |
-| Frame rate on battery | 1-240 fps | 30 fps |
-
-The scale and frame-rate controls are shown only while the profile is enabled.
-The engine owns the profile as one value, so changing one control resends the
-other two exactly as the engine currently reports them.
 
 ## Scene wallpapers
 
@@ -303,7 +490,7 @@ to memory or display hardware. CPU + GPU + ANE combined power is not whole-Mac
 power. The audio-reactive runs also recorded coreaudiod at 13–17 % CPU, including
 at 1 fps. No isolated energy saving has been established for the caches above.
 
-## Advanced
+## Experimental switches
 
 All three switches are experimental and off by default.
 
@@ -364,6 +551,15 @@ for one — not that this saves a measurable amount of anything.
 ## Verification
 
 See [Testing](../testing/README.md) and
-`Tests/Unit/Panel/WebPanelPerformanceSettingsTests.swift`, which covers the
-clamping, the refusal of an unknown backend name, the scene optimisation default
-and round trip, and the snapshot keys the page reads.
+`Tests/Unit/Panel/WebPanelPerformanceSettingsTests.swift`, which covers
+clamping, refusal of an unknown backend or battery mode, the frame-rate cap
+(including null as no limit), quality presets, app-rule add/update/remove, and
+the snapshot keys the page reads.
+`Tests/Unit/Diagnostics/EnergyUsageMonitorTests.swift` covers the milliwatt
+arithmetic, coalitions missing from one sample, the contention threshold, the
+averaging window, the live counters, the before/after comparison (settled
+baseline, repeated changes, contended windows), the grade boundaries, the
+battery share and `BatteryCapacity` parsing; `WallpaperEnergyRatingsTests`
+covers when an interval is credited to a wallpaper, how measurements combine
+or replace one another, and persistence; `WebPanelEnergyUsageTests` covers
+that the readout samples only while Settings is visible.

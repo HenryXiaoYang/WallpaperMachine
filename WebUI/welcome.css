@@ -51,6 +51,11 @@
 .welcome-swatch[data-appearance="system"] span { background: linear-gradient(110deg, #dfe3ea 50%, #3a3e45 50%); }
 .welcome-swatch[data-appearance="system"] span::after { background: linear-gradient(110deg, #dfe3ea 82%, #3a3e45 82%); }
 
+/* Performance: the frame-rate limit slider on the same surface as the preset tiles. */
+.welcome-range { display: flex; align-items: center; gap: 14px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.welcome-range input { flex: 1; }
+.welcome-range output { min-width: 13ch; text-align: right; font-size: 13px; font-weight: 500; font-variant-numeric: tabular-nums; }
+
 /* Steam: the form, then whichever state the sign-in session is in, on one surface. */
 .welcome-form { display: grid; gap: 12px; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
 .welcome-form .field { font-size: 12px; font-weight: 600; }
@@ -95,6 +100,9 @@
 .welcome-pref-body { flex: 1; min-width: 0; display: grid; gap: 3px; }
 .welcome-pref-title { font-size: 13px; font-weight: 600; line-height: 1.3; color: var(--text); }
 .welcome-pref-note { font-size: 12px; color: var(--muted); line-height: 1.45; }
+.welcome-pref select { justify-self: start; max-width: 100%; margin-top: 4px; font: inherit; color: var(--text); background: var(--raised); border: 1px solid var(--line); border-radius: 6px; min-height: var(--control-height); padding: 0 8px; }
+.welcome-pref:has(select:disabled) { cursor: default; }
+.welcome-pref:has(select:disabled) .welcome-pref-body { opacity: .6; }
 .welcome-start-option:first-child { border-color: var(--primary); }
 
 /* Tips: three one-line rows on the same card as the preferences, then the support card. */
@@ -105,7 +113,6 @@
 .welcome-support { display: flex; gap: 12px; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
 .welcome-support > .dialog-guide-icon { color: var(--text); }
 .welcome-support .welcome-status-actions { gap: 4px 18px; }
-.welcome-inline-icon { display: inline-flex; vertical-align: -2px; color: var(--text); }
 
 /* Recap of what the guide set, before the closing choices. */
 .welcome-recap { margin: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }

@@ -1,0 +1,47 @@
+name: Wallpaper or app problem
+description: A wallpaper looks or behaves wrong, or the app misbehaves.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. One diagnostics file answers most follow-up questions:
+        **Settings → Storage → Troubleshooting → Diagnostics report → Export…** saves a `.zip`
+        with recent logs, lock screen and crash reports and a system summary. Home folder paths,
+        your Mac user name and Steam account names are replaced before it is written.
+
+        If the problem is hard to reproduce, turn on **Detailed logging** in the same place,
+        reproduce it, then export. Turn it off afterwards.
+  - type: input
+    id: wallpaper
+    attributes:
+      label: Wallpaper
+      description: Workshop ID or link (for example `https://steamcommunity.com/sharedfiles/filedetails/?id=123456789`), or the name of a local import. We test with the same wallpaper.
+      placeholder: "123456789"
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you expected, what you saw instead, and when (the log times help). Screenshots or a short recording are welcome for visual problems.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Apply the wallpaper to the built-in display
+        2. Wait about a minute
+        3. ...
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics report
+      description: Drag the exported `WallpaperMachine-diagnostics-….zip` here. Look inside first if you want to check what is shared.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: App version
+      description: Settings → About. Already in the diagnostics report; fill this in if you could not export one.

@@ -340,6 +340,10 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
         return entry
     }
 
+    /// The `load#N` of the log header written when this page was opened; its
+    /// later lines carry it so they can be told apart from another display's.
+    var logLoad: UInt64?
+
     /// Closures are optional so their `@MainActor` defaults are built inside
     /// this initializer rather than in a caller-evaluated default argument.
     init(
@@ -524,7 +528,7 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
                     AppLog.debug("""
                         web wallpaper \(self.projectURL.lastPathComponent): \
                         suspension poster unavailable: \(error.localizedDescription)
-                        """)
+                        """, load: self.logLoad)
                 }
                 self.detachWebView(poster: image)
             }
@@ -637,7 +641,7 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
                 AppLog.debug("""
                     web wallpaper \(projectURL.lastPathComponent): directory changes outran \
                     the suspension buffer; the oldest delta was dropped
-                    """)
+                    """, load: logLoad)
             }
             deferredDirectoryChanges.append(change)
             return
@@ -694,7 +698,7 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
     /// tagged object with well-formed fields is dropped.
     fileprivate func receiveScriptMessage(_ body: Any) {
         guard let payload = body as? [String: Any], let type = payload["type"] as? String else {
-            AppLog.debug("web wallpaper \(projectURL.lastPathComponent): malformed host message dropped")
+            AppLog.debug("web wallpaper \(projectURL.lastPathComponent): malformed host message dropped", load: logLoad)
             return
         }
         switch type {
@@ -710,7 +714,7 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
                 AppLog.debug("""
                     web wallpaper \(projectURL.lastPathComponent): random file request dropped \
                     (malformed, or more than \(Self.maximumPendingRandomFileRequests) unanswered)
-                    """)
+                    """, load: logLoad)
                 return
             }
             // The page numbers its requests from one per document, so the id it
@@ -722,7 +726,7 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
             onRandomFileRequest?(token, propertyId)
             return
         default:
-            AppLog.debug("web wallpaper \(projectURL.lastPathComponent): unknown host message “\(type)” dropped")
+            AppLog.debug("web wallpaper \(projectURL.lastPathComponent): unknown host message “\(type)” dropped", load: logLoad)
             return
         }
         refreshDemand()
@@ -735,7 +739,7 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
             do {
                 _ = try await self.webView.callAsyncJavaScript(script, arguments: arguments, in: nil, contentWorld: .page)
             } catch {
-                AppLog.warn("web wallpaper \(self.projectURL.lastPathComponent): host call failed: \(error.localizedDescription)")
+                AppLog.warn("web wallpaper \(self.projectURL.lastPathComponent): host call failed: \(error.localizedDescription)", load: self.logLoad)
             }
         }
     }
@@ -822,7 +826,7 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
             AppLog.error("""
                 web wallpaper \(projectURL.lastPathComponent): content process terminated \
                 \(restartHistory.count) times; restart budget exhausted
-                """)
+                """, load: logLoad)
             onFailure?(String(localized: "The web wallpaper stopped unexpectedly and could not be restarted."))
             return
         }
@@ -835,7 +839,7 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
         AppLog.warn("""
             web wallpaper \(projectURL.lastPathComponent): content process terminated; \
             restart \(attempt + 1) of \(recovery.maximumRestarts) in \(delay)
-            """)
+            """, load: logLoad)
         restartTask?.cancel()
         restartTask = Task { @MainActor [weak self, wait] in
             try? await wait(delay)

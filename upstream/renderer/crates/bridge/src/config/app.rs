@@ -3,7 +3,6 @@ use wallpaper_core::{DisplayIdentity, DisplaySelector, project::ScalingMode};
 
 pub const SCHEMA_VERSION: u32 = 1;
 const DEFAULT_MONITOR_VOLUME: f32 = 1.0;
-const DEFAULT_MONITOR_FPS: u32 = 60;
 /// Lowest internal rasterization scale the renderer will honour. Below this a
 /// wallpaper stops being a quality tier and becomes a visibly broken image.
 pub const MIN_RENDER_SCALE: f32 = 0.25;
@@ -40,6 +39,8 @@ pub struct AppConfig {
     pub monitors: Vec<MonitorCfg>,
     #[serde(default)]
     pub monitor_settings: Vec<MonitorSettingsCfg>,
+    #[serde(default)]
+    pub diagnostics: DiagnosticsCfg,
 }
 
 impl Default for AppConfig {
@@ -55,6 +56,7 @@ impl Default for AppConfig {
             quality: QualityCfg::default(),
             monitors: Vec::new(),
             monitor_settings: Vec::new(),
+            diagnostics: DiagnosticsCfg::default(),
         }
     }
 }
@@ -122,8 +124,15 @@ pub struct QualityCfg {
     /// overwriting what the user asked for.
     #[serde(default = "default_render_scale")]
     pub render_scale: f32,
-    #[serde(default)]
-    pub battery_profile_enabled: bool,
+    /// Global frame-rate ceiling. Absent means no limit. Never written when
+    /// absent, so a saved file round-trips `None` rather than a null.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_rate_cap: Option<u32>,
+    /// Where the battery quality-profile switch used to live. Read so an
+    /// existing opt-in survives the move to [`PowerCfg::on_battery`], and
+    /// never written again.
+    #[serde(default, rename = "battery_profile_enabled", skip_serializing)]
+    pub legacy_battery_profile_enabled: Option<bool>,
     #[serde(default)]
     pub battery: QualityProfileCfg,
     /// Scene-renderer static-subgraph caching and redundant copy-pass
@@ -144,7 +153,8 @@ impl Default for QualityCfg {
     fn default() -> Self {
         Self {
             render_scale: MAX_RENDER_SCALE,
-            battery_profile_enabled: false,
+            frame_rate_cap: None,
+            legacy_battery_profile_enabled: None,
             battery: QualityProfileCfg::default(),
             scene_optimization_enabled: default_true(),
             scene_on_demand_enabled: false,
@@ -181,10 +191,65 @@ pub struct ExperimentalCfg {
     pub scene_video_plane_sampling: bool,
 }
 
+/// What the machine does with wallpapers while it is on battery.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BatteryModeCfg {
+    #[default]
+    KeepRunning,
+    ReducedQuality,
+    Pause,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize)]
 pub struct PowerCfg {
     #[serde(default)]
-    pub pause_on_battery_power: bool,
+    pub on_battery: BatteryModeCfg,
+    /// Where pause-on-battery used to live. Read so an existing opt-in
+    /// survives the move to [`PowerCfg::on_battery`], and never written again.
+    #[serde(default, rename = "pause_on_battery_power", skip_serializing)]
+    pub legacy_pause_on_battery_power: Option<bool>,
+    /// Set when the file named `on_battery`. Not a setting: migration must
+    /// not overwrite an explicit choice, including the default value.
+    #[serde(skip)]
+    pub on_battery_explicit: bool,
+}
+
+impl PartialEq for PowerCfg {
+    fn eq(&self, other: &Self) -> bool {
+        self.on_battery == other.on_battery
+            && self.legacy_pause_on_battery_power == other.legacy_pause_on_battery_power
+    }
+}
+
+impl Eq for PowerCfg {}
+
+impl<'de> Deserialize<'de> for PowerCfg {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Raw {
+            #[serde(default)]
+            on_battery: Option<BatteryModeCfg>,
+            #[serde(default, rename = "pause_on_battery_power")]
+            legacy_pause_on_battery_power: Option<bool>,
+        }
+
+        let raw = Raw::deserialize(deserializer)?;
+        Ok(Self {
+            on_battery: raw.on_battery.unwrap_or_default(),
+            legacy_pause_on_battery_power: raw.legacy_pause_on_battery_power,
+            on_battery_explicit: raw.on_battery.is_some(),
+        })
+    }
+}
+
+/// How much the application log records.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiagnosticsCfg {
+    /// Debug-level lines on top of the default informational ones. Persisted,
+    /// so a problem that shows up at launch is captured on the next launch.
+    #[serde(default)]
+    pub verbose_logging: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -351,7 +416,13 @@ impl Default for MonitorCfg {
     }
 }
 
+/// Presentation settings stored on the app config, used by mirror displays.
+///
+/// `frame_rate` absent means follow that display's native refresh. Older
+/// files stored `target_fps = 60` as the untouched default; that value loads
+/// as absent and is never written again.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(from = "MonitorSettingsCfgRaw")]
 pub struct MonitorSettingsCfg {
     #[serde(flatten, default)]
     pub selector: SerializedSelector,
@@ -359,12 +430,47 @@ pub struct MonitorSettingsCfg {
     pub scaling_mode: String,
     #[serde(default = "default_scaling_factor")]
     pub scaling_factor: f64,
-    #[serde(default = "default_target_fps")]
-    pub target_fps: u32,
+    /// `None` follows the display's native refresh. A number is an explicit
+    /// cap below that refresh and is omitted when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_rate: Option<u32>,
     #[serde(default = "default_monitor_volume")]
     pub volume: f32,
     #[serde(default)]
     pub muted: bool,
+}
+
+#[derive(Deserialize)]
+struct MonitorSettingsCfgRaw {
+    #[serde(flatten, default)]
+    selector: SerializedSelector,
+    #[serde(default = "default_scaling_mode")]
+    scaling_mode: String,
+    #[serde(default = "default_scaling_factor")]
+    scaling_factor: f64,
+    /// Outer `Some` means the key was present, so it wins over legacy
+    /// `target_fps` even when the value is null.
+    #[serde(default, deserialize_with = "super::deserialize_present")]
+    frame_rate: Option<Option<u32>>,
+    #[serde(default)]
+    target_fps: Option<u32>,
+    #[serde(default = "default_monitor_volume")]
+    volume: f32,
+    #[serde(default)]
+    muted: bool,
+}
+
+impl From<MonitorSettingsCfgRaw> for MonitorSettingsCfg {
+    fn from(raw: MonitorSettingsCfgRaw) -> Self {
+        Self {
+            selector: raw.selector,
+            scaling_mode: raw.scaling_mode,
+            scaling_factor: raw.scaling_factor,
+            frame_rate: super::frame_rate_from_legacy(raw.frame_rate, raw.target_fps),
+            volume: raw.volume,
+            muted: raw.muted,
+        }
+    }
 }
 
 impl Default for MonitorSettingsCfg {
@@ -373,7 +479,7 @@ impl Default for MonitorSettingsCfg {
             selector: SerializedSelector::default(),
             scaling_mode: default_scaling_mode(),
             scaling_factor: default_scaling_factor(),
-            target_fps: default_target_fps(),
+            frame_rate: None,
             volume: default_monitor_volume(),
             muted: false,
         }
@@ -391,6 +497,13 @@ impl MonitorSettingsCfg {
             _ => ScalingMode::default(),
         }
     }
+
+    /// The rate this display should run at: the saved cap, or the display's
+    /// own refresh when the user has not chosen one.
+    #[must_use]
+    pub fn fps_on(&self, refresh_hz: u32) -> u32 {
+        super::resolve_frame_rate(self.frame_rate, refresh_hz)
+    }
 }
 
 impl AppConfig {
@@ -401,18 +514,33 @@ impl AppConfig {
     /// legacy flag is honoured exactly while the new key is still absent. A
     /// config this build has saved never carries the legacy key again, so a
     /// later change of mind cannot be overwritten by it.
+    ///
+    /// Pause-on-battery and the battery quality-profile switch folded into
+    /// [`PowerCfg::on_battery`]. Pause wins when both legacy flags are set.
+    /// An explicit `on_battery`, including `keep_running`, wins over either.
     pub fn migrate_legacy_keys(&mut self) {
         let legacy_native = self.experimental.legacy_native_video_backend.take();
         if legacy_native == Some(true) && self.video_backend == VideoBackendModeCfg::Compatibility {
             self.video_backend = VideoBackendModeCfg::NativePreferred;
         }
+
+        let legacy_pause = self.power.legacy_pause_on_battery_power.take();
+        let legacy_profile = self.quality.legacy_battery_profile_enabled.take();
+        if !self.power.on_battery_explicit {
+            if legacy_pause == Some(true) {
+                self.power.on_battery = BatteryModeCfg::Pause;
+            } else if legacy_profile == Some(true) {
+                self.power.on_battery = BatteryModeCfg::ReducedQuality;
+            }
+        }
     }
 
-    /// The render scale in force right now: the battery profile's while that
-    /// profile is enabled and the machine is on battery, the user's otherwise.
+    /// The render scale in force right now: the battery profile's while
+    /// reduced quality is selected and the machine is on battery, the user's
+    /// otherwise.
     #[must_use]
     pub fn effective_render_scale(&self, on_battery: bool) -> f32 {
-        let scale = if self.quality.battery_profile_enabled && on_battery {
+        let scale = if self.power.on_battery == BatteryModeCfg::ReducedQuality && on_battery {
             self.quality.battery.render_scale
         } else {
             self.quality.render_scale
@@ -468,10 +596,6 @@ fn default_scaling_mode() -> String {
 
 fn default_scaling_factor() -> f64 {
     1.0
-}
-
-fn default_target_fps() -> u32 {
-    DEFAULT_MONITOR_FPS
 }
 
 fn default_monitor_volume() -> f32 {

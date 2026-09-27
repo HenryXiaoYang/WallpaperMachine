@@ -16,6 +16,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private var webWallpaperHost: WebWallpaperHost?
     private var nativeVideoHost: NativeVideoWallpaperHost?
     private var presentationPolicy: WallpaperPresentationPolicy?
+    private var appRuleMonitor: AppRuleMonitor?
+    private var otherAudioMonitor: OtherAudioMonitor?
+    private var playbackPreferencesObserver: NSObjectProtocol?
+    private var wallpaperEnergy: WallpaperEnergyRecorder?
+    /// Last presentation the bridge accepted, so leaving unloaded clears that flag first.
+    private var appliedGlobalPresentation: GlobalPresentation = .running
     private var store: BridgeStore?
     private var startupError: Error?
     private var lastError: Error?
@@ -45,18 +51,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                     AppLog.error("Dock icon \(icon.rawValue) could not load: \(error.localizedDescription)")
                 }
             }
-        logStartup("didFinishLaunching start")
+        AppLog.info("startup: didFinishLaunching start")
         BridgeEnvironment.configureVulkanICDIfNeeded()
-        logStartup("vulkan icd configured")
+        AppLog.info("startup: vulkan icd configured")
         do {
             try ClientPaths.prepare()
-            store = try BridgeStore()
-            AppLog.store = store
+            let created = try BridgeStore()
+            store = created
+            AppLog.attach(created.bridge)
+            for line in DiagnosticEnvironment.current() { AppLog.info("environment: \(line)") }
             startupError = nil
             playbackSnapshotCurrent = false
-            logStartup("BridgeStore created")
+            AppLog.info("startup: BridgeStore created")
         } catch {
-            logStartup("BridgeStore FAILED: \(error.localizedDescription)")
+            AppLog.detachToStandardError()
+            AppLog.error("startup: BridgeStore FAILED: \(error.localizedDescription)")
             startupError = error
             playbackSnapshotCurrent = false
         }
@@ -67,13 +76,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
 
         NSApp.setActivationPolicy(.accessory)
-        logStartup("activation policy set to accessory")
+        AppLog.info("startup: activation policy set to accessory")
         installStatusItem()
         synchronizeStatusItem()
         installDisplayChangeObserver()
-        logStartup("display change observer installed")
+        AppLog.info("startup: display change observer installed")
         installApplicationMenu()
-        logStartup("application menu installed")
+        AppLog.info("startup: application menu installed")
         if let store {
             let lockScreen = LockScreenConfiguration.isSupportedBySystem
                 ? LockScreenWallpaperService(bridge: store.bridge) : nil
@@ -154,6 +163,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             nativeVideo.start()
             store.onSnapshotApplied = { [weak self, weak lockScreen] in
                 guard let self, !self.shutdownInProgress else { return }
+                // Any engine change (playback, assignment, quality) ends the interval
+                // being measured; its two ends could otherwise match across it.
+                self.wallpaperEnergy?.invalidate()
                 // Web wallpapers live in host windows; open or close them before
                 // the poster sync and the presentation policy look at the desktop.
                 self.webWallpaperHost?.reconcile()
@@ -170,18 +182,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                     }
                 }
             }
+            let preferences = PlaybackPreferences.shared
+            let appRules = AppRuleMonitor(preferences: preferences)
+            let otherAudio = OtherAudioMonitor(preferences: preferences)
+            appRuleMonitor = appRules
+            otherAudioMonitor = otherAudio
+            appRules.onChange = { [weak self] in self?.presentationPolicy?.evaluate() }
+            otherAudio.onChange = { [weak self] in self?.presentationPolicy?.evaluate() }
+            playbackPreferencesObserver = NotificationCenter.default.addObserver(
+                forName: PlaybackPreferences.didChangeNotification, object: preferences, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.syncPlaybackMonitors()
+                    self?.presentationPolicy?.evaluate()
+                }
+            }
             let policy = WallpaperPresentationPolicy(
-                applyGlobal: { [weak self] suspended, completion in
+                displaySleepAction: { preferences.displaySleepAction },
+                appRuleActions: { appRules.actions },
+                otherAudioActive: { otherAudio.isActive },
+                otherAudioAction: { preferences.otherAudioAction },
+                applyGlobal: { [weak self] presentation, completion in
                     guard let self, let store = self.store,
                           !self.shutdownInProgress, !self.shutdownComplete else {
                         completion(.failure(CancellationError()))
                         return
                     }
-                    self.webWallpaperHost?.setPresentationSuspended(suspended)
-                    self.nativeVideoHost?.setPresentationSuspended(suspended)
+                    let hostsSuspended = presentation != .running
+                    self.webWallpaperHost?.setPresentationSuspended(hostsSuspended)
+                    self.nativeVideoHost?.setPresentationSuspended(hostsSuspended)
+                    let leavingUnloaded = self.appliedGlobalPresentation == .unloaded
+                        && presentation != .unloaded
+                    self.wallpaperEnergy?.invalidate()
                     Task {
                         do {
-                            try await store.setPresentationSuspendedAsync(suspended)
+                            if leavingUnloaded {
+                                try await store.setPresentationUnloadedAsync(false)
+                            }
+                            switch presentation {
+                            case .running:
+                                try await store.setPresentationSuspendedAsync(false)
+                            case .suspended:
+                                try await store.setPresentationSuspendedAsync(true)
+                            case .unloaded:
+                                try await store.setPresentationSuspendedAsync(true)
+                                try await store.setPresentationUnloadedAsync(true)
+                            }
+                            self.appliedGlobalPresentation = presentation
                             // Presentation suspend commits without producing a
                             // snapshot, so nothing else would recompute who is
                             // still consuming system media. Without this the
@@ -196,6 +243,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                         }
                     }
                 },
+                applyAudio: { [weak self] suppressed, completion in
+                    guard let self, let store = self.store,
+                          !self.shutdownInProgress, !self.shutdownComplete else {
+                        completion(.failure(CancellationError()))
+                        return
+                    }
+                    Task {
+                        do {
+                            try await store.setAudioSuppressedAsync(suppressed)
+                            completion(.success(()))
+                        } catch {
+                            AppLog.error("audio suppress failed: \(error.localizedDescription)")
+                            completion(.failure(error))
+                        }
+                    }
+                },
                 applyDisplay: { [weak self] displayID, suspended, completion in
                     guard let self, let store = self.store,
                           !self.shutdownInProgress, !self.shutdownComplete else {
@@ -204,6 +267,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                     }
                     self.webWallpaperHost?.setPresentationSuspended(suspended, forDisplay: displayID)
                     self.nativeVideoHost?.setPresentationSuspended(suspended, forDisplay: displayID)
+                    self.wallpaperEnergy?.invalidate()
                     Task {
                         do {
                             try await store.setDisplayPresentationSuspendedAsync(
@@ -223,21 +287,62 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                     }
                 })
             presentationPolicy = policy
+            syncPlaybackMonitors()
             policy.start()
+            startWallpaperEnergyRecorder(store: store)
             do {
                 try lockScreen?.start()
                 if lockScreen?.isRequested != true { try startDesktopWallpaperSync() }
             } catch {
                 lastError = error
-                logStartup("Native wallpaper recovery failed: \(error.localizedDescription)")
+                AppLog.error("startup: Native wallpaper recovery failed: \(error.localizedDescription)")
             }
         }
         bootstrapStore()
-        logStartup("bootstrap dispatched")
+        AppLog.info("startup: bootstrap dispatched")
         startDiagnosticsSessionIfRequested()
         DispatchQueue.main.async { [weak self] in
             self?.showControlPanel(selection: .wallpaper)
         }
+    }
+
+    /// Rates each wallpaper's energy use from background samples while it plays alone.
+    /// See `WallpaperEnergyRecorder`; `wallpaperEnergyContext()` decides when a sample
+    /// can be credited.
+    private func startWallpaperEnergyRecorder(store: BridgeStore) {
+        let ratings = WallpaperEnergyRatings(
+            file: ClientPaths.supportURL.appendingPathComponent("EnergyRatings.json"))
+        store.wallpaperEnergyRatings = ratings
+        let recorder = WallpaperEnergyRecorder(
+            source: CoalitionEnergySource(), ratings: ratings
+        ) { [weak self] in self?.wallpaperEnergyContext() }
+        wallpaperEnergy = recorder
+        recorder.start()
+    }
+
+    /// Nil whenever the app's energy is not one wallpaper's: playback paused or suspended
+    /// (display sleep, lock, app rules, other audio, battery pause), the panel on screen
+    /// with its WebKit work, or a download running SteamCMD inside the app's coalition.
+    private func wallpaperEnergyContext() -> WallpaperEnergyContext? {
+        guard let store, let policy = presentationPolicy, !shutdownInProgress,
+              policy.globalPresentation == .running,
+              store.appSnapshot.playbackState == .playing,
+              !workshopStore.downloader.isRunning
+        else { return nil }
+        if let window = controlPanelWindow, window.isVisible, !window.isMiniaturized,
+           window.occlusionState.contains(.visible) {
+            return nil
+        }
+        let settings = store.settingsSnapshot
+        let reduced = settings.batteryMode == .reducedQuality && settings.onBatteryPower
+        let cap = [settings.frameRateCap, reduced ? settings.batteryTargetFps : nil]
+            .compactMap { $0 }.min()
+        return WallpaperEnergyContext.resolve(
+            assignments: store.monitorInformationSnapshot.rows.map {
+                (display: $0.displayId, wallpaper: $0.wallpaperId)
+            },
+            suspendedDisplays: policy.suspendedDisplayIDs,
+            frameRateCap: cap, renderScale: settings.renderScale)
     }
 
     /// Opens a bounded diagnostic window when the environment explicitly asks
@@ -290,6 +395,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        stopPlaybackMonitoring()
+        wallpaperEnergy?.stop()
+        wallpaperEnergy = nil
         presentationPolicy?.stop()
         presentationPolicy = nil
         desktopWallpaperSync?.stop()
@@ -324,6 +432,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         Task {
             do {
                 try await store?.lockScreenWallpaper?.shutdown()
+                stopPlaybackMonitoring()
+                wallpaperEnergy?.stop()
+                wallpaperEnergy = nil
                 presentationPolicy?.stop()
                 presentationPolicy = nil
                 desktopWallpaperSync?.stop()
@@ -356,6 +467,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
 
         return .terminateLater
+    }
+
+    private func syncPlaybackMonitors() {
+        let preferences = PlaybackPreferences.shared
+        if preferences.appRules.isEmpty {
+            appRuleMonitor?.stop()
+        } else {
+            appRuleMonitor?.start()
+        }
+        if preferences.otherAudioAction == .keepRunning {
+            otherAudioMonitor?.stop()
+        } else {
+            otherAudioMonitor?.start()
+        }
+    }
+
+    private func stopPlaybackMonitoring() {
+        if let playbackPreferencesObserver {
+            NotificationCenter.default.removeObserver(playbackPreferencesObserver)
+            self.playbackPreferencesObserver = nil
+        }
+        appRuleMonitor?.stop()
+        otherAudioMonitor?.stop()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -403,15 +537,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         NSApp.setActivationPolicy(.accessory)
     }
 
-    /// Emits a startup-diagnostic line straight to stderr so it is visible when
-    /// the app is launched from a terminal. Deliberately bypasses `AppLog`,
-    /// whose `guard let store` blind spot silently drops every message until
-    /// `BridgeStore` is constructed, and which otherwise writes only to the
-    /// Rust file channel rather than stderr.
-    private func logStartup(_ message: String) {
-        fputs("[WE] \(message)\n", stderr)
-    }
-
     private func startDesktopWallpaperSync() throws {
         guard !shutdownInProgress else { return }
         if let sync = desktopWallpaperSync, !sync.isSuspended {
@@ -436,7 +561,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             button.image?.isTemplate = true
         }
 
-        logStartup("statusItem installed: button=\(button != nil) trayIconAssetResolved=\(trayIcon != nil)")
+        AppLog.info("startup: statusItem installed: button=\(button != nil) trayIconAssetResolved=\(trayIcon != nil)")
 
         let menu = NSMenu()
         menu.delegate = self
@@ -680,9 +805,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     private func bootstrapStore() {
-        logStartup("bootstrapAsync start")
+        AppLog.info("startup: bootstrapAsync start")
         guard let store else {
-            logStartup("bootstrapAsync skipped: store is nil")
+            AppLog.info("startup: bootstrapAsync skipped: store is nil")
             return
         }
 
@@ -692,9 +817,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 startupError = nil
                 lastError = nil
                 playbackSnapshotCurrent = true
-                logStartup("bootstrapAsync completed successfully")
+                AppLog.info("startup: bootstrapAsync completed successfully")
             } catch {
-                logStartup("bootstrapAsync FAILED: \(error.localizedDescription)")
+                AppLog.error("startup: bootstrapAsync FAILED: \(error.localizedDescription)")
                 lastError = error
                 playbackSnapshotCurrent = false
             }

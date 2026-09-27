@@ -6,6 +6,33 @@ struct WallpaperSurfaceVisibility: Equatable, Sendable {
     let isVisible: Bool
 }
 
+/// Strongest global presentation wins: `.unloaded` > `.suspended` > `.running`.
+enum GlobalPresentation: Comparable, Sendable {
+    case running
+    case suspended
+    case unloaded
+
+    private var rank: Int {
+        switch self {
+        case .running: 0
+        case .suspended: 1
+        case .unloaded: 2
+        }
+    }
+
+    static func < (lhs: Self, rhs: Self) -> Bool {
+        lhs.rank < rhs.rank
+    }
+
+    var logLabel: String {
+        switch self {
+        case .running: "resumed"
+        case .suspended: "suspended"
+        case .unloaded: "unloaded"
+        }
+    }
+}
+
 /// Suspends wallpaper presentation per display while no pixel from that display
 /// can reach the user, and globally only for conditions that really do cover
 /// every screen. Suspension never changes the user's Play/Pause choice: the
@@ -14,7 +41,9 @@ struct WallpaperSurfaceVisibility: Equatable, Sendable {
 ///
 /// The split matters for power: a window covering the wallpaper on one display
 /// must stop that display's decoding and rendering, and must not stop a display
-/// the user is still looking at.
+/// the user is still looking at. Display sleep, session lock, app rules and
+/// other-app audio can also suspend or unload every display, and mute wallpaper
+/// audio, without touching that choice.
 @MainActor
 final class WallpaperPresentationPolicy {
     typealias ApplyCompletion = @MainActor (Result<Void, Error>) -> Void
@@ -24,15 +53,21 @@ final class WallpaperPresentationPolicy {
     private let windowCenter: NotificationCenter
     private let surfaces: @MainActor () -> [WallpaperSurfaceVisibility]
     private let isSessionLocked: @MainActor () -> Bool
+    private let displaySleepAction: @MainActor () -> DisplaySleepAction
+    private let appRuleActions: @MainActor () -> Set<AppRuleAction>
+    private let otherAudioActive: @MainActor () -> Bool
+    private let otherAudioAction: @MainActor () -> OtherAudioAction
     private let occlusionSettleDelay: Duration
     private let counters: RuntimeCounters
-    private let applyGlobal: @MainActor (Bool, @escaping ApplyCompletion) -> Void
+    private let applyGlobal: @MainActor (GlobalPresentation, @escaping ApplyCompletion) -> Void
+    private let applyAudio: @MainActor (Bool, @escaping ApplyCompletion) -> Void
     private let applyDisplay: @MainActor (UInt32, Bool, @escaping ApplyCompletion) -> Void
 
     private var observers: [(NotificationCenter, NSObjectProtocol)] = []
     private var displaysAsleep = false
     private var settle: Task<Void, Never>?
-    private var appliedGlobal: Bool? = false
+    private var appliedGlobal: GlobalPresentation? = .running
+    private var appliedAudio: Bool? = false
     /// Acknowledged state per display. A display with no entry has never been
     /// told anything, so it is presenting.
     private var appliedDisplays: [UInt32: Bool] = [:]
@@ -40,10 +75,16 @@ final class WallpaperPresentationPolicy {
     /// whose delivery failed; a later evaluation retries it.
     private var pendingDisplays: Set<UInt32> = []
     private var deliveryInFlight = false
-    /// Conditions under which no display at all can present.
-    private(set) var isSuspended = false
+    /// Conditions under which no display at all can present, and how hard.
+    private(set) var globalPresentation: GlobalPresentation = .running
+    /// Wallpaper audio held down by a mute rule or other-app audio.
+    private(set) var isAudioSuppressed = false
     /// Displays suspended on their own, by occlusion.
     private(set) var suspendedDisplayIDs: Set<UInt32> = []
+
+    /// True when presentation is suspended or unloaded. Occlusion of one display
+    /// does not set this.
+    var isSuspended: Bool { globalPresentation != .running }
 
     /// Closures are optional so their `@MainActor` defaults are built inside
     /// this (already `@MainActor`) initializer rather than in a default-argument
@@ -54,9 +95,14 @@ final class WallpaperPresentationPolicy {
         windowCenter: NotificationCenter = .default,
         surfaces: (@MainActor () -> [WallpaperSurfaceVisibility])? = nil,
         isSessionLocked: (@MainActor () -> Bool)? = nil,
+        displaySleepAction: (@MainActor () -> DisplaySleepAction)? = nil,
+        appRuleActions: (@MainActor () -> Set<AppRuleAction>)? = nil,
+        otherAudioActive: (@MainActor () -> Bool)? = nil,
+        otherAudioAction: (@MainActor () -> OtherAudioAction)? = nil,
         occlusionSettleDelay: Duration = .seconds(1),
         counters: RuntimeCounters? = nil,
-        applyGlobal: @escaping @MainActor (Bool, @escaping ApplyCompletion) -> Void,
+        applyGlobal: @escaping @MainActor (GlobalPresentation, @escaping ApplyCompletion) -> Void,
+        applyAudio: (@MainActor (Bool, @escaping ApplyCompletion) -> Void)? = nil,
         applyDisplay: @escaping @MainActor (UInt32, Bool, @escaping ApplyCompletion) -> Void
     ) {
         self.workspaceCenter = workspaceCenter
@@ -64,9 +110,14 @@ final class WallpaperPresentationPolicy {
         self.windowCenter = windowCenter
         self.surfaces = surfaces ?? { Self.systemSurfaces() }
         self.isSessionLocked = isSessionLocked ?? { Self.sessionIsLocked() }
+        self.displaySleepAction = displaySleepAction ?? { .pause }
+        self.appRuleActions = appRuleActions ?? { [] }
+        self.otherAudioActive = otherAudioActive ?? { false }
+        self.otherAudioAction = otherAudioAction ?? { .keepRunning }
         self.occlusionSettleDelay = occlusionSettleDelay
         self.counters = counters ?? .shared
         self.applyGlobal = applyGlobal
+        self.applyAudio = applyAudio ?? { _, completion in completion(.success(())) }
         self.applyDisplay = applyDisplay
     }
 
@@ -109,10 +160,11 @@ final class WallpaperPresentationPolicy {
         for (center, token) in observers { center.removeObserver(token) }
         observers.removeAll()
         displaysAsleep = false
-        // Teardown must never leave a surface suspended.
+        // Teardown must never leave a surface suspended or muted.
         pendingDisplays.formUnion(suspendedDisplayIDs)
         suspendedDisplayIDs.removeAll()
-        isSuspended = false
+        globalPresentation = .running
+        isAudioSuppressed = false
         deliverPending()
     }
 
@@ -157,7 +209,8 @@ final class WallpaperPresentationPolicy {
 
     /// Retry unacknowledged delivery even when visibility is unchanged.
     func evaluate() {
-        let blocking = displaysAsleep || isSessionLocked()
+        let presentation = resolvedPresentation()
+        let audio = resolvedAudioSuppressed()
         let current = surfaces()
         let hidden = Set(current.filter { !$0.isVisible }.map(\.displayID))
         let known = Set(current.map(\.displayID))
@@ -170,9 +223,14 @@ final class WallpaperPresentationPolicy {
         pendingDisplays.formIntersection(known)
         suspendedDisplayIDs.formIntersection(known)
 
-        if blocking != isSuspended {
-            commitGlobal(blocking)
+        if presentation != globalPresentation {
+            commitPlayback(presentation: presentation, audio: audio)
             return
+        }
+        let audioChanged = audio != isAudioSuppressed
+        if audioChanged {
+            isAudioSuppressed = audio
+            AppLog.info("wallpaper audio \(audio ? "suppressed" : "restored")")
         }
         // Resume instantly; delay only occlusion-driven suspension so a Space
         // switch or a Mission Control pass does not freeze a visible wallpaper.
@@ -200,12 +258,42 @@ final class WallpaperPresentationPolicy {
             let stillHidden = Set(self.surfaces().filter { !$0.isVisible }.map(\.displayID))
             self.commitHidden(newlyHidden.intersection(stillHidden))
         }
+        if audioChanged { deliverPending() }
     }
 
-    private func commitGlobal(_ suspended: Bool) {
-        if suspended != isSuspended {
-            isSuspended = suspended
-            AppLog.info("presentation \(suspended ? "suspended" : "resumed")")
+    private func resolvedPresentation() -> GlobalPresentation {
+        var strongest = GlobalPresentation.running
+        if displaysAsleep {
+            strongest = max(strongest, displaySleepAction() == .stop ? .unloaded : .suspended)
+        }
+        if isSessionLocked() {
+            strongest = max(strongest, .suspended)
+        }
+        let rules = appRuleActions()
+        if rules.contains(.stop) {
+            strongest = max(strongest, .unloaded)
+        } else if rules.contains(.pause) {
+            strongest = max(strongest, .suspended)
+        }
+        if otherAudioActive(), otherAudioAction() == .pause {
+            strongest = max(strongest, .suspended)
+        }
+        return strongest
+    }
+
+    private func resolvedAudioSuppressed() -> Bool {
+        if appRuleActions().contains(.mute) { return true }
+        return otherAudioActive() && otherAudioAction() == .mute
+    }
+
+    private func commitPlayback(presentation: GlobalPresentation, audio: Bool) {
+        if presentation != globalPresentation {
+            globalPresentation = presentation
+            AppLog.info("presentation \(presentation.logLabel)")
+        }
+        if audio != isAudioSuppressed {
+            isAudioSuppressed = audio
+            AppLog.info("wallpaper audio \(audio ? "suppressed" : "restored")")
         }
         deliverPending()
     }
@@ -223,11 +311,12 @@ final class WallpaperPresentationPolicy {
 
     private func deliverPending() {
         guard !deliveryInFlight else { return }
-        // The global condition is the coarser one, so it goes first.
-        if appliedGlobal != isSuspended {
-            let suspended = isSuspended
+        // The global condition is the coarser one, so it goes first. Audio
+        // follows, then per-display occlusion, one acknowledgement at a time.
+        if appliedGlobal != globalPresentation {
+            let presentation = globalPresentation
             deliveryInFlight = true
-            applyGlobal(suspended) { [self] result in
+            applyGlobal(presentation) { [self] result in
                 deliveryInFlight = false
                 guard case .success = result else {
                     // A failed bridge transaction may have rolled rendering
@@ -236,11 +325,25 @@ final class WallpaperPresentationPolicy {
                     appliedGlobal = nil
                     return
                 }
-                appliedGlobal = suspended
-                record(suspended, for: RuntimeSurfaceKey(kind: .desktopScene, displayID: 0))
+                appliedGlobal = presentation
+                record(presentation != .running, for: RuntimeSurfaceKey(kind: .desktopScene, displayID: 0))
                 // Deliveries are serialized, so the rest of the queue — and any
                 // decision that changed while this one was in flight — follows
                 // the acknowledgement.
+                deliverPending()
+            }
+            return
+        }
+        if appliedAudio != isAudioSuppressed {
+            let suppressed = isAudioSuppressed
+            deliveryInFlight = true
+            applyAudio(suppressed) { [self] result in
+                deliveryInFlight = false
+                guard case .success = result else {
+                    appliedAudio = nil
+                    return
+                }
+                appliedAudio = suppressed
                 deliverPending()
             }
             return

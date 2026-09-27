@@ -191,6 +191,8 @@ extension WebPanelController {
         "approved": metrics[entry.id]?.approved ?? false,
         "size": metrics[entry.id]?.size as Any? ?? null,
         "addedAt": metrics[entry.id]?.addedAt.map { $0.timeIntervalSince1970 * 1000 } as Any? ?? null,
+        // Measured in the background while the wallpaper played alone; null until rated.
+        "energy": store.wallpaperEnergyRatings?.snapshot(for: entry.id) as Any? ?? null,
       ]
     }
     assets.previews = previews
@@ -369,7 +371,7 @@ extension WebPanelController {
       "settings": [
         "launchAtLogin": settings.launchAtLoginEnabled,
         "launchAtLoginAvailable": settings.launchAtLoginAvailable,
-        "pauseOnBattery": settings.pauseOnBatteryPower,
+        "verboseLogging": settings.verboseLogging,
         "videoBackend": settings.videoBackend, "videoBackends": videoBackends,
         "contentPacing": settings.contentPacingEnabled,
         "sharedVideoDecode": settings.sharedVideoDecodeEnabled,
@@ -383,10 +385,23 @@ extension WebPanelController {
         "renderScale": Double(settings.renderScale),
         "preferredRenderScale": Double(settings.preferredRenderScale),
         "renderScaleSupported": settings.renderScaleSupported,
-        "batteryProfileEnabled": settings.batteryProfileEnabled,
+        "batteryMode": Self.batteryMode(settings.batteryMode),
         "batteryRenderScale": Double(settings.batteryRenderScale),
         "batteryTargetFps": Int(settings.batteryTargetFps),
         "onBatteryPower": settings.onBatteryPower,
+        "frameRateCap": settings.frameRateCap.map { Int($0) } as Any? ?? null,
+        "frameRateCapMax": Self.frameRateCapMax(settings),
+        "displaySleepAction": playback.displaySleepAction.rawValue,
+        "otherAudioAction": playback.otherAudioAction.rawValue,
+        "appRules": playback.appRules.map { rule in
+          [
+            "id": rule.id.uuidString,
+            "name": rule.name,
+            "bundleID": rule.bundleIdentifier,
+            "condition": rule.condition.rawValue,
+            "action": rule.action.rawValue,
+          ]
+        },
         "keepWindowsOnWallpaperClick": !DesktopClickRevealPreference.isEnabled,
         "hideAfterActivating": hidesAfterActivating,
         "lockScreenEnabled": lock?.isRequested ?? false, "lockScreenAvailable": lock != nil,
@@ -579,6 +594,20 @@ extension WebPanelController {
     case .match: "match"
     case .fill: "fill"
     }
+  }
+
+  static func batteryMode(_ mode: BridgeBatteryMode) -> String {
+    switch mode {
+    case .keepRunning: "keepRunning"
+    case .reducedQuality: "reducedQuality"
+    case .pause: "pause"
+    }
+  }
+
+  static func frameRateCapMax(_ settings: BridgeSettingsSnapshot) -> Int {
+    let highest = settings.displays.map(\.maxFps).max()
+    guard let highest, highest >= 10 else { return 60 }
+    return Int(highest)
   }
 
   static func options(

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <span>
 
@@ -38,5 +39,12 @@ using WallpaperLogCallback = void (*)(int level, const char* file, int line, con
 
 void SetWallpaperLogCallback(WallpaperLogCallback callback);
 void WallpaperLog(int level, const char* file, int line, const char* fmt, ...);
+
+/// Tags every line this thread logs from now on with `scope`, a host-assigned
+/// load number; zero means untagged. A scene's looper threads take their
+/// scene's scope when they start, so a line can be traced to the wallpaper
+/// load that produced it even with several scenes loading at once.
+void SetWallpaperLogScope(uint64_t scope);
+uint64_t WallpaperLogScope();
 
 std::string logToTmpfileWithSha1(std::span<const char>, const char* fmt, ...);

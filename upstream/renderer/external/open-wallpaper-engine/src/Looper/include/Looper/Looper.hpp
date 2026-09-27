@@ -44,6 +44,9 @@ public:
     void                   post(const std::shared_ptr<Message>&);
     const std::string_view name() const;
     void                   setName(std::string_view);
+    /// The log scope the looper's thread adopts when it starts; see
+    /// `SetWallpaperLogScope`. Takes effect on the next `start()`.
+    void                   setLogScope(uint64_t scope);
 
 private:
     struct MessageWrapper {
@@ -53,6 +56,7 @@ private:
 
     bool                    m_running { false };
     std::string             m_name { "unknown" };
+    uint64_t                m_log_scope { 0 };
     std::mutex              m_mutex;
     std::condition_variable m_condition;
 

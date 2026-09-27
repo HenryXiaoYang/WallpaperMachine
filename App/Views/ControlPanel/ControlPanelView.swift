@@ -7,14 +7,14 @@ enum SidebarSelection: String {
 }
 
 enum SettingsSection: String, CaseIterable {
-  case general, appearance, performance, displays, library, storage, about
+  case performance, general, appearance, displays, library, storage, about
 }
 
 @MainActor
 final class ControlPanelNavigation: ObservableObject {
   @Published var selection: SidebarSelection?
   @Published var targetDisplayID = "primary"
-  @Published private(set) var settingsSection = SettingsSection.general
+  @Published private(set) var settingsSection = SettingsSection.performance
   @Published private(set) var settingsSectionToken: UInt64 = 0
 
   init(selection: SidebarSelection? = .wallpaper) { self.selection = selection }

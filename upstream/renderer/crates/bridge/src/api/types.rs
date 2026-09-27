@@ -191,6 +191,14 @@ pub enum BridgePlaybackState {
     Paused,
 }
 
+/// What wallpapers do while the machine is on battery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum BridgeBatteryMode {
+    KeepRunning,
+    ReducedQuality,
+    Pause,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct BridgeAppSnapshot {
     pub playback_state: BridgePlaybackState,
@@ -430,7 +438,9 @@ pub struct BridgeSettingsSnapshot {
     pub displays: Vec<BridgeDisplaySettingsRow>,
     pub launch_at_login_available: bool,
     pub launch_at_login_enabled: bool,
-    pub pause_on_battery_power: bool,
+    pub battery_mode: BridgeBatteryMode,
+    /// Debug-level lines are recorded too; see `set_verbose_logging`.
+    pub verbose_logging: bool,
     pub git_sha: String,
     pub bridge_version: String,
     pub core_version: String,
@@ -479,7 +489,9 @@ pub struct BridgeSettingsSnapshot {
     /// profile. `preferred_render_scale` is what the user saved.
     pub render_scale: f32,
     pub preferred_render_scale: f32,
-    pub battery_profile_enabled: bool,
+    /// Global frame-rate ceiling. `None` means no limit. Saved per-display
+    /// rates are not rewritten to this.
+    pub frame_rate_cap: Option<u32>,
     pub battery_render_scale: f32,
     pub battery_target_fps: u32,
     pub on_battery_power: bool,

@@ -50,6 +50,9 @@ final class WebPanelController: NSObject, WKNavigationDelegate {
   let updater: AppUpdateStore
   let theme: AppThemeStore
   let appLanguage: AppLanguageStore
+  let playback: PlaybackPreferences
+  /// Tests pass a closure so choosing an app does not open a panel. Nil uses the sheet.
+  var chooseApplication: (@MainActor () async -> URL?)?
   let displayTitles: DisplayTitleResolver
   weak var webView: WKWebView?
   let assets: WebPanelAssets
@@ -80,6 +83,8 @@ final class WebPanelController: NSObject, WKNavigationDelegate {
   var welcomeSeen: Bool
   /// Folder sizes and dates for Installed's sort menu, measured off the main thread.
   let libraryMetrics: LibraryMetricsService
+  /// Energy readout on Settings › Performance; samples only while Settings is on screen.
+  let energyUsage: EnergyUsageMonitor
   let defaults: UserDefaults
   var displayOptions: [String: BridgeWallpaperOptionsSnapshot] = [:]
   var displayOptionsRevision: UInt64?
@@ -121,7 +126,10 @@ final class WebPanelController: NSObject, WKNavigationDelegate {
     defaults: UserDefaults = .standard,
     libraryMetrics: LibraryMetricsService? = nil,
     assets: WebPanelAssets? = nil,
-    appLanguage: AppLanguageStore? = nil
+    energyUsage: EnergyUsageMonitor? = nil,
+    appLanguage: AppLanguageStore? = nil,
+    playback: PlaybackPreferences? = nil,
+    chooseApplication: (@MainActor () async -> URL?)? = nil
   ) {
     self.store = store
     self.assets = assets ?? WebPanelAssets()
@@ -134,15 +142,19 @@ final class WebPanelController: NSObject, WKNavigationDelegate {
     self.isPresentationVisible = isPresentationVisible
     self.theme = theme ?? .shared
     self.defaults = defaults
+    self.playback = playback ?? .shared
+    self.chooseApplication = chooseApplication
     filtersCollapsed = Self.filtersCollapsedKeys.mapValues { defaults.bool(forKey: $0) }
     welcomeSeen = defaults.bool(forKey: Self.welcomeSeenKey)
     self.libraryMetrics = libraryMetrics ?? LibraryMetricsService()
+    self.energyUsage = energyUsage ?? EnergyUsageMonitor()
     defaults.removeObject(forKey: Self.legacyInspectorWidthKey)
     favoriteIDs = Set(
       (try? JSONDecoder().decode(
         [String].self, from: UserDefaults.standard.data(forKey: Self.favoriteKey) ?? Data())) ?? [])
     super.init()
     self.libraryMetrics.onChange = { [weak self] in self?.scheduleUpdate() }
+    self.energyUsage.onChange = { [weak self] in self?.pushEnergyUsage() }
   }
 
   func makeWebView() -> WKWebView {
@@ -180,6 +192,11 @@ final class WebPanelController: NSObject, WKNavigationDelegate {
         }
         .store(in: &subscriptions)
     }
+    NotificationCenter.default.publisher(for: PlaybackPreferences.didChangeNotification, object: playback)
+      .sink { [weak self] _ in
+        Task { @MainActor [weak self] in self?.scheduleUpdate() }
+      }
+      .store(in: &subscriptions)
     navigation.objectWillChange.sink { [weak self] _ in
       Task { @MainActor [weak self] in self?.scheduleUpdate() }
     }.store(in: &subscriptions)
@@ -235,6 +252,7 @@ final class WebPanelController: NSObject, WKNavigationDelegate {
 
   func stop() {
     stopped = true
+    energyUsage.setActive(false)
     pageGeneration &+= 1
     updateTask?.cancel()
     updateTask = nil
@@ -269,6 +287,33 @@ final class WebPanelController: NSObject, WKNavigationDelegate {
     return window.isVisible && !window.isMiniaturized && window.occlusionState.contains(.visible)
   }
 
+  /// Sampling costs about 3 ms of kernel calls every two seconds, so it runs only while
+  /// the panel is visible on Settings. Settings tabs switch inside the page without
+  /// telling native, so the other tabs sample too; that costs less than reporting them.
+  func updateEnergyMonitoring() {
+    let showsSettings = navigation.selection == .settings || navigation.selection == .display
+    energyUsage.setActive(!stopped && isReady && showsSettings && presentationAllowsUpdates())
+  }
+
+  /// The readout changes every two seconds, so it bypasses the full snapshot and patches
+  /// only its own row.
+  private func pushEnergyUsage() {
+    guard !stopped, isReady, let view = webView, presentationAllowsUpdates() else {
+      updateEnergyMonitoring()
+      return
+    }
+    let reading = energyUsage.snapshot
+    Task { @MainActor in
+      do {
+        _ = try await view.callAsyncJavaScript(
+          "window.wallpaperUI.energy?.(reading)", arguments: ["reading": reading], in: nil,
+          contentWorld: .page)
+      } catch {
+        AppLog.debug("Energy readout could not update: \(error.localizedDescription)")
+      }
+    }
+  }
+
   private var needsDisplayOptions: Bool {
     switch navigation.selection {
     case .settings, .display: true
@@ -278,6 +323,7 @@ final class WebPanelController: NSObject, WKNavigationDelegate {
 
   func scheduleUpdate() {
     guard !stopped else { return }
+    updateEnergyMonitoring()
     updatePending = true
     // Native continuation must not wait for an in-flight page Promise.
     workshop.resumeDownloadRequests(bridge: store)
@@ -438,6 +484,7 @@ final class WebPanelController: NSObject, WKNavigationDelegate {
 
   func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
     isReady = false
+    updateEnergyMonitoring()
     pageGeneration &+= 1
     updateTask?.cancel()
     updateTask = nil

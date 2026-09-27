@@ -7,11 +7,15 @@ the in-app updater consumes it. Build mechanics live in [build.md](build.md).
 
 `MARKETING_VERSION` and `CURRENT_PROJECT_VERSION` in
 [`project.yml`](../project.yml) are the version of both the app and the
-lock-screen extension; the two targets carry identical values.
+lock-screen extension; the two targets carry identical values. The embedded
+`MediaRemoteAdapter` framework declares the same `CURRENT_PROJECT_VERSION`,
+because XcodeGen would otherwise generate its own default of 1 there.
 `scripts/bump_version.py` also rewrites the same two keys in the committed
 `WallpaperMachine.xcodeproj/project.pbxproj`, so the generated project stays
-in sync without anyone running `xcodegen`. Change the version through the script
-or the Version workflow, never by editing one of the two files alone.
+in sync without anyone running `xcodegen`, and running it produces no diff.
+Change the version through the script or the Version workflow, never by editing
+one of the two files alone. The panel reads the bundle's version, so Settings →
+About and every GitHub report show the released number with no other edit.
 
 `MARKETING_VERSION` is a strict `x.y.z` semantic version.
 `CURRENT_PROJECT_VERSION` is an integer build number, incremented by one on every

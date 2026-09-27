@@ -30,7 +30,7 @@ pub use api::{
     BridgeDisplaySettingsRow, BridgeError, BridgeErrorKind, BridgeFileFilter,
     BridgeLibraryScanStatus,
     BridgeLibrarySnapshot, BridgeLockScreenScene, BridgeLogLevel, BridgeLogStatus,
-    BridgeMonitorInfoRow, BridgeMonitorInformationSnapshot, BridgePlaybackState,
+    BridgeMonitorInfoRow, BridgeMonitorInformationSnapshot, BridgePlaybackState, BridgeBatteryMode,
     BridgePropertyDescriptor, BridgePropertyKind, BridgePropertyValue, BridgeScalingMode,
     BridgeSceneBackendReport, BridgeSceneUpdateModeReport, BridgeSettingsSnapshot,
     BridgeSliderMetadata, BridgeSnapshotBundle, BridgeStorageStatus,

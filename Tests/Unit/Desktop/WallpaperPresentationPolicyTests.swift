@@ -45,8 +45,8 @@ final class WallpaperPresentationPolicyTests: XCTestCase {
             isSessionLocked: { probe.sessionLocked },
             occlusionSettleDelay: settle,
             counters: counters,
-            applyGlobal: { suspended, completion in
-                probe.applied.append(suspended)
+            applyGlobal: { presentation, completion in
+                probe.applied.append(presentation != .running)
                 completion(.success(()))
             },
             applyDisplay: { display, suspended, completion in

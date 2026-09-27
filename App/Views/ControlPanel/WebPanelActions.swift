@@ -239,8 +239,20 @@ extension WebPanelController {
       switch key {
       case "launchAtLogin":
         try await store.setLaunchAtLoginAsync(enabled: try request.boolean("value"))
-      case "pauseOnBattery":
-        try await store.setPauseOnBatteryPowerAsync(enabled: try request.boolean("value"))
+      case "batteryMode":
+        try await store.setBatteryModeAsync(try Self.batteryMode(request.string("value")))
+      case "displaySleepAction":
+        guard let action = DisplaySleepAction(rawValue: try request.string("value")) else {
+          throw WebPanelRequest.invalid
+        }
+        playback.displaySleepAction = action
+      case "otherAudioAction":
+        guard let action = OtherAudioAction(rawValue: try request.string("value")) else {
+          throw WebPanelRequest.invalid
+        }
+        playback.otherAudioAction = action
+      case "verboseLogging":
+        try await store.setVerboseLoggingAsync(enabled: try request.boolean("value"))
       case "keepWindowsOnWallpaperClick":
         try DesktopClickRevealPreference.setEnabled(!(try request.boolean("value")))
       case "hideAfterActivating":
@@ -283,10 +295,22 @@ extension WebPanelController {
         // never applied. The two names match the Rust side exactly.
         guard Self.sceneRendererModes.contains(mode) else { throw WebPanelRequest.invalid }
         try await store.setSceneRendererAsync(mode)
-      case "batteryProfileEnabled", "batteryRenderScale", "batteryTargetFps":
+      case "batteryRenderScale", "batteryTargetFps":
         try await setBatteryQualityProfile(key: key, request: request)
+      case "frameRateCap":
+        try await store.setFrameRateCapAsync(try Self.frameRateCap(request))
+      case "qualityPreset":
+        try await applyQualityPreset(try request.string("value"))
       default: throw WebPanelRequest.invalid
       }
+      if Self.renderingSettings.contains(key) { energyUsage.settingChanged() }
+    case "appRuleAdd":
+      try await addAppRule()
+    case "appRuleUpdate":
+      try await updateAppRule(request)
+    case "appRuleRemove":
+      guard let id = UUID(uuidString: try request.string("id")) else { throw WebPanelRequest.invalid }
+      playback.removeRule(id: id)
     case "lockScreenRetry": store.lockScreenWallpaper?.refresh()
     case "displaySetting": try await displaySetting(request)
     case "eject":
@@ -321,6 +345,17 @@ extension WebPanelController {
         button: String(localized: "Clear Logs"))
       {
         try store.clearLogsAsync()
+      }
+    case "exportDiagnostics":
+      let panel = NSSavePanel()
+      panel.title = String(localized: "Export Diagnostics")
+      panel.message = String(localized: "Attach this file to your bug report.")
+      panel.nameFieldStringValue = DiagnosticsBundle.suggestedFileName(at: Date())
+      panel.allowedContentTypes = [.zip]
+      panel.directoryURL = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
+      if await choose(panel), let destination = panel.url {
+        try await exportDiagnostics(to: destination)
+        NSWorkspace.shared.activateFileViewerSelecting([destination])
       }
     case "revealUserAssets":
       UserAssetStorage.revealManagedDirectory()
@@ -751,11 +786,45 @@ extension WebPanelController {
     }
   }
 
-  func choose(_ panel: NSOpenPanel) async -> Bool {
+  func choose(_ panel: NSSavePanel) async -> Bool {
     guard let window = webView?.window else { return false }
     return await withCheckedContinuation { continuation in
       panel.beginSheetModal(for: window) { continuation.resume(returning: $0 == .OK) }
     }
+  }
+
+  /// Writes the diagnostics bundle off the main actor: reading and redacting
+  /// up to 64 MB of logs must not stall the panel.
+  func exportDiagnostics(to destination: URL) async throws {
+    let settings = store.settingsSnapshot
+    var environment = DiagnosticEnvironment.current()
+    environment.append("""
+      settings: scene renderer \(settings.sceneRenderer), video backend \(settings.videoBackend), \
+      render scale \(settings.renderScale) (preferred \(settings.preferredRenderScale)), battery mode \
+      \(settings.batteryMode), frame-rate cap \(settings.frameRateCap.map(String.init) ?? "none"), on battery \
+      \(settings.onBatteryPower), verbose logging \(settings.verboseLogging)
+      """)
+    for scene in settings.sceneRenderers {
+      environment.append("""
+        running scene: display \(scene.displayId) "\(scene.displayName)", wallpaper \(scene.wallpaperId) \
+        "\(scene.wallpaperTitle)", backend \(scene.backend)\(scene.fallbackReason.map { " (fell back: \($0))" } ?? ""), \
+        video path \(scene.videoPath)
+        """)
+    }
+    let bundle = DiagnosticsBundle(
+      sources: DiagnosticsBundle.sources(logsRoot: try store.logFolderURL()),
+      redactor: DiagnosticsRedactor(
+        homeDirectory: FileManager.default.homeDirectoryForCurrentUser.path,
+        userNames: [NSUserName(), NSFullUserName()],
+        secrets: [workshop.downloader.savedAccount].compactMap { $0 }))
+    let date = Date()
+    let report = try await Task.detached(priority: .userInitiated) {
+      try bundle.export(to: destination, environment: environment, at: date)
+    }.value
+    AppLog.info("""
+      diagnostics exported: \(report.included.count) files\
+      \(report.missing.isEmpty ? "" : "; not included: \(report.missing.joined(separator: "; "))")
+      """)
   }
 
   static let videoBackendModes = ["compatibility", "native_preferred"]
@@ -765,24 +834,106 @@ extension WebPanelController {
   static let sceneRendererModes = ["compatibility", "native_metal_preferred"]
   static let renderScaleRange: ClosedRange<Double> = 0.25...1
   static let batteryTargetFpsRange: ClosedRange<Double> = 1...240
+  /// Settings that change how much rendering work runs now, so the energy readout
+  /// restarts its window and compares before with after. Battery quality counts only
+  /// while it is in force, but restarting on it anyway costs a few seconds of readout.
+  static let renderingSettings: Set<String> = [
+    "batteryMode", "batteryRenderScale", "batteryTargetFps", "frameRateCap", "qualityPreset",
+    "renderScale", "videoBackend", "contentPacing", "sharedVideoDecode", "sceneOptimization",
+    "sceneOnDemand", "sceneVideoPlaneSampling", "sceneRenderer",
+  ]
 
-  /// The engine owns the battery profile as one value, so a single changed control
-  /// is merged with the other two as the engine currently reports them.
+  /// The engine owns the battery scale and frame rate as one value, so a single
+  /// changed control is merged with the other as the engine currently reports it.
   func setBatteryQualityProfile(key: String, request: WebPanelRequest) async throws {
     let settings = store.settingsSnapshot
-    var enabled = settings.batteryProfileEnabled
     var scale = settings.batteryRenderScale
     var fps = settings.batteryTargetFps
     switch key {
-    case "batteryProfileEnabled": enabled = try request.boolean("value")
     case "batteryRenderScale":
       scale = Float(try request.clampedNumber("value", to: Self.renderScaleRange))
     case "batteryTargetFps":
       fps = UInt32(try request.clampedNumber("value", to: Self.batteryTargetFpsRange).rounded())
     default: throw WebPanelRequest.invalid
     }
-    try await store.setBatteryQualityProfileAsync(
-      enabled: enabled, renderScale: scale, targetFps: fps)
+    try await store.setBatteryQualityProfileAsync(renderScale: scale, targetFps: fps)
+  }
+
+  func applyQualityPreset(_ name: String) async throws {
+    let scale: Float
+    let cap: UInt32?
+    switch name {
+    case "low": (scale, cap) = (0.5, 30)
+    case "medium": (scale, cap) = (0.75, 60)
+    case "high": (scale, cap) = (1, nil)
+    default: throw WebPanelRequest.invalid
+    }
+    try await store.setRenderScaleAsync(scale)
+    try await store.setFrameRateCapAsync(cap)
+  }
+
+  static func batteryMode(_ value: String) throws -> BridgeBatteryMode {
+    switch value {
+    case "keepRunning": .keepRunning
+    case "reducedQuality": .reducedQuality
+    case "pause": .pause
+    default: throw WebPanelRequest.invalid
+    }
+  }
+
+  /// Null is no limit. A number is clamped to 1...240 and rounded.
+  static func frameRateCap(_ request: WebPanelRequest) throws -> UInt32? {
+    guard let value = request.body["value"] else { throw WebPanelRequest.invalid }
+    if value is NSNull { return nil }
+    guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+      number.doubleValue.isFinite
+    else { throw WebPanelRequest.invalid }
+    let clamped = min(max(number.doubleValue, 1), 240)
+    return UInt32(clamped.rounded())
+  }
+
+  func addAppRule() async throws {
+    guard let url = await chooseApplicationURL() else { return }
+    guard let bundleID = Bundle(url: url)?.bundleIdentifier else {
+      throw WallpaperActionError(
+        message: String(localized: "This app has no bundle identifier, so it can’t be used in an app rule."))
+    }
+    var name = FileManager.default.displayName(atPath: url.path)
+    if name.lowercased().hasSuffix(".app") {
+      name = String(name.dropLast(4))
+    }
+    playback.addRule(bundleIdentifier: bundleID, name: name)
+  }
+
+  func updateAppRule(_ request: WebPanelRequest) async throws {
+    guard let id = UUID(uuidString: try request.string("id")) else { throw WebPanelRequest.invalid }
+    switch try request.string("key") {
+    case "condition":
+      guard let condition = AppRuleCondition(rawValue: try request.string("value")) else {
+        throw WebPanelRequest.invalid
+      }
+      try playback.updateRule(id: id, condition: condition)
+    case "action":
+      guard let action = AppRuleAction(rawValue: try request.string("value")) else {
+        throw WebPanelRequest.invalid
+      }
+      try playback.updateRule(id: id, action: action)
+    default: throw WebPanelRequest.invalid
+    }
+  }
+
+  func chooseApplicationURL() async -> URL? {
+    if let chooseApplication { return await chooseApplication() }
+    let panel = NSOpenPanel()
+    panel.title = String(localized: "Choose App")
+    panel.allowedContentTypes = [.application]
+    panel.directoryURL = URL(fileURLWithPath: "/Applications", isDirectory: true)
+    panel.canChooseFiles = true
+    panel.canChooseDirectories = false
+    panel.allowsMultipleSelection = false
+    panel.treatsFilePackagesAsDirectories = false
+    guard await choose(panel) else { return nil }
+    return panel.url
   }
 
   func confirm(_ title: String, detail: String, button: String) async -> Bool {

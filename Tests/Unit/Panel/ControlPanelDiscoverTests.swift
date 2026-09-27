@@ -39,7 +39,7 @@ final class ControlPanelDiscoverTests: ControlPanelTestCase {
     guard controller.isReady else { return }
     XCTAssertNil(web.window)
     _ = try await web.callAsyncJavaScript("""
-      document.querySelector('#welcome [data-action="go"][data-step="4"]').click();
+      document.querySelector('#welcome [data-action="go"][data-step="5"]').click();
       document.querySelector('#welcome [data-action="finish"]').click();
       """, arguments: [:], in: nil, contentWorld: .page)
     let result =
@@ -111,7 +111,7 @@ final class ControlPanelDiscoverTests: ControlPanelTestCase {
     guard controller.isReady else { return }
     XCTAssertNil(web.window)
     _ = try await web.callAsyncJavaScript("""
-      document.querySelector('#welcome [data-action="go"][data-step="4"]').click();
+      document.querySelector('#welcome [data-action="go"][data-step="5"]').click();
       document.querySelector('#welcome [data-action="finish"]').click();
       """, arguments: [:], in: nil, contentWorld: .page)
     let result =
@@ -179,7 +179,7 @@ final class ControlPanelDiscoverTests: ControlPanelTestCase {
     guard controller.isReady else { return }
     XCTAssertNil(web.window)
     _ = try await web.callAsyncJavaScript("""
-      document.querySelector('#welcome [data-action="go"][data-step="4"]').click();
+      document.querySelector('#welcome [data-action="go"][data-step="5"]').click();
       document.querySelector('#welcome [data-action="finish"]').click();
       """, arguments: [:], in: nil, contentWorld: .page)
     let setup = """
@@ -277,7 +277,7 @@ final class ControlPanelDiscoverTests: ControlPanelTestCase {
     guard controller.isReady else { return }
     XCTAssertNil(web.window)
     _ = try await web.callAsyncJavaScript("""
-      document.querySelector('#welcome [data-action="go"][data-step="4"]').click();
+      document.querySelector('#welcome [data-action="go"][data-step="5"]').click();
       document.querySelector('#welcome [data-action="finish"]').click();
       """, arguments: [:], in: nil, contentWorld: .page)
     let base =

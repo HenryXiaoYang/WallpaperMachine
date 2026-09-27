@@ -158,6 +158,17 @@ Swift tests cover, without starting the app:
   and a poster-handoff regression covering a pathless original, retention of its
   poster and recovery journal, and rejection of delayed encoding completions
   after suspension. No test selects a real wallpaper.
+- **Diagnostics** — `AppLogRouterTests`: lines logged before the bridge keep
+  their time and order and are written when it attaches, overflow is reported
+  rather than silent, loads start only once the log is open, and concurrent
+  lines all arrive. `DiagnosticsRedactorTests`: home paths in all forms, user
+  and account names as whole tokens only, SteamCMD sign-in names, and
+  credential values without touching `token expired`. `DiagnosticsBundleTests`:
+  newest sessions first including `-N` suffix order, the byte budget with tail
+  truncation, crash-report prefix, age and count filters, a missing extension
+  log noted, and the zip's actual entries. Log line format, retention and the
+  verbose setting are covered in Rust (see
+  [diagnostics.md](../features/diagnostics.md#verification)).
 
 What native tests do **not** establish: macOS acceptance/restoration of native
 wallpaper selections, live GitHub release install and Applications replacement,

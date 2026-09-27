@@ -108,6 +108,9 @@ label.settings-label { cursor: pointer; }
 .settings-readout .settings-label { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
 .settings-readout .settings-control { margin: 0; justify-content: flex-start; width: 100%; font-variant-numeric: tabular-nums; }
 .settings-readout .settings-status, .settings-readout .settings-list { color: var(--text); }
+.settings-readout .settings-control > .settings-note { flex-basis: 100%; }
+/* A note capped at 64ch would otherwise fit beside a short headline on a wide panel. */
+.settings-readout .settings-control > .settings-status:has(+ .settings-note) { flex-basis: 100%; }
 .settings-button {
   appearance: none;
   min-height: var(--control-height);
@@ -153,6 +156,18 @@ label.settings-label { cursor: pointer; }
 #settings-content input.settings-number { width: 70px; text-align: right; font-variant-numeric: tabular-nums; }
 #settings-content input[type="range"] { width: 130px; max-width: 100%; margin: 4px 0; cursor: pointer; }
 .settings-unit { min-width: 22px; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; text-align: right; }
+.settings-segment { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.settings-segment-button { appearance: none; border: 0; border-radius: 0; background: transparent; color: var(--text); font: inherit; min-height: var(--control-height); padding: 0 12px; cursor: pointer; }
+.settings-segment-button + .settings-segment-button { border-left: 1px solid var(--line); }
+.settings-segment-button[aria-pressed="true"] { background: var(--accent-soft); font-weight: 600; }
+.settings-segment-button[aria-pressed="true"]:disabled { opacity: 1; }
+.settings-rules, .settings-rule { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
+.settings-disclosure-body .settings-rules, .settings-disclosure-body > .settings-rule, .settings-disclosure-body > .settings-empty { width: 100%; }
+.settings-rule { width: 100%; }
+.settings-rule-name { flex: 1 1 120px; min-width: 0; overflow-wrap: anywhere; }
+#settings-content .settings-rule select { min-width: 112px; padding-right: 26px; }
+.settings-limit-note { margin: 0 0 8px; }
+.settings-limit-note .settings-button { margin-left: 8px; }
 #settings-content input[type="color"] { width: 46px; height: 26px; padding: 2px; border: 1px solid var(--line); border-radius: 5px; background: var(--raised); cursor: pointer; }
 #settings-content input[type="color"]::-webkit-color-swatch-wrapper { padding: 0; }
 #settings-content input[type="color"]::-webkit-color-swatch { border: 1px solid var(--line-strong); border-radius: 3px; }

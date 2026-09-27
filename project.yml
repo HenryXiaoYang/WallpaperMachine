@@ -30,6 +30,9 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: app.wallpapermachine.MediaRemoteAdapter
         GENERATE_INFOPLIST_FILE: YES
+        # XcodeGen gives a framework build 1, but bump_version.py rewrites every pbxproj
+        # entry; declaring the app's number keeps a regenerated project identical to a bumped one.
+        CURRENT_PROJECT_VERSION: "17"
         CLANG_ENABLE_OBJC_ARC: YES
         GCC_SYMBOLS_PRIVATE_EXTERN: NO
         HEADER_SEARCH_PATHS:

@@ -1,8 +1,20 @@
 import { t } from './i18n.js';
 
 const views = new WeakMap();
+let liveView = null;
+let pendingSection = null;
+// Latest energy reading native pushed; it arrives every two seconds outside the snapshot.
+let energyReading = null;
 // Labels below are English source strings; every one is passed through t() where it is drawn.
-const sections = [['general', 'General', 'settings'], ['appearance', 'Appearance', 'sunMoon'], ['performance', 'Performance', 'slidersVertical'], ['displays', 'Displays', 'monitor'], ['library', 'Library & Steam', 'folder'], ['storage', 'Storage', 'download'], ['about', 'About', 'info']];
+const sections = [['performance', 'Performance', 'slidersVertical'], ['general', 'General', 'settings'], ['appearance', 'Appearance', 'sunMoon'], ['displays', 'Displays', 'monitor'], ['library', 'Library & Steam', 'folder'], ['storage', 'Storage', 'download'], ['about', 'About', 'info']];
+// Shared with the welcome guide's Performance page; WebPanelActions.applyQualityPreset holds the same values.
+export const qualityPresets = { low: { frameRateCap: 30, renderScale: 0.5 }, medium: { frameRateCap: 60, renderScale: 0.75 }, high: { frameRateCap: null, renderScale: 1 } };
+export const qualityPresetLabels = [['low', 'Low'], ['medium', 'Medium'], ['high', 'High']];
+const batteryModes = [['keepRunning', 'Keep running'], ['reducedQuality', 'Reduced quality'], ['pause', 'Pause']];
+const otherAudioActions = [['keepRunning', 'Keep running'], ['mute', 'Mute'], ['pause', 'Pause']];
+const displaySleepActions = [['pause', 'Pause'], ['stop', 'Stop (free memory)']];
+const appRuleConditions = [['running', 'Running'], ['frontmost', 'In front']];
+const appRuleActions = [['pause', 'Pause'], ['mute', 'Mute'], ['stop', 'Stop']];
 const compactNavigation = window.matchMedia('(max-width: 560px)');
 const renderScales = [[1, '100% (native)'], [0.75, '75%'], [0.5, '50%']];
 const videoBackends = [['compatibility', 'Compatibility'], ['native_preferred', 'Native video preferred']];
@@ -64,10 +76,143 @@ function scaleValue(value) {
   return Number.isFinite(number) ? number : renderScales[0][0];
 }
 
+function finiteNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function storedFrameRateCap(settings) {
+  if (settings.frameRateCap == null || settings.frameRateCap === '') return null;
+  return finiteNumber(settings.frameRateCap);
+}
+
+function frameRateCapMax(settings) {
+  const max = finiteNumber(settings.frameRateCapMax);
+  return max != null && max >= 10 ? Math.round(max) : 60;
+}
+
+// Slider position `max` is reserved for no limit, which runs every display at its
+// native refresh rate, so a stored cap at or above that ceiling is the same choice
+// the control can send.
+export function frameRateCapSlider(settings) {
+  const max = frameRateCapMax(settings);
+  const cap = storedFrameRateCap(settings);
+  const unlimited = cap == null || cap >= max;
+  return { max, unlimited, value: unlimited ? max : Math.min(max - 1, Math.max(10, Math.round(cap))) };
+}
+
+// The slider's value: the top of its range is sent as null (no limit).
+export function frameRateCapValue(value, max) {
+  const number = Number(value);
+  return number >= Number(max) ? null : Math.round(number);
+}
+
+export function frameRateCapReadout(value, max) {
+  const number = finiteNumber(value);
+  if (number == null || number >= Number(max)) return t('Native refresh rate');
+  return t('{fps} fps', { fps: Math.round(number) });
+}
+
+export function activeQualityPreset(settings) {
+  const scale = finiteNumber(settings.preferredRenderScale);
+  const cap = storedFrameRateCap(settings);
+  for (const [id, preset] of Object.entries(qualityPresets)) {
+    const capMatches = preset.frameRateCap == null ? cap == null : cap === preset.frameRateCap;
+    const scaleMatches = scale != null && Math.abs(scale - preset.renderScale) < 0.001;
+    if (capMatches && scaleMatches) return id;
+  }
+  return 'custom';
+}
+
+// Effective rate for the "limited by Performance" note: saved fps, the global
+// cap, and the battery cap while reduced quality is actually in force. Display
+// refresh is not a Performance setting, so it does not raise this note.
+export function performanceLimitedFps(saved, settings = {}) {
+  const rate = finiteNumber(saved);
+  if (rate == null) return null;
+  const limits = [];
+  const cap = storedFrameRateCap(settings);
+  if (cap != null) limits.push(cap);
+  if (settings.batteryMode === 'reducedQuality' && settings.onBatteryPower) {
+    const battery = finiteNumber(settings.batteryTargetFps);
+    if (battery != null) limits.push(battery);
+  }
+  if (!limits.length) return null;
+  const effective = Math.min(rate, ...limits);
+  return effective < rate ? effective : null;
+}
+
+export function revealSettingsSection(section) {
+  if (!sections.some(([id]) => id === section)) return;
+  pendingSection = section;
+  if (!liveView) return;
+  liveView.section = section;
+  if (liveView.container.isConnected) draw(liveView);
+}
+
+export function milliwatts(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return t('Unavailable');
+  if (number >= 1000) return t('{value} W', { value: (number / 1000).toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 }) });
+  return t('{value} mW', { value: Math.round(number).toLocaleString() });
+}
+
+// Thresholds live in Swift (EnergyLevel); the page only names the grade it was sent.
+const energyLevels = { low: 'Low energy use', medium: 'Medium energy use', high: 'High energy use' };
+export function energyLevelLabel(level) {
+  return energyLevels[level] ? t(energyLevels[level]) : '';
+}
+
+function batteryShare(percent) {
+  const number = Number(percent);
+  if (!Number.isFinite(number)) return '';
+  if (number < 1) return t('Less than 1% of a full battery charge per hour.');
+  return t('About {percent}% of a full battery charge per hour.', { percent: Math.round(number) });
+}
+
+// Native keeps the last settled reading from before a rendering setting changed and
+// fills in the after figure once a full window has passed under the new setting.
+function comparisonNote(comparison) {
+  if (!comparison || !Number.isFinite(Number(comparison.beforeMilliwatts))) return '';
+  const before = Number(comparison.beforeMilliwatts);
+  if (!Number.isFinite(Number(comparison.afterMilliwatts))) return t('Measuring the effect of your change. Before it: {before}.', { before: milliwatts(before) });
+  const after = Number(comparison.afterMilliwatts);
+  const change = before > 0 ? Math.round((after - before) / before * 100) : null;
+  if (change == null || change === 0) return t('Before your change: {before}. Now: {after}, about the same.', { before: milliwatts(before), after: milliwatts(after) });
+  return t('Before your change: {before}. Now: {after} ({change}).', { before: milliwatts(before), after: milliwatts(after), change: `${change > 0 ? '+' : '−'}${Math.abs(change)}%` });
+}
+
+// No role="status": a readout that changes every two seconds must not be announced each time.
+function energyControl(escapeHTML) {
+  const reading = energyReading || { status: 'measuring' };
+  const note = text => text ? `<span class="settings-note">${escapeHTML(text)}</span>` : '';
+  if (reading.status === 'unavailable') return `<span class="settings-status">${escapeHTML(t('Unavailable on this Mac'))}</span>`;
+  const comparison = note(comparisonNote(reading.comparison));
+  if (reading.status !== 'ready') return `<span class="settings-status">${escapeHTML(t('Measuring…'))}</span>${comparison}`;
+  const figures = t('CPU {cpu} · GPU {gpu}', { cpu: milliwatts(reading.cpuMilliwatts), gpu: milliwatts(reading.gpuMilliwatts) });
+  // A contended window has no grade: its GPU figure includes other apps' clock.
+  if (reading.gpuContended) return `<span class="settings-status">${escapeHTML(figures)}</span>${note(t('Other apps are keeping the GPU busy, so the GPU figure reads higher than this app’s own share. The grade and any comparison wait until the GPU is free.'))}${comparison}`;
+  const total = Number(reading.cpuMilliwatts) + Number(reading.gpuMilliwatts);
+  const level = energyLevelLabel(reading.level);
+  const headline = level ? t('{level} · {power}', { level, power: milliwatts(total) }) : milliwatts(total);
+  return `<span class="settings-status">${escapeHTML(headline)}</span>${note(figures)}${note(batteryShare(reading.batteryPercentPerHour))}${comparison}`;
+}
+
+export function showEnergyUsage(reading) {
+  if (!reading || typeof reading !== 'object') return;
+  energyReading = reading;
+  const control = liveView?.container.isConnected ? liveView.container.querySelector('[data-key="energy-use"] .settings-control') : null;
+  if (!control) return;
+  const template = document.createElement('template');
+  template.innerHTML = energyControl(liveView.helpers.escapeHTML);
+  reconcile(control, template.content);
+}
+
+
 export function renderSettings(container, state, helpers) {
   let view = views.get(container);
   if (!view) {
-    view = { container, state, helpers, section: 'general', settingsSectionToken: NaN, drafts: new Map(), pending: new Set(), error: '' };
+    view = { container, state, helpers, section: 'performance', settingsSectionToken: NaN, drafts: new Map(), pending: new Set(), error: '' };
     views.set(container, view);
     container.addEventListener('click', event => onClick(view, event));
     container.addEventListener('input', event => onInput(view, event));
@@ -94,6 +239,11 @@ export function renderSettings(container, state, helpers) {
     view.settingsSectionToken = token;
     if (sections.some(([id]) => id === state.settingsSection)) view.section = state.settingsSection;
   }
+  if (pendingSection && sections.some(([id]) => id === pendingSection)) {
+    view.section = pendingSection;
+    pendingSection = null;
+  }
+  liveView = view;
   // Prerequisites, sign-in and Steam Guard live only in the panel's focused download dialog.
   draw(view);
 }
@@ -129,7 +279,6 @@ function draw(view) {
   const languageValue = draft('language', languageState.preference || 'system');
   const general = group('general-language', t('Interface'), row('language', t('Language'), select('language', t('Language'), languageValue, languageOptions, 'data-language-setting', view.pending.has('language')), t('The interface switches at once. Menus and dialogs follow the next time you open the app.')))
     + group('general-behavior', t('Startup & desktop'), settingToggle('launchAtLogin', 'Launch at login', !settings.launchAtLoginAvailable, !settings.launchAtLoginAvailable ? t('Move the app to Applications to enable.') : '')
-      + settingToggle('pauseOnBattery', 'Pause on battery')
       + settingToggle('hideAfterActivating', 'Hide window after applying a wallpaper')
       + settingToggle('keepWindowsOnWallpaperClick', 'Keep windows in place when clicking the wallpaper', false, t('Turns off macOS’s “Click wallpaper to reveal desktop” so clicks reach interactive wallpapers.')))
     + group('general-lock', t('Lock screen'), settingToggle('lockScreenEnabled', 'Animate lock screen', lockUnavailable || settings.lockScreenBusy, t('Experimental'))
@@ -138,13 +287,14 @@ function draw(view) {
       + disclosure('lock-context', t('Compatibility & permissions'), paragraphs(t('Lock screen animation uses private macOS APIs and may stop working after a macOS update. While it is on, the app takes over the desktop and idle wallpaper on displays that are playing a wallpaper, and reloads the macOS wallpaper service. Turning it off or quitting restores what the app changed and keeps any other wallpaper changes.'), t('It keeps separate copies of wallpaper files, which uses extra disk space, and may not render on every macOS version. Pause and battery settings still apply.'))));
 
   const scaleSupported = settings.renderScaleSupported !== false;
-  // Compare what the engine published, not the quantized select step: disabling the
-  // battery profile restores the saved scale on that same snapshot, and the override
-  // notice has to disappear with it.
+  // Compare what the engine published, not the quantized select step: leaving
+  // reduced quality restores the saved scale on that same snapshot, and the
+  // override notice has to disappear with it.
   const scaleOverridden = Number(settings.renderScale) !== Number(settings.preferredRenderScale);
   const preferredScale = scaleValue(settings.preferredRenderScale);
   const batteryScale = scaleValue(settings.batteryRenderScale);
-  const batteryActive = Boolean(settings.batteryProfileEnabled && settings.onBatteryPower);
+  const batteryReduced = settings.batteryMode === 'reducedQuality';
+  const batteryActive = batteryReduced && Boolean(settings.onBatteryPower);
   const sessions = Number(settings.sharedVideoDecodeSessions) || 0;
   const consumers = Number(settings.sharedVideoDecodeConsumers) || 0;
   const displayName = (name, id) => name || t('Display {id}', { id });
@@ -201,30 +351,64 @@ function draw(view) {
         : applied === 1 ? t('{saved} and in force on the running scene.', { saved: savedState }) : t('{saved} and in force on all {applied} running scenes.', { saved: savedState, applied });
   const noVideo = `<span class="settings-status" role="status">${e(t('No video wallpaper is running.'))}</span>`;
   const noScene = `<span class="settings-status" role="status">${e(t('No scene wallpaper is running.'))}</span>`;
-  const performance = group('performance-video', t('Video backend'),
-    row('video-backend', t('Video playback'), select('videoBackend', t('Video playback backend'), draft('videoBackend', settings.videoBackend), localizedOptions(videoBackends), 'data-setting="videoBackend"', busy || unavailable), t('Native plays supported videos through macOS and uses Compatibility for the rest.'))
-    + row('video-backend-report', t('In use now'), backendReport ? `<ul class="settings-list">${backendReport}</ul>` : noVideo, '', 'settings-readout'))
-    + group('performance-quality', t('Render quality'),
-    row('render-scale', t('Internal render scale'), select('renderScale', t('Internal render scale'), draft('renderScale', preferredScale), scaleOptions(preferredScale), 'data-setting="renderScale" data-number', busy || unavailable || !scaleSupported), scaleSupported ? t('Renders at a lower resolution and scales the result to fill the same area. Size and position on screen don’t change.') : t('Not applicable to the wallpapers currently running'))
-    + (scaleSupported && scaleOverridden ? row('render-scale-effective', t('Effective now'), `<span class="settings-status" role="status">${e(batteryActive ? t('{effective} on battery. Your setting is {saved}.', { effective: percent(settings.renderScale), saved: percent(settings.preferredRenderScale) }) : t('{effective}. Your setting of {saved} is not in effect right now.', { effective: percent(settings.renderScale), saved: percent(settings.preferredRenderScale) }))}</span>`, '', 'settings-readout') : ''))
-    + group('performance-battery', t('Battery profile'),
-    settingToggle('batteryProfileEnabled', 'Use a reduced quality profile on battery', false, t('On battery, use the render scale and frame rate below instead of your usual quality settings.'))
-    + (settings.batteryProfileEnabled ? row('battery-scale', t('Render scale on battery'), select('batteryRenderScale', t('Render scale on battery'), draft('batteryRenderScale', batteryScale), scaleOptions(batteryScale), 'data-setting="batteryRenderScale" data-number', busy || unavailable))
+  const preset = activeQualityPreset(settings);
+  const capSlider = frameRateCapSlider(settings);
+  const capDraft = drafts.has('frameRateCap') ? drafts.get('frameRateCap') : capSlider.value;
+  const presetButtons = [...qualityPresetLabels, ['custom', 'Custom']].map(([id, label]) => {
+    const pressed = preset === id;
+    const custom = id === 'custom';
+    return `<button type="button" class="settings-segment-button" aria-pressed="${pressed}" data-key="preset-${id}"${custom ? '' : ` data-action="setting" data-args="${e(JSON.stringify({ key: 'qualityPreset', value: id }))}"`}${disabled(custom || busy || unavailable)}>${e(t(label))}</button>`;
+  }).join('');
+  const rules = Array.isArray(settings.appRules) ? settings.appRules : [];
+  const ruleRow = rule => {
+    const id = String(rule.id ?? '');
+    const name = rule.name || rule.bundleID || t('App');
+    const data = key => `data-app-rule="${e(id)}" data-app-rule-key="${key}"`;
+    return `<div class="settings-rule" data-key="rule-${e(id)}"><span class="settings-rule-name">${e(name)}</span>${select(`rule-${id}-condition`, t('Condition for {app}', { app: name }), draft(`rule-${id}-condition`, rule.condition), localizedOptions(appRuleConditions), data('condition'), busy || unavailable)}${select(`rule-${id}-action`, t('Action for {app}', { app: name }), draft(`rule-${id}-action`, rule.action), localizedOptions(appRuleActions), data('action'), busy || unavailable)}${button(t('Remove'), 'appRuleRemove', { id }, busy || unavailable)}</div>`;
+  };
+  const rulesEditor = `${rules.length ? rules.map(ruleRow).join('') : `<p class="settings-empty" data-key="app-rules-empty">${e(t('No app rules yet. Add an app to pause, mute or stop wallpapers while it is running or in front.'))}</p>`}<div class="settings-form-actions" data-key="app-rules-add">${button(t('Add app…'), 'appRuleAdd', {}, busy || unavailable)}</div>`;
+  const energy = group('performance-energy', t('Energy use'),
+    row('energy-use', t('This app, last few seconds'), energyControl(e), t('As macOS accounts for it: GPU energy is shared out by GPU time. Includes the control panel, video decoding and the lock screen. Screen compositing, memory and the display itself are not included. Low is under 0.5 W, Medium under 2 W. Change a quality setting below and this row shows the figure before and after.'), 'settings-readout'));
+  const playback = group('performance-playback', t('Playback'),
+    row('occlusion', t('Covered, full-screen or hidden'), `<span class="settings-status" role="status">${e(t('Paused automatically'))}</span>`, t('A wallpaper you can’t see stops on its own. This is not a setting.'), 'settings-readout')
+    + row('other-audio', t('When another app plays sound'), select('otherAudioAction', t('When another app plays sound'), draft('otherAudioAction', settings.otherAudioAction || 'keepRunning'), localizedOptions(otherAudioActions), 'data-setting="otherAudioAction"', busy || unavailable), t('Mute affects scene and video wallpapers only. Web wallpapers have no mute channel, so Mute does not silence them. Pause applies to every wallpaper.'))
+    + row('display-sleep', t('When displays sleep'), select('displaySleepAction', t('When displays sleep'), draft('displaySleepAction', settings.displaySleepAction || 'pause'), localizedOptions(displaySleepActions), 'data-setting="displaySleepAction"', busy || unavailable), t('Stop frees renderer memory and reloads the wallpaper when the display wakes. Pause keeps it loaded.'))
+    + row('battery-mode', t('On battery'), select('batteryMode', t('On battery'), draft('batteryMode', settings.batteryMode || 'keepRunning'), localizedOptions(batteryModes), 'data-setting="batteryMode"', busy || unavailable), t('Reduced quality uses the scale and frame rate below instead of your usual quality settings. Pause stops wallpapers until you plug in.'))
+    + (batteryReduced ? row('battery-scale', t('Render scale on battery'), select('batteryRenderScale', t('Render scale on battery'), draft('batteryRenderScale', batteryScale), scaleOptions(batteryScale), 'data-setting="batteryRenderScale" data-number', busy || unavailable))
       + row('battery-fps', t('Frame rate on battery'), `<input class="settings-number" data-key="batteryTargetFps" type="number" inputmode="numeric" aria-label="${e(t('Frame rate on battery'))}" min="1" max="240" step="1" value="${e(draft('batteryTargetFps', settings.batteryTargetFps))}" data-setting="batteryTargetFps"${disabled(busy || unavailable)}><span class="settings-unit">fps</span>`)
-      + row('battery-state', t('Power source'), `<span class="settings-status" role="status">${e(batteryActive ? t('On battery. The battery profile is in use.') : settings.onBatteryPower ? t('On battery') : t('Plugged in. Your usual quality settings are in use.'))}</span>`, '', 'settings-readout') : ''))
-    + group('performance-scene', t('Scene wallpapers'),
+      + row('battery-state', t('Power source'), `<span class="settings-status" role="status">${e(batteryActive ? t('On battery. Reduced quality is in use.') : settings.onBatteryPower ? t('On battery') : t('Plugged in. Your usual quality settings are in use.'))}</span>`, '', 'settings-readout') : '')
+    + row('app-rules', t('App rules'), '', t('Pause, mute or stop wallpapers while a chosen app is running or in front.')) + disclosure('app-rules-editor', t('Edit…'), rulesEditor));
+  const quality = group('performance-quality', t('Quality'),
+    row('quality-preset', t('Preset'), `<div class="settings-segment" role="group" aria-label="${e(t('Quality preset'))}">${presetButtons}</div>`, t('Low, Medium and High set the frame-rate limit and render scale together. Custom means the current values match none of those.'))
+    + row('frame-rate-cap', t('Frame rate limit'), `<input data-key="frameRateCap" type="range" aria-label="${e(t('Frame rate limit'))}" min="10" max="${capSlider.max}" step="1" value="${e(capDraft)}" data-setting="frameRateCap"${disabled(busy || unavailable)}><output class="settings-unit" data-value-for="frameRateCap">${e(frameRateCapReadout(capDraft, capSlider.max))}</output>`, t('At the top of the slider every display runs at its own native refresh rate. A lower value caps every display; saved per-display frame rates are not rewritten.'))
+    + row('render-scale', t('Internal render scale'), select('renderScale', t('Internal render scale'), draft('renderScale', preferredScale), scaleOptions(preferredScale), 'data-setting="renderScale" data-number', busy || unavailable || !scaleSupported), scaleSupported ? t('Renders at a lower resolution and scales the result to fill the same area. Size and position on screen don’t change.') : t('Not applicable to the wallpapers currently running'))
+    + (scaleSupported && scaleOverridden ? row('render-scale-effective', t('Effective now'), `<span class="settings-status" role="status">${e(batteryActive ? t('{effective} on battery. Your setting is {saved}.', { effective: percent(settings.renderScale), saved: percent(settings.preferredRenderScale) }) : t('{effective}. Your setting of {saved} is not in effect right now.', { effective: percent(settings.renderScale), saved: percent(settings.preferredRenderScale) }))}</span>`, '', 'settings-readout') : ''));
+  const sceneGroup = group('performance-scene', t('Scene wallpapers'),
     settingToggle('sceneOptimization', 'Scene render optimisation', false, `${t('Skips rendering work that wouldn’t change the picture, such as parts of a scene that stay the same. Resolution, frame rate and animation speed are unaffected. Works with both scene renderers. Turn it off to compare.')}${nativeSceneRunning ? ` ${t('How much can be skipped depends on the scene. If everything in it moves, nothing is skipped.')}` : ''}`)
     + (sceneOptimizationStatus ? row('scene-optimization-state', t('In force now'), `<span class="settings-status" role="status">${e(sceneOptimizationStatus)}</span>`, '', 'settings-readout') : '')
     + settingToggle('sceneOnDemand', 'Update only when the scene changes', false, t('When a scene has nothing left to animate, it stops drawing until something changes. Scenes that are still moving keep running normally, and scripts, sound and input keep working.'))
     + row('scene-update-report', t('Updating now'), sceneModeReport ? `<ul class="settings-list">${sceneModeReport}</ul>` : noScene, '', 'settings-readout')
     + row('scene-renderer', t('Scene renderer'), select('sceneRenderer', t('Scene renderer'), draft('sceneRenderer', settings.sceneRenderer), localizedOptions(sceneRenderers), 'data-setting="sceneRenderer"', busy || unavailable), t('Unsupported scenes use Compatibility. Lock screen playback always uses Compatibility.'))
     + row('scene-renderer-report', t('Drawn by'), sceneBackendReport ? `<ul class="settings-list">${sceneBackendReport}</ul>` : noScene, '', 'settings-readout')
-    + disclosure('scene-compatibility', t('Renderer compatibility'), paragraphs(t('Native Metal draws a scene only if it supports everything in it: image layers, sprite-sheet animation, 2D puppets with their own skinning shader, 2D sprite, sprite-trail, rope and rope-trail particles, perspective cameras for these layers, standard effect chains and post-processing, same-frame layer links, and BGRA or 8-bit NV12 video textures. Scenes with anything else, such as lit particles, 3D models, dynamic lighting, history-feedback effects or HDR video, use Compatibility. This applies to desktop wallpapers only; the lock screen always uses Compatibility.'))))
-    + disclosure('performance-advanced', t('Advanced'), settingToggle('contentPacing', 'Content pacing', false, t('Experimental. Presents frames at the content’s own frame rate instead of the display’s refresh rate.'))
-    + settingToggle('sharedVideoDecode', 'Shared video decode', false, t('Experimental. Screens showing the same video share one decoder.'))
-    + settingToggle('sceneVideoPlaneSampling', 'Direct video plane sampling', false, t('Experimental. In scenes drawn by Native Metal, lets a layer’s shader read video frames directly instead of converting them to a color image every frame. Only works with 8-bit NV12 video and shaders that support it; everything else converts as before. The list above shows which path each scene uses.'))
-    + (sessions || consumers ? row('shared-decode-report', t('Shared decode in use'), `<span class="settings-status" role="status">${e(t('{sessions} serving {surfaces}', { sessions: t(sessions === 1 ? '{count} session' : '{count} sessions', { count: sessions }), surfaces: t(consumers === 1 ? '{count} surface' : '{count} surfaces', { count: consumers }) }))}</span>`, '', 'settings-readout') : ''), 'settings-group settings-disclosure-rows')
-    + disclosure('performance-context', t('What these settings change'), paragraphs(t('Video playback picks a backend for each wallpaper. Native is used only for videos it supports; the rest play in Compatibility. The list above shows what each running wallpaper uses.'), t('Internal render scale sets how many pixels are rendered before the image is scaled to fit. Lower values make text and fine detail softer.'), t('Scene render optimisation reuses work inside a scene and produces the same picture. It only affects scene wallpapers. The switch shows your setting; the line below it shows whether each running scene has picked it up.'), t('Content pacing, shared video decode and direct video plane sampling are experimental. Shared decode merges only the decoding; each screen still draws its own frames. Direct plane sampling skips a color conversion when a layer’s shader can handle it; otherwise the picture is produced as before.')));
+    + disclosure('scene-compatibility', t('Renderer compatibility'), paragraphs(t('Native Metal draws a scene only if it supports everything in it: image layers, sprite-sheet animation, 2D puppets with their own skinning shader, 2D sprite, sprite-trail, rope and rope-trail particles, perspective cameras for these layers, standard effect chains and post-processing, same-frame layer links, and BGRA or 8-bit NV12 video textures. Scenes with anything else, such as lit particles, 3D models, dynamic lighting, history-feedback effects or HDR video, use Compatibility. This applies to desktop wallpapers only; the lock screen always uses Compatibility.'))));
+  const videoGroup = group('performance-video', t('Video backend'),
+    row('video-backend', t('Video playback'), select('videoBackend', t('Video playback backend'), draft('videoBackend', settings.videoBackend), localizedOptions(videoBackends), 'data-setting="videoBackend"', busy || unavailable), t('Native plays supported videos through macOS and uses Compatibility for the rest.'))
+    + row('video-backend-report', t('In use now'), backendReport ? `<ul class="settings-list">${backendReport}</ul>` : noVideo, '', 'settings-readout'));
+  const performance = energy + quality + playback
+    + disclosure('performance-advanced', t('Advanced'), videoGroup + sceneGroup
+      + settingToggle('contentPacing', 'Content pacing', false, t('Experimental. Presents frames at the content’s own frame rate instead of the display’s refresh rate.'))
+      + settingToggle('sharedVideoDecode', 'Shared video decode', false, t('Experimental. Screens showing the same video share one decoder.'))
+      + settingToggle('sceneVideoPlaneSampling', 'Direct video plane sampling', false, t('Experimental. In scenes drawn by Native Metal, lets a layer’s shader read video frames directly instead of converting them to a color image every frame. Only works with 8-bit NV12 video and shaders that support it; everything else converts as before. The list above shows which path each scene uses.'))
+      + (sessions || consumers ? row('shared-decode-report', t('Shared decode in use'), `<span class="settings-status" role="status">${e(t('{sessions} serving {surfaces}', { sessions: t(sessions === 1 ? '{count} session' : '{count} sessions', { count: sessions }), surfaces: t(consumers === 1 ? '{count} surface' : '{count} surfaces', { count: consumers }) }))}</span>`, '', 'settings-readout') : ''), 'settings-group settings-disclosure-rows')
+    + disclosure('performance-context', t('What these settings change'), paragraphs(
+      t('Covered, full-screen and hidden wallpapers pause on their own. When another app plays sound, Mute silences scene and video wallpapers only — web wallpapers have no mute channel — and Pause stops every wallpaper until that sound ends.'),
+      t('When displays sleep, Pause keeps wallpapers loaded. Stop frees renderer memory and reloads them when the display wakes.'),
+      t('On battery, Keep running leaves quality alone, Reduced quality uses the battery scale and frame rate, and Pause stops wallpapers until you plug in. None of these promises a measured power saving.'),
+      t('App rules pause, mute or stop wallpapers while a chosen app is running or in front. Your own Play and Pause are not changed.'),
+      t('A quality preset sets the frame-rate limit and render scale together. The frame-rate limit caps every display without rewriting the frame rate saved for each wallpaper. Internal render scale sets how many pixels are rendered before the image is scaled to fit.'),
+      t('Video playback picks a backend for each wallpaper. Native is used only for videos it supports; the rest play in Compatibility.'),
+      t('Scene render optimisation reuses work inside a scene and produces the same picture. It only affects scene wallpapers.'),
+      t('Content pacing, shared video decode and direct video plane sampling are experimental. Shared decode merges only the decoding; each screen still draws its own frames. Direct plane sampling skips a color conversion when a layer’s shader can handle it; otherwise the picture is produced as before.')));
 
   // Theme preferences live natively and stay usable even when renderer settings are unavailable.
   const theme = { mode: 'system', accent: '#80bbff', tone: 'neutral', icon: 'day', ...(window.__appTheme || {}), ...(state.theme || {}) };
@@ -254,6 +438,7 @@ function draw(view) {
     const key = name => `display-${id}-${name}`;
     const name = label => t('{label} for {display}', { label, display: display.title });
     const wallpaper = (state.wallpapers || []).find(item => item.id === display.wallpaperID);
+    const limited = performanceLimitedFps(playback.fps, settings);
     const number = (field, label, min, max, step, suffix = '') => `<input class="settings-number" data-key="${e(key(field))}" type="number" inputmode="decimal" aria-label="${e(name(label))}" min="${min}"${max == null ? '' : ` max="${max}"`} step="${step}" value="${e(draft(key(field), playback[field]))}" ${data(field)}${disabled(playbackOff)}>${suffix ? `<span class="settings-unit">${e(suffix)}</span>` : ''}`;
     return `<section class="settings-display settings-group" data-key="display-${e(id)}" aria-labelledby="settings-group-display-${e(id)}"><h3 id="settings-group-display-${e(id)}">${e(display.title)}${primary ? `<span class="settings-note">${e(t('Primary display'))}</span>` : ''}</h3>`
       + row(key('enabled-row'), t('Enable wallpaper'), toggle(key('enabled'), name(t('Enable wallpaper')), draft(key('enabled'), display.enabled), data('enabled'), busy || primary))
@@ -262,6 +447,7 @@ function draw(view) {
       + disclosure(key('advanced'), t('Playback & scaling'), (!mirror && !display.wallpaperID ? `<div class="settings-note">${e(t('Choose a wallpaper to adjust playback.'))}</div>` : '') + row(key('scaling-row'), t('Scaling'), select(key('scalingMode'), name(t('Scaling')), draft(key('scalingMode'), playback.scalingMode), localizedOptions([['none', 'No scaling'], ['stretch', 'Stretch'], ['match', 'Match'], ['fill', 'Fill']]), data('scalingMode'), playbackOff))
         + row(key('factor-row'), t('Scale factor'), number('scalingFactor', t('Scale factor'), Number.MIN_VALUE, null, 'any', '×'))
         + row(key('fps-row'), t('Frame rate'), number('fps', t('Frame rate'), 1, playback.maxFps || 60, 1, 'fps'))
+        + (limited == null ? '' : `<p class="settings-note settings-limit-note" data-key="${e(key('fps-limit'))}">${e(t('Limited to {fps} fps by Performance settings', { fps: limited }))} ${button(t('Open Performance'), 'openPerformance')}</p>`)
         + row(key('muted-row'), t('Mute audio'), toggle(key('muted'), name(t('Mute audio')), draft(key('muted'), playback.muted), data('muted'), playbackOff))
         + row(key('volume-row'), t('Volume'), `<input data-key="${e(key('volume'))}" type="range" aria-label="${e(name(t('Volume')))}" min="0" max="1" step="0.01" value="${e(draft(key('volume'), playback.volume))}" ${data('volume')}${disabled(playbackOff || playback.muted)}><output class="settings-unit" data-value-for="${e(key('volume'))}">${Math.round(Number(draft(key('volume'), playback.volume || 0)) * 100)}%</output>`), 'settings-disclosure-rows') + '</section>';
   }).join('') || `<div class="settings-empty">${e(t('No displays connected.'))}</div>`;
@@ -312,7 +498,9 @@ function draw(view) {
     + group('storage-caches', '', row('shader-cache', t('Shader cache'), button(t('Clear…'), 'clearCache', {}, busy || unavailable || !settings.shaderCacheBytes), bytes(settings.shaderCacheBytes))
     + row('logs', t('Logs'), button(t('Show in Finder'), 'showLogs', {}, busy || unavailable) + button(t('Clear…'), 'clearLogs', {}, busy || unavailable || !settings.logBytes), bytes(settings.logBytes))
     + row('download-history', t('Completed downloads'), button(t('Clear history'), 'clearDownloads', {}, busy || !downloads.some(download => !download.pending)))
-    + disclosure('storage-context', t('What gets removed'), paragraphs(t('Clearing the shader cache removes compiled shaders and render pipelines. They are rebuilt as wallpapers load, which can briefly slow playback. Clearing logs doesn’t affect wallpapers or settings. Clearing download history keeps the downloaded files.'), t('Files you chose in a wallpaper’s settings are copied to the folder above, so clearing caches or updating the wallpaper won’t remove them. To remove one, clear that setting on the wallpaper.'))));
+    + disclosure('storage-context', t('What gets removed'), paragraphs(t('Clearing the shader cache removes compiled shaders and render pipelines. They are rebuilt as wallpapers load, which can briefly slow playback. Clearing logs doesn’t affect wallpapers or settings. Clearing download history keeps the downloaded files.'), t('Files you chose in a wallpaper’s settings are copied to the folder above, so clearing caches or updating the wallpaper won’t remove them. To remove one, clear that setting on the wallpaper.'))))
+    + group('storage-diagnostics', t('Troubleshooting'), settingToggle('verboseLogging', 'Detailed logging', false, t('Records extra detail from now on, including after a restart. Turn it off when you are done.'))
+      + row('diagnostics-export', t('Diagnostics report'), button(t('Export…'), 'exportDiagnostics', {}, busy || unavailable), t('Saves recent logs, lock screen and crash reports and a system summary as one .zip file to attach to a bug report. Home folder paths, your Mac user name and Steam account names are replaced.')));
   const versionRow = (id, label, value) => row(id, label, `<span class="settings-version">${e(value || t('Unavailable'))}</span>`);
   const update = state.update || {};
   const updateBusy = Boolean(update.busy) || ['checkForUpdates', 'downloadUpdate', 'installUpdate', 'openReleases', 'revealDownloadedUpdate'].some(action => view.pending.has(action));
@@ -334,11 +522,8 @@ function draw(view) {
     + (update.showsReleases ? button(update.releasesLabel || t('Open GitHub Releases'), 'openReleases', {}, updateBusy) : '')
     + (update.showsReveal ? button(update.revealLabel || t('Show in Finder'), 'revealDownloadedUpdate', {}, updateBusy) : '');
   const about = `<div class="settings-product"><span class="settings-product-mark">${helpers.icon('wallpaperMachine', 48)}</span><div><h3>WallpaperMachine</h3><span class="settings-note">${e(t('Independent macOS client'))}</span></div></div>`
-    + group('about-versions', '', versionRow('app-version', t('App version'), 'beta (unreleased)')
-    + disclosure('component-versions', t('Component versions'), versionRow('bridge-version', t('Bridge'), '0.1.0')
-      + versionRow('core-version', t('Core'), '0.1.0')
-      + versionRow('shader-version', t('Shader pipeline'), '0.1.0')
-      + versionRow('git-version', t('Git revision'), settings.gitSha), 'settings-disclosure-rows'))
+    + group('about-versions', '', versionRow('app-version', t('App version'), state.version)
+      + versionRow('git-version', t('Git revision'), settings.gitSha))
     + `<section class="settings-group" data-key="about-updates" aria-busy="${updateBusy}" aria-labelledby="settings-group-about-updates"><h3 id="settings-group-about-updates">${e(t('Updates'))}</h3><div class="settings-status" role="status" aria-live="polite">${e(update.statusText || t('Updates not yet checked'))}</div>`
     + updateProgress
     + `<div class="settings-form-actions">${updateActions}</div>`
@@ -399,7 +584,7 @@ function onInput(view, event) {
   // Color pickers stream input events while the macOS picker is open; only the readout follows, never a redraw or a save.
   if (input.type === 'range' || input.type === 'color') {
     const output = Array.from(view.container.querySelectorAll('[data-value-for]')).find(node => node.dataset.valueFor === key);
-    if (output) output.textContent = input.type === 'color' ? String(input.value).toUpperCase() : `${Math.round(Number(input.value) * 100)}%`;
+    if (output) output.textContent = input.dataset.setting === 'frameRateCap' ? frameRateCapReadout(input.value, input.max) : input.type === 'color' ? String(input.value).toUpperCase() : `${Math.round(Number(input.value) * 100)}%`;
   }
 }
 
@@ -427,6 +612,16 @@ async function onChange(view, event) {
     if (restoreFocus && document.activeElement === document.body && input.isConnected) input.focus({ preventScroll: true });
     return;
   }
+  if (input.dataset.appRule) {
+    const id = input.dataset.appRule;
+    const ruleKey = input.dataset.appRuleKey;
+    const draftKey = input.dataset.key;
+    view.drafts.set(draftKey, input.value);
+    await perform(view, draftKey, 'appRuleUpdate', { id, key: ruleKey, value: input.value }, () => view.drafts.delete(draftKey));
+    view.drafts.delete(draftKey);
+    draw(view);
+    return;
+  }
   if (!input.dataset.setting && !input.dataset.displaySetting) return;
   let value = input.type === 'checkbox' ? input.checked : input.value;
   if (input.type === 'number' || input.type === 'range') {
@@ -435,6 +630,7 @@ async function onChange(view, event) {
       return;
     }
     value = Number(value);
+    if (input.dataset.setting === 'frameRateCap') value = frameRateCapValue(value, input.max);
   }
   // A <select> always yields a string; numeric settings must reach Swift as numbers.
   if (input.dataset.number !== undefined && typeof value === 'string') {
@@ -461,6 +657,13 @@ async function onClick(view, event) {
   if (!button || button.disabled) return;
   const action = button.dataset.action;
   const args = JSON.parse(button.dataset.args || '{}');
+  if (action === 'openPerformance') {
+    view.section = 'performance';
+    draw(view);
+    view.container.querySelector('.settings-scroll').scrollTop = 0;
+    view.container.querySelector('[data-section="performance"]')?.focus();
+    return;
+  }
   if (action === 'resetTheme') {
     for (const draftKey of [...view.drafts.keys()]) if (draftKey.startsWith('theme-')) view.drafts.delete(draftKey);
     await perform(view, 'theme-reset', 'resetTheme', {});

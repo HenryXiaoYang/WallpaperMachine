@@ -25,6 +25,9 @@ final class NativeVideoWallpaperHost {
 
     private var surfaces: [UInt32: NativeVideoSurface] = [:]
     private var descriptors: [UInt32: BridgeNativeVideoWallpaper] = [:]
+    /// The `load#N` each display's current clip was logged under, so a later
+    /// playback failure is attributed to the load it belongs to.
+    private var logLoads: [UInt32: UInt64] = [:]
     /// Displays suspended on their own, kept apart from the global flag so one
     /// occluded screen cannot stop a video on a visible screen.
     private var suspendedDisplays: Set<UInt32> = []
@@ -201,10 +204,16 @@ final class NativeVideoWallpaperHost {
         wallpaper: BridgeNativeVideoWallpaper, displayID: UInt32, frame: NSRect
     ) async {
         let url = URL(fileURLWithPath: wallpaper.mediaPath)
+        let load = AppLog.beginLoad("native video", project: wallpaper.mediaPath, detail: """
+            wallpaper \(wallpaper.wallpaperId) “\(wallpaper.title)” media \(url.lastPathComponent), \
+            \(DiagnosticEnvironment.display(displayID)), fps \(wallpaper.fps) (admission \(wallpaper.admissionFps)), \
+            scaling \(wallpaper.scalingMode) x\(wallpaper.scalingFactor), paused \(wallpaper.paused)
+            """)
+        logLoads[displayID] = load
         // Decided before a window exists, so a refusal never shows a black
         // rectangle on the desktop.
-        if let refusal = await admission(for: url, wallpaper: wallpaper) {
-            await handOff(wallpaper: wallpaper, refusal: refusal)
+        if let refusal = await admission(for: url, wallpaper: wallpaper, load: load) {
+            await handOff(wallpaper: wallpaper, refusal: refusal, load: load)
             return
         }
         guard !stopped else { return }
@@ -250,12 +259,13 @@ final class NativeVideoWallpaperHost {
         // native-selected with the scene engine excluded, showing black.
         guard surfaces[displayID] === surface else { return }
         let refusal = NativeVideoRefusal.playbackFailed(detail)
+        let load = logLoads[displayID]
         // Stop before handing over, so the clip is never being decoded by both
         // backends at once.
         close(displayID: displayID, surface: surface)
         admissionCache[wallpaper.admissionKey] = refusal
         Task { @MainActor [weak self] in
-            await self?.handOff(wallpaper: wallpaper, refusal: refusal)
+            await self?.handOff(wallpaper: wallpaper, refusal: refusal, load: load)
             self?.notifySurfacesChanged()
         }
     }
@@ -273,7 +283,7 @@ final class NativeVideoWallpaperHost {
     /// for the rest of the session; without the bound, a file that never loads
     /// would leave the display showing nothing for as long as it is offered.
     private func admission(
-        for url: URL, wallpaper: BridgeNativeVideoWallpaper
+        for url: URL, wallpaper: BridgeNativeVideoWallpaper, load: UInt64?
     ) async -> NativeVideoRefusal? {
         if let cached = admissionCache[wallpaper.admissionKey] { return cached }
         // `admissionFps` is the strictest target across this display's mirror
@@ -290,7 +300,7 @@ final class NativeVideoWallpaperHost {
             attempt += 1
             AppLog.warn(
                 "native video wallpaper \(wallpaper.wallpaperId): \(unsettled.reason); "
-                    + "retrying (\(attempt)/\(Self.admissionAttemptLimit))")
+                    + "retrying (\(attempt)/\(Self.admissionAttemptLimit))", load: load)
             try? await Task.sleep(for: Self.admissionRetryDelay)
             guard !stopped else { return unsettled }
             decision = await refusal(url, wallpaper.admissionFps)
@@ -304,7 +314,7 @@ final class NativeVideoWallpaperHost {
     }
 
     private func handOff(
-        wallpaper: BridgeNativeVideoWallpaper, refusal: NativeVideoRefusal
+        wallpaper: BridgeNativeVideoWallpaper, refusal: NativeVideoRefusal, load: UInt64?
     ) async {
         guard reportingRefusal.insert(wallpaper.admissionKey).inserted else { return }
         defer { reportingRefusal.remove(wallpaper.admissionKey) }
@@ -313,7 +323,7 @@ final class NativeVideoWallpaperHost {
             for: RuntimeSurfaceKey(kind: .desktopNativeVideo, displayID: 0))
         AppLog.warn(
             "native video wallpaper \(wallpaper.wallpaperId): \(refusal.reason); "
-                + "falling back to the scene engine")
+                + "falling back to the scene engine", load: load)
         do {
             // The key the decision was taken against travels with the refusal:
             // a verdict that arrives after the configuration changed describes
@@ -322,7 +332,7 @@ final class NativeVideoWallpaperHost {
         } catch {
             AppLog.error(
                 "native video fallback for \(wallpaper.wallpaperId) failed: "
-                    + error.localizedDescription)
+                    + error.localizedDescription, load: load)
             onError?(error.localizedDescription)
         }
     }

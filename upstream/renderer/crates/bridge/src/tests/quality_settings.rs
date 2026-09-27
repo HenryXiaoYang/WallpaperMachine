@@ -148,8 +148,12 @@ async fn battery_profile_lowers_what_runs_and_restores_the_saved_values() {
     bridge.set_render_scale(0.9).await.unwrap();
     bridge.set_power_source_for_test(PowerSource::Battery).await;
 
+    bridge
+        .set_battery_mode(crate::BridgeBatteryMode::ReducedQuality)
+        .await
+        .unwrap();
     let on_profile = bridge
-        .set_battery_quality_profile(true, 0.5, 30)
+        .set_battery_quality_profile(0.5, 30)
         .await
         .unwrap()
         .settings;
@@ -168,7 +172,7 @@ async fn battery_profile_lowers_what_runs_and_restores_the_saved_values() {
     );
 
     let off_profile = bridge
-        .set_battery_quality_profile(false, 0.5, 30)
+        .set_battery_mode(crate::BridgeBatteryMode::KeepRunning)
         .await
         .unwrap()
         .settings;

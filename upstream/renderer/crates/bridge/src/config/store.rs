@@ -209,7 +209,7 @@ impl From<std::io::Error> for BridgeError {
 #[cfg(test)]
 mod tests {
     use super::ConfigStore;
-    use crate::config::{SceneRendererModeCfg, VideoBackendModeCfg};
+    use crate::config::{AppConfig, MonitorSettingsCfg, SceneRendererModeCfg, VideoBackendModeCfg};
 
     fn load_config(contents: &str) -> crate::config::AppConfig {
         let root = tempfile::tempdir().unwrap();
@@ -292,5 +292,58 @@ mod tests {
 
         assert_eq!(config.video_backend, VideoBackendModeCfg::NativePreferred);
         assert_eq!(config.scene_renderer, SceneRendererModeCfg::Compatibility);
+    }
+
+    #[test]
+    fn legacy_mirror_target_fps_follows_the_display_unless_it_was_an_explicit_cap() {
+        let untouched = load_config("[[monitor_settings]]\nkind = \"primary\"\ntarget_fps = 60\n");
+        assert_eq!(untouched.monitor_settings[0].frame_rate, None);
+        let missing = load_config("[[monitor_settings]]\nkind = \"primary\"\n");
+        assert_eq!(missing.monitor_settings[0].frame_rate, None);
+
+        let capped = load_config("[[monitor_settings]]\nkind = \"primary\"\ntarget_fps = 30\n");
+        assert_eq!(capped.monitor_settings[0].frame_rate, Some(30));
+        let zero = load_config("[[monitor_settings]]\nkind = \"primary\"\ntarget_fps = 0\n");
+        assert_eq!(zero.monitor_settings[0].frame_rate, Some(1));
+
+        let newer_wins = load_config(
+            "[[monitor_settings]]\nkind = \"primary\"\nframe_rate = 24\ntarget_fps = 30\n",
+        );
+        assert_eq!(newer_wins.monitor_settings[0].frame_rate, Some(24));
+
+        let root = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(root.path().to_path_buf());
+        let mut following = AppConfig::default();
+        following.monitor_settings.push(MonitorSettingsCfg::default());
+        store.save_app_config(&following).expect("config save");
+        let written = std::fs::read_to_string(root.path().join("config.toml")).unwrap();
+        let tables = monitor_settings_tables(&written);
+        assert_eq!(tables.len(), 1, "{written}");
+        assert!(tables[0].get("target_fps").is_none(), "{written}");
+        assert!(tables[0].get("frame_rate").is_none(), "{written}");
+
+        let mut capped = AppConfig::default();
+        capped.monitor_settings.push(MonitorSettingsCfg {
+            frame_rate: Some(30),
+            ..MonitorSettingsCfg::default()
+        });
+        store.save_app_config(&capped).expect("config save");
+        let written = std::fs::read_to_string(root.path().join("config.toml")).unwrap();
+        let tables = monitor_settings_tables(&written);
+        assert!(tables[0].get("target_fps").is_none(), "{written}");
+        assert_eq!(tables[0].get("frame_rate").and_then(toml::Value::as_integer), Some(30));
+        assert_eq!(
+            store.load().expect("config load").config.monitor_settings[0].frame_rate,
+            Some(30)
+        );
+    }
+
+    fn monitor_settings_tables(written: &str) -> Vec<toml::Value> {
+        let value: toml::Value = toml::from_str(written).unwrap();
+        value
+            .get("monitor_settings")
+            .and_then(toml::Value::as_array)
+            .cloned()
+            .unwrap_or_default()
     }
 }

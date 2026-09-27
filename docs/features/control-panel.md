@@ -97,10 +97,11 @@ the title bar, draggable and clear of the traffic lights). It is
 a page, not a modal dialog; the download dialog can still open over it for an
 unrelated job. Background app regions are inert while the guide is open; closing
 it restores their prior availability. The body scrolls independently of the
-footer, which stays reachable at the 760×560 minimum. All five step buttons keep
+footer, which stays reachable at the 760×560 minimum. All six step buttons keep
 accessible names even when their visible labels are hidden. They allow free
-jumping except while language, appearance, the lock screen or preferences are
-being committed; later pages have **Back**, and decision pages have **Skip**:
+jumping except while language, appearance, the lock screen, performance or
+preferences are being committed; later pages have **Back**, and decision pages
+have **Skip**:
 
 1. **Language & appearance.** Radio tiles for the language (**System (Auto)**
    plus every shipped language under its own name) and the appearance mode
@@ -134,13 +135,23 @@ being committed; later pages have **Back**, and decision pages have **Skip**:
    ordinary progress does not interrupt typing. A Steam Guard request arriving
    on another page marks the Steam step with a shield without changing pages.
    See [Steam sign-in](workshop-downloads.md#steam-sign-in) for the session itself.
-3. **Preferences.** Launch at login, Pause on battery, Reduced quality on
-   battery and Keep windows in place when clicking the wallpaper, as switches
-   with one-line explanations. They are drafts: **Continue** commits only the
-   ones that changed (`setting` actions), **Skip** discards them. Launch at
-   login is disabled with its reason while the app is outside Applications;
-   when renderer settings are unavailable the page says so and disables the
-   switches.
+3. **Performance.** Radio tiles for the **Low**, **Medium** and **High** quality
+   presets (the same pairs as [Settings → Performance](performance.md#quality),
+   shared through `settings.js`), then the **Frame rate limit** slider, whose
+   top reads **Native refresh rate**: each display runs at its own refresh rate
+   (120 fps on a ProMotion MacBook Pro, 60 fps on a MacBook Air). High, no
+   limit at full render scale, is selected on a fresh install. A preset fills
+   both drafts; moving the slider changes only the limit, and a pair matching
+   no preset leaves every tile unchecked with a **Custom** note. They are
+   drafts: **Continue** sends only what changed as `setting` / `renderScale`
+   and `setting` / `frameRateCap`, **Skip** discards them.
+4. **Preferences.** Launch at login and Keep windows in place when clicking the
+   wallpaper are switches. **On battery** is a menu: Keep running, Reduced
+   quality, or Pause. They are drafts: **Continue** commits only the ones that
+   changed (`setting` actions, including `batteryMode`), **Skip** discards them.
+   Launch at login is disabled with its reason while the app is outside
+   Applications; when renderer settings are unavailable the page says so and
+   disables the controls.
    The last row, **Animate lock screen** (off by default, marked experimental),
    is not a draft: like Settings it sends `setting` / `lockScreenEnabled` at
    once, shows the native status while busy, is disabled when the integration
@@ -148,17 +159,18 @@ being committed; later pages have **Back**, and decision pages have **Skip**:
    page. **Skip** puts it back to the value it had when the guide opened.
    During a preference or lock-screen commit, Back, step navigation, Skip and
    Continue are all disabled so the guide cannot leave a partially submitted operation.
-4. **Tips.** Three one-line tips (Discover, download then double-click to
+5. **Tips.** Three one-line tips (Discover, download then double-click to
    apply, one wallpaper per display) on one card, then a compatibility card:
    not every wallpaper works (videos usually play, scenes are experimental,
    Application wallpapers cannot run), failures are reported with the
    inspector's report button (shown inline by its glyph), and pull requests are
    welcome, with **Report an issue** (`state.repositoryURL` + `/issues`) and
    **Contribute on GitHub** (the repository) links.
-5. **Start.** A recap of language, appearance and the actual Steam sign-in state.
-   Pending jobs/setup requests offer **Finish sign-in**. Unsaved preference
-   drafts add a fourth cell with their count and **Review**, which returns to
-   Preferences without discarding them. Closing does not auto-save the drafts.
+6. **Start.** A recap of language, appearance and the actual Steam sign-in state.
+   Pending jobs/setup requests offer **Finish sign-in**. Unsaved performance or
+   preference drafts each add a cell with their count and **Review**, which
+   returns to that page without discarding them. Closing does not auto-save the
+   drafts.
    **Browse the Workshop** opens Discover, **Import wallpapers** opens the
    import popover on Installed, and **Start using the app** simply closes it.
 
@@ -180,18 +192,28 @@ a download.
   [Workshop downloads](workshop-downloads.md).
 - **Installed** shows the local library.
 - **Settings** replaces the browser with a sectioned native-feeling settings
-  view (General, Appearance, Performance, Displays, Library & Steam, Storage,
-  About). Everyday categories lead the navigation; library, storage and product
-  information are visually separated. **General** starts with the
+  view. **Performance** is first and is the section Settings opens on, then
+  General, Appearance, Displays, Library & Steam, Storage and About. Everyday
+  categories lead the navigation; library, storage and product information are
+  visually separated. **General** starts with the
   [Language](#language) picker, then startup/desktop and lock-screen groups.
-  **Performance** groups the video backend, internal render scale and opt-in
-  battery profile; experimental content pacing, shared video decode and direct
-  plane sampling stay under **Advanced**. See [Performance settings](performance.md).
-  **About** leads with the app version and updates; bridge, core, shader and Git
-  revisions are under **Component versions**.
+  It no longer has a pause-on-battery toggle; battery is one choice on
+  Performance. **Performance** opens with a live energy readout for the app
+  (grade, total, CPU and GPU, battery share, and the figure before and after
+  the last quality change), then quality (presets, frame-rate limit, render
+  scale) directly beneath it, then playback (occlusion, other-app audio,
+  display sleep, battery, app rules). Video backend, scene controls and the
+  experimental switches stay under **Advanced**. See
+  [Performance settings](performance.md). The inspector of an installed
+  wallpaper adds its measured energy grade once it has one; see
+  [Per-wallpaper energy rating](performance.md#per-wallpaper-energy-rating).
+  **About** leads with the app version, read from the bundle (`MARKETING_VERSION` in
+  `project.yml`, the same value GitHub reports carry), and the Git revision.
   **Check for Updates** reads the latest
   GitHub Release, and download / restart-install happen only after confirmation.
   The application menu item **Check for Updates…** opens this section.
+  **Storage** ends with **Troubleshooting**: Detailed logging and the diagnostics
+  report export. See [Logs and diagnostics reports](diagnostics.md).
 
 Settings use lightly bounded, keyed groups on the window's secondary surface,
 with dividers between related rows rather than a separate card for every control.
@@ -249,10 +271,15 @@ The utility row holds **Show in Finder**, favorites and Trash on Installed,
 or **View on Steam Workshop** on Discover. The inspector scrolls independently;
 **Apply changes** and **Revert** stay visible in a fixed footer while editing.
 
-That row ends with **Report a problem on GitHub** (warning-triangle icon). It
-opens the repository's new-issue form in the browser with the wallpaper's title,
-Workshop link or id, type and the app version pre-filled. Nothing is submitted by
-the app; the user edits and sends the issue on GitHub. The button is hidden when
+Below the compatibility note, an installed wallpaper that can run (not
+Application) shows **Not working? Report on GitHub**. It opens the repository's
+new-issue form in the browser with the wallpaper's title, Workshop link or id,
+type, app version and, while it is on screen, the backend drawing it (with the
+renderer's fallback reason) pre-filled. When the panel saw this wallpaper fail
+(its download, or the last attempt to apply it), an error notice takes the
+link's place with **Report this problem on GitHub**, whose issue also carries
+the error; an apply failure stays until an apply succeeds. Nothing is submitted
+by the app; the user edits and sends the issue on GitHub. Neither is shown when
 the snapshot carries no `https` repository URL.
 
 ## Deleting wallpapers
@@ -279,7 +306,12 @@ playing on a display is ejected first.
 The top bar picker chooses which display Apply acts on. Disabled and mirrored
 displays are listed but not selectable, annotated `(disabled)` or `(mirrored)`.
 Per-display enablement, independent/mirror mode, mirror source, scaling, scale
-factor, frame rate, mute and volume live in **Settings -> Displays**.
+factor, frame rate, mute and volume live in **Settings -> Displays**. When a
+Performance cap, or the battery frame rate while reduced quality is in force,
+is below the saved frame rate, the field notes `Limited to {fps} fps by
+Performance settings` and can open Settings → Performance. The inspector's
+per-display frame-rate field shows the same note. Saved frame rates are not
+rewritten.
 
 A display the app has never configured starts enabled with the primary
 display's wallpaper, so a newly connected monitor shows a wallpaper without a

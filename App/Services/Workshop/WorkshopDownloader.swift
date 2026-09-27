@@ -208,7 +208,7 @@ final class WorkshopDownloader: SteamCMDDownloadActivity {
                         try readTerminalOutput()
                         if status != loggedStatus {
                             loggedStatus = status
-                            AppLog.debug("SteamCMD \(label): \(status)")
+                            AppLog.info("SteamCMD \(label): \(status)")
                         }
                         if !isAuthenticating && !signInHandedOff && failure == nil {
                             signInHandedOff = true

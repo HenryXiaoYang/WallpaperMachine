@@ -24,6 +24,13 @@ pub struct BridgeActorState {
     /// Global presentation suspension: display sleep or session lock, where no
     /// display can show a wallpaper pixel at all.
     pub presentation_suspended: bool,
+    /// Presentation is unloaded: scene runtimes and host wallpaper windows are
+    /// closed to free memory, while config and assignments stay put. Distinct
+    /// from suspension, which keeps the runtimes and only stops them drawing.
+    pub presentation_unloaded: bool,
+    /// Transient mute applied on top of each wallpaper's saved mute. Never
+    /// persisted. A user unmute while this is set stays muted until it clears.
+    pub audio_suppressed: bool,
     /// Displays suspended on their own, by occlusion for example. Kept apart
     /// from the global flag so one hidden screen cannot pause a visible one,
     /// and from `playback_state` so resuming visibility never clears the user's
@@ -75,6 +82,8 @@ impl Default for BridgeActorState {
         Self {
             playback_state: BridgePlaybackState::Playing,
             presentation_suspended: false,
+            presentation_unloaded: false,
+            audio_suppressed: false,
             suspended_displays: BTreeSet::new(),
             renderer_counters_enabled: false,
             native_video_rejected: BTreeMap::new(),
@@ -131,7 +140,7 @@ impl BridgeActorState {
         self.startup_power_sample_received = true;
         self.pending_battery_pause_after_initial_frame = source
             == crate::power::PowerSource::Battery
-            && self.app_config.power.pause_on_battery_power
+            && self.app_config.power.on_battery == crate::config::BatteryModeCfg::Pause
             && !self.initial_frame_ready;
     }
 
@@ -296,6 +305,12 @@ impl BridgeActorState {
     /// Active ids are the engine-rendered scenes plus every configured web
     /// wallpaper, which the host renders outside the scene engine.
     pub fn set_active_ids_from_scenes(&mut self, scenes: &[SceneDesc]) {
+        // An unload reconcile hands in an empty scene list so windows close.
+        // That must not wipe the panel's active marks; the assignments are
+        // still configured.
+        if self.presentation_unloaded && scenes.is_empty() {
+            return;
+        }
         let mut ids = scenes
             .iter()
             .filter_map(|scene| {

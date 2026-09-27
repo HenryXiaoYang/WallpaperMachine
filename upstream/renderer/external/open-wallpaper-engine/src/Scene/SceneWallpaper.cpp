@@ -360,6 +360,11 @@ public:
 
     bool init();
     void shutdown();
+    /// Before `init()`: the loopers adopt the scope when their threads start.
+    void setLogScope(uint64_t scope) {
+        m_main_loop->setLogScope(scope);
+        m_render_loop->setLogScope(scope);
+    }
     auto renderHandler() const { return m_render_handler; }
     bool inited() const { return m_inited; }
 
@@ -1530,6 +1535,12 @@ public:
         // rather than at each site, where forgetting it would silently report
         // "preparing" for the rest of the wallpaper's life.
         selection.created = true;
+        // Once per scene: the first thing to know about a wallpaper that looks
+        // wrong is which renderer drew it, and why not the preferred one.
+        LOG_INFO("scene backend: %s%s%s",
+                 selection.backend == SceneBackend::NativeMetal ? "native_metal" : "legacy_vulkan",
+                 selection.fell_back() ? "; fell back: " : "",
+                 selection.fallback_reason.c_str());
         std::scoped_lock lock(m_backend_selection_mutex);
         m_backend_selection = std::move(selection);
     }
@@ -1608,6 +1619,8 @@ SceneWallpaper::~SceneWallpaper() { shutdown(); }
 bool SceneWallpaper::inited() const { return m_main_handler->inited(); }
 
 bool SceneWallpaper::init() { return m_main_handler->init(); }
+
+void SceneWallpaper::setLogScope(uint64_t scope) { m_main_handler->setLogScope(scope); }
 
 void SceneWallpaper::shutdown() {
     if (m_main_handler != nullptr) {

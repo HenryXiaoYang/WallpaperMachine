@@ -1,0 +1,78 @@
+import XCTest
+
+@testable import WallpaperMachine
+
+/// Energy sampling reads every coalition on the Mac, so it must run only while its
+/// readout can be seen: panel visible, Settings open.
+@MainActor
+final class WebPanelEnergyUsageTests: XCTestCase {
+  func testSamplingRunsOnlyWhileSettingsIsVisible() async throws {
+    let context = try Context()
+    defer { context.tearDown() }
+    let controller = context.controller
+    let monitor = controller.energyUsage
+
+    controller.scheduleUpdate()
+    XCTAssertFalse(monitor.isActive, "Installed is on show, not Settings")
+
+    try await controller.perform("navigate", body: ["page": "settings"])
+    controller.scheduleUpdate()
+    XCTAssertTrue(monitor.isActive)
+
+    context.visible = false
+    controller.scheduleUpdate()
+    XCTAssertFalse(monitor.isActive, "a hidden, minimised or covered panel stops sampling")
+
+    context.visible = true
+    controller.scheduleUpdate()
+    XCTAssertTrue(monitor.isActive)
+
+    try await controller.perform("navigate", body: ["page": "installed"])
+    controller.scheduleUpdate()
+    XCTAssertFalse(monitor.isActive, "leaving Settings stops sampling")
+
+    try await controller.perform("navigate", body: ["page": "settings"])
+    controller.scheduleUpdate()
+    controller.stop()
+    XCTAssertFalse(monitor.isActive)
+  }
+
+  @MainActor
+  private final class Context {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "panel-energy-\(UUID().uuidString)")
+    let navigation = ControlPanelNavigation()
+    let defaults: UserDefaults
+    let controller: WebPanelController
+    var visible = true
+
+    init() throws {
+      defaults = try XCTUnwrap(UserDefaults(suiteName: root.lastPathComponent))
+      let workshop = WorkshopStore(
+        downloader: WorkshopDownloadManager(sessionDirectory: root), supportDirectory: root,
+        defaults: defaults)
+      var isVisible: () -> Bool = { true }
+      controller = WebPanelController(
+        store: BridgeStore(bridge: LayoutSnapshotBridge(noPointer: .init())),
+        navigation: navigation, workshop: workshop,
+        isPresentationVisible: { isVisible() }, defaults: defaults,
+        energyUsage: EnergyUsageMonitor(source: IdleSource(), interval: .seconds(3600)),
+        appLanguage: .english())
+      isVisible = { [unowned self] in self.visible }
+      // A page that has loaded reports ready before anything else.
+      controller.isReady = true
+    }
+
+    func tearDown() {
+      controller.stop()
+      defaults.removePersistentDomain(forName: root.lastPathComponent)
+      try? FileManager.default.removeItem(at: root)
+    }
+  }
+}
+
+private struct IdleSource: EnergyUsageSource {
+  func sample() -> EnergyUsageSample? {
+    EnergyUsageSample(uptimeNanoseconds: 0, own: [:], otherGPUTime: [:])
+  }
+}

@@ -93,6 +93,24 @@ about 1 W between repeats; the app's own CPU and GPU percentages were the
 steadier signal, and system power needs a baseline taken minutes from the run it
 is set against.
 
+## Per-app energy without root
+
+Findings from 2026-09 on an M5 Pro, macOS 26.6, checked against `powermetrics`:
+
+- `proc_pid_rusage` `ri_energy_nj` tracks CPU energy (within 8 % of the
+  `powermetrics` CPU delta for one busy core) but includes no GPU energy.
+  `task_power_info_v2.task_gpu_utilisation` is only accumulated on x86_64 and
+  reads 0 on Apple Silicon.
+- `accumulatedGPUTime` in `ioreg` `AGXDeviceUserClient`, which this script
+  reports as GPU %, gave 2.8–38.6 % for five runs of the same saturating load.
+  Treat it as a coarse activity signal, never as energy.
+- Resource-coalition accounting (`coalition_info_resource_usage`: `energy`,
+  `gpu_energy_nj`, `gpu_time`) needs no privileges, covers the app with its
+  WebKit and decoder services, and summed over all coalitions matches the
+  whole-GPU figure within 5–9 %. GPU energy is apportioned by GPU time, so it
+  overstates an app sharing the GPU with a heavy load. The in-app readout uses
+  it; see [features/performance.md](../features/performance.md#energy-use).
+
 ## Runtime counters
 
 Two counter surfaces answer two different questions, and a power claim needs

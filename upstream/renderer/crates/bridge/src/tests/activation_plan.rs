@@ -54,6 +54,8 @@ fn activation_plan_marks_scenes_paused_when_global_playback_is_paused() {
         project_models: &BTreeMap::new(),
         native_video_enabled: false,
         native_video_rejected: &BTreeMap::new(),
+        frame_rate_cap: None,
+        audio_suppressed: false,
     }
     .build()
     .unwrap();
@@ -110,6 +112,8 @@ fn activation_plan_gives_primary_wallpaper_to_current_primary_display() {
         project_models: &BTreeMap::new(),
         native_video_enabled: false,
         native_video_rejected: &BTreeMap::new(),
+        frame_rate_cap: None,
+        audio_suppressed: false,
     }
     .build()
     .unwrap();
@@ -129,6 +133,8 @@ fn activation_plan_gives_primary_wallpaper_to_current_primary_display() {
         project_models: &BTreeMap::new(),
         native_video_enabled: false,
         native_video_rejected: &BTreeMap::new(),
+        frame_rate_cap: None,
+        audio_suppressed: false,
     }
     .build()
     .unwrap();
@@ -172,6 +178,8 @@ fn activation_plan_uses_primary_render_override_for_identity_primary_monitor() {
         project_models: &BTreeMap::new(),
         native_video_enabled: false,
         native_video_rejected: &BTreeMap::new(),
+        frame_rate_cap: None,
+        audio_suppressed: false,
     }
     .build()
     .unwrap();
@@ -219,6 +227,8 @@ fn activation_plan_uses_identity_render_override_for_primary_monitor() {
         project_models: &BTreeMap::new(),
         native_video_enabled: false,
         native_video_rejected: &BTreeMap::new(),
+        frame_rate_cap: None,
+        audio_suppressed: false,
     }
     .build()
     .unwrap();
@@ -272,7 +282,7 @@ fn mirror_scene_follows_source_wallpaper_with_monitor_overrides() {
             selector: SerializedSelector::LiveDisplayId { display_id: 2 },
             scaling_mode: "fill".to_string(),
             scaling_factor: 1.25,
-            target_fps: 30,
+            frame_rate: Some(30),
             volume: 0.2,
             muted: true,
         }],
@@ -292,6 +302,8 @@ fn mirror_scene_follows_source_wallpaper_with_monitor_overrides() {
         project_models: &BTreeMap::new(),
         native_video_enabled: false,
         native_video_rejected: &BTreeMap::new(),
+        frame_rate_cap: None,
+        audio_suppressed: false,
     }
     .build()
     .unwrap();
@@ -419,6 +431,8 @@ fn a_rejection_recorded_for_another_admission_key_does_not_route_a_video_to_the_
             project_models,
             native_video_enabled: true,
             native_video_rejected,
+            frame_rate_cap: None,
+            audio_suppressed: false,
         }
     }
     macro_rules! inputs {

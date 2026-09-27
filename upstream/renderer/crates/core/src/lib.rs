@@ -29,6 +29,7 @@ pub mod owe;
 mod display;
 mod engine;
 mod error;
+pub mod log_context;
 pub mod media;
 pub mod project;
 pub mod render;

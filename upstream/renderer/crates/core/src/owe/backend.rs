@@ -89,6 +89,26 @@ impl OweBackend {
         pointer_input_callback: Option<PointerInputCallback>,
         user_shortcut_callback: Option<UserShortcutCallback>,
     ) -> Result<OweScene, EngineError> {
+        let display = &desc.display;
+        let load = crate::log_context::begin_load(
+            "scene",
+            std::path::Path::new(&desc.scene_path),
+            format_args!(
+                "display {} {}x{} @{}x {}Hz, fps {}, scaling {scaling_mode} x{scaling_factor}, \
+                 render {}, paused {}",
+                display.display_id,
+                display.width,
+                display.height,
+                display.scale_factor,
+                display.refresh_rate_hz,
+                desc.fps,
+                render_resolution.map_or_else(|| "native".to_string(), |(w, h)| format!("{w}x{h}")),
+                desc.paused,
+            ),
+        );
+        // Lines this thread logs while opening belong to the load too; the
+        // scene's own threads are tagged below, before `init` starts them.
+        let _scope = crate::log_context::LoadScope::enter(load);
         let mut raw = std::ptr::null_mut();
         call_status("owe_scene_wallpaper_new", || unsafe {
             sys::owe_scene_wallpaper_new(&raw mut raw)
@@ -102,6 +122,9 @@ impl OweBackend {
             render_initialized: false,
             registration: None,
         };
+        call_status("owe_scene_wallpaper_set_log_scope", || unsafe {
+            sys::owe_scene_wallpaper_set_log_scope(raw.as_ptr(), load)
+        })?;
         scene.initialize_renderer(desc, metal_layer, render_resolution)?;
         scene.set_first_frame_callback(first_frame_callback)?;
         scene.set_pointer_input_callback(pointer_input_callback)?;

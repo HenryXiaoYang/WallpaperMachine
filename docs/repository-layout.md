@@ -22,7 +22,7 @@ App/                               WallpaperMachine application target sources o
   Logging/                         AppLog.swift; the only Swift logging entry point
   Services/Appearance/             AppTheme.swift: theme preference model and store
   Services/Desktop/                desktop picture APIs, original-wallpaper ledger, poster sync, presentation policy
-  Services/Diagnostics/            runtime diagnostics session and counter sampling
+  Services/Diagnostics/            runtime diagnostics session and counter sampling; per-coalition energy readout
   Services/GitHub/                 GitHub release client, update models, update store, installer
   Services/Library/                ClientPaths and library import/deletion; owns the app-support layout
   Services/Localization/           AppLanguage.swift: shipped-language registry and the language preference store

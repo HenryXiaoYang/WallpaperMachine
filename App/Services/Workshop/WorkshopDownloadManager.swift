@@ -326,7 +326,7 @@ final class WorkshopDownloadManager: SteamCMDDownloadActivity {
       reached = reached || job === first
       guard reached, job.hold != reason else { continue }
       job.hold = reason
-      if job === first { AppLog.debug("Workshop download \(job.id) waits: \(job.status)") }
+      if job === first { AppLog.info("Workshop download \(job.id) waits: \(job.status)") }
     }
   }
 }

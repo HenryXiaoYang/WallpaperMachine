@@ -1,4 +1,4 @@
-import { renderSettings } from './settings.js';
+import { renderSettings, revealSettingsSection, performanceLimitedFps, showEnergyUsage, milliwatts, energyLevelLabel } from './settings.js';
 import { createWelcome, SIGN_IN_ID } from './welcome.js';
 import { glyphs } from './icons.js';
 import { t, applyStaticText, setLanguage, language } from './i18n.js';
@@ -15,6 +15,8 @@ const drafts = new Map();
 let state = null;
 const inFlight = new Map();
 let localError = '';
+// Why applying a wallpaper last failed, by wallpaper id; the inspector offers to report it until an apply succeeds.
+const activationFailures = new Map();
 let popover = null;
 let popoverTrigger = '';
 let importWasBusy = false;
@@ -206,7 +208,7 @@ function receive(snapshot) {
   if (snapshot.welcomeSeen === false) welcome.openIfUndecided();
   render();
 }
-window.wallpaperUI = { receive };
+window.wallpaperUI = { receive, energy: showEnergyUsage };
 function renderError() {
   const error = localError || state?.error || state?.downloadError;
   if (!state && error) morph($('browser-empty'), `<h1>${escapeHTML(t('Native connection unavailable'))}</h1><p>${escapeHTML(t('Open this panel in WallpaperMachine. Use Reconnect above to try again.'))}</p>`);
@@ -440,16 +442,34 @@ function tileDoubleClickAction(id) {
   return requestByID(id) ? 'continueSetup' : 'requestDownload';
 }
 
-// GitHub's new-issue form, pre-filled with the wallpaper so a report names what failed. Nothing
+// GitHub's new-issue form, pre-filled with the wallpaper, the app version and what this panel knows
+// about it: the failure the user just saw and the backend drawing it, fallback reason included. Nothing
 // is sent from here: the browser opens the draft and the user decides whether to submit it.
-function issueLink(item) {
+function issueLink(item, failure = '') {
   const repository = safeLink(state.repositoryURL);
   if (!repository) return '';
   const url = new URL(`${repository.replace(/\/$/, '')}/issues/new`);
   const workshop = /^\d+$/.test(item.id) ? `https://steamcommunity.com/sharedfiles/filedetails/?id=${item.id}` : item.id;
+  const renderers = [...new Set([...(state.settings?.sceneRenderers || []), ...(state.settings?.videoBackends || [])]
+    .filter(report => report.wallpaperId === item.id && report.backend)
+    .map(report => `${report.backend}${report.fallbackReason ? ` (fallback: ${report.fallbackReason})` : ''}`))];
+  const facts = [`**Wallpaper:** ${item.title}`, `**Workshop item:** ${workshop}`, `**Type:** ${item.kind}`, `**App version:** ${state.version || 'unknown'}`];
+  if (renderers.length) facts.push(`**Renderer:** ${renderers.join('; ')}`);
+  if (failure) facts.push(`**Error:** ${failure}`);
   url.searchParams.set('title', `[${item.kind}] ${item.title}`);
-  url.searchParams.set('body', [`**Wallpaper:** ${item.title}`, `**Workshop item:** ${workshop}`, `**Type:** ${item.kind}`, `**App version:** ${state.version || 'unknown'}`, '', '**What went wrong?**', '', ''].join('\n'));
+  url.searchParams.set('body', [...facts, '', '**What went wrong?**', '', ''].join('\n'));
   return url.href;
+}
+
+// The background recorder's rating, with the conditions it was measured under: a rating
+// taken on two displays at native refresh says little about one display at 30 fps.
+function energyRating(energy) {
+  const level = energyLevelLabel(energy?.level);
+  if (!level || !Number.isFinite(Number(energy.milliwatts))) return '';
+  const displays = Number(energy.displays) === 1 ? t('1 display') : t('{count} displays', { count: Number(energy.displays) || 0 });
+  const rate = energy.frameRateCap != null && Number.isFinite(Number(energy.frameRateCap)) ? t('{fps} fps', { fps: Number(energy.frameRateCap) }) : t('native refresh rate');
+  const scale = `${Math.round(Number(energy.renderScale) * 100)}%`;
+  return t('{level}, about {power}. Measured while it played alone on {displays} at {rate}, {scale} render scale, with this window closed.', { level, power: milliwatts(energy.milliwatts), displays, rate, scale });
 }
 
 function renderInspector(discover) {
@@ -469,22 +489,30 @@ function renderInspector(discover) {
   const options = !discover && state.options?.id === item.id ? state.options : null;
   const compatibility = { Scene: t('Scene renderer is experimental.'), Video: t('Playback depends on the video codec.'), Web: t('Runs in a built-in web view. Mouse input and audio response reach the page; keyboard input does not.'), Application: t('Application wallpapers cannot run on macOS.'), Unknown: t('This wallpaper type is not supported.') }[item.kind] || '';
   const meta = [t(item.kind), bytes(item.size), discover && Number.isFinite(item.subscriptions) ? t('{count} subscribers', { count: item.subscriptions.toLocaleString() }) : ''].filter(Boolean).map(escapeHTML).join('<span aria-hidden="true"> · </span>');
-  const report = issueLink(item);
-  const secondary = `${discover ? button(t('View on Steam Workshop'), 'openExternal', { url: `https://steamcommunity.com/sharedfiles/filedetails/?id=${encodeURIComponent(item.id)}` }, { icon: 'external', className: 'wide', title: t('View on Steam Workshop') }) : isInstalled ? button(t('Show in Finder'), 'reveal', { id: item.id }, { icon: 'folder', className: 'wide', title: t('Show in Finder') }) : ''}${!discover && isInstalled ? button('', 'favorite', { id: item.id }, { icon: 'heart', title: state.favorites.includes(item.id) ? t('Remove from favorites') : t('Add to favorites'), className: `icon-button${state.favorites.includes(item.id) ? ' favorite-selected' : ''}` }) : ''}${!discover && isInstalled ? button('', 'delete', { id: item.id }, { icon: 'trash', className: 'icon-button danger', title: t('Move wallpaper to Trash'), disabled: state.busy }) : ''}${report ? button('', 'openExternal', { url: report }, { icon: 'triangleAlert', className: 'icon-button', title: t('Report a problem on GitHub') }) : ''}`;
+  const energy = !discover ? energyRating(item.energy) : '';
+  // A failure this panel saw for the wallpaper (its download, or the last attempt to apply it) is
+  // shown with a report prefilled with it; otherwise an installed wallpaper that can run offers a
+  // plain report link beneath its compatibility note, where someone checking a problem is reading.
+  const failure = (!isInstalled && download?.error && !download.pending ? download.error : '') || (isInstalled ? activationFailures.get(item.id) || '' : '');
+  const failureReport = failure ? issueLink(item, failure) : '';
+  const failureNotice = failure ? `<div class="notice error inspector-failure"><p>${escapeHTML(failure)}</p>${failureReport ? button(t('Report this problem on GitHub'), 'openExternal', { url: failureReport }, { icon: 'github', className: 'link' }) : ''}</div>` : '';
+  const report = !failure && isInstalled && item.kind !== 'Application' ? issueLink(item) : '';
+  const reportLink = report ? button(t('Not working? Report on GitHub'), 'openExternal', { url: report }, { icon: 'github', className: 'link inspector-report' }) : '';
+  const secondary = `${discover ? button(t('View on Steam Workshop'), 'openExternal', { url: `https://steamcommunity.com/sharedfiles/filedetails/?id=${encodeURIComponent(item.id)}` }, { icon: 'external', className: 'wide', title: t('View on Steam Workshop') }) : isInstalled ? button(t('Show in Finder'), 'reveal', { id: item.id }, { icon: 'folder', className: 'wide', title: t('Show in Finder') }) : ''}${!discover && isInstalled ? button('', 'favorite', { id: item.id }, { icon: 'heart', title: state.favorites.includes(item.id) ? t('Remove from favorites') : t('Add to favorites'), className: `icon-button${state.favorites.includes(item.id) ? ' favorite-selected' : ''}` }) : ''}${!discover && isInstalled ? button('', 'delete', { id: item.id }, { icon: 'trash', className: 'icon-button danger', title: t('Move wallpaper to Trash'), disabled: state.busy }) : ''}`;
   const showInLibrary = discover && isInstalled && !(download && !download.pending && !download.error) ? button(t('Show in library'), 'showInstalled', { id: item.id }, { icon: 'image', className: 'link' }) : '';
   const activateLabel = target?.wallpaperID === item.id ? t('Reapply wallpaper') : t('Apply wallpaper');
   const activation = isInstalled ? button('', 'activate', { id: item.id }, { icon: 'play', title: activateLabel, className: 'primary inspector-play', disabled: !canActivate || state.busy }) : '';
   morph($('inspector'), `<div class="inspector-layout" ${keyAttr(`inspector-${item.id}-${discover}`)}><div class="inspector-scroll"><div class="inspector-heading">
     <div class="inspector-artwork"><div class="inspector-preview">${preview(item.preview)}</div>${activation}</div>
     <h2>${escapeHTML(item.title)}</h2>${discover && item.creator ? `<p class="inspector-creator">${escapeHTML(item.creator)}</p>` : ''}
-    <p class="inspector-meta">${meta}</p>
+    <p class="inspector-meta">${meta}</p>${energy ? `<p class="inspector-energy muted"><small>${escapeHTML(energy)}</small></p>` : ''}
     <div class="actions inspector-actions">${!isInstalled ? downloadAction : ''}${secondary}</div>${tags(item.tags)}
     ${!isInstalled && download?.pending && !download.queued ? `<progress class="inspector-progress" max="1"${Number.isFinite(download.progress) ? ` value="${clamp(download.progress)}"` : ''} aria-label="${escapeHTML(t('{title} download progress', { title: item.title }))}"></progress><p class="muted"><small>${escapeHTML(download.status)}${transfer(download, { includePercent: false }) ? ` · ${transfer(download, { includePercent: false })}` : ''}</small></p>` : ''}
     ${request ? `<p class="muted"><small>${escapeHTML(stageHint(request.stage))}</small></p>` : ''}
-    ${!isInstalled && download?.error && !download.pending ? `<p class="notice error">${escapeHTML(download.error)}</p>` : ''}
+    ${failureNotice}
     ${isInstalled && download && !download.pending && !download.error ? button(t('Show in library'), 'showInstalled', { id: item.id }, { icon: 'image', className: 'link' }) : ''}
     ${download || request ? button(t('Show in downloads'), 'openDownloads', {}, { className: 'link' }) : ''}
-    ${compatibility ? `<p class="inspector-compatibility muted"><small>${escapeHTML(compatibility)}</small></p>` : ''}
+    ${compatibility ? `<p class="inspector-compatibility muted"><small>${escapeHTML(compatibility)}</small></p>` : ''}${reportLink}
     ${item.kind === 'Scene' && !state.settings.sceneAssetsReady ? `<div class="notice warning">${escapeHTML(t('Shared scene resources are required before playback.'))} ${button(t('Get shared resources'), 'requestAssets', {}, { className: 'link' })}</div>` : ''}${showInLibrary}
     </div>${discover ? (item.summary ? `<section class="inspector-section"><p>${escapeHTML(item.summary)}</p></section>` : '') : options ? renderOptions(options) : `<section class="inspector-section"><p class="muted">${escapeHTML(t('Loading wallpaper options…'))}</p></section>`}
     </div>${options ? renderInspectorSave(options) : ''}</div>`);
@@ -539,7 +567,7 @@ function renderOptions(options) {
       ${renderAudioAndMedia(options, lock)}
     </div></details></section>
     ${properties ? `<section class="inspector-section"><details open ${keyAttr(`properties-${id}`)}><summary>${escapeHTML(t('Wallpaper properties'))}${icon('chevronRight', 14)}</summary><div class="section-content wallpaper-properties">${properties}</div></details></section>` : ''}
-    <section class="inspector-section"><details ${keyAttr(`displays-${id}`)}><summary>${escapeHTML(t('Displays'))}${icon('chevronRight', 14)}</summary><div class="section-content">${(options.displays || []).map(display => `<details class="display-options" open ${keyAttr(display.id)}><summary>${escapeHTML(display.title)}${icon('chevronRight', 13)}</summary><div class="section-content"><label class="check-label"><input type="checkbox" data-change="displayConfig" data-id="${escapeHTML(id)}" data-display-id="${escapeHTML(display.id)}" data-setting="enabled"${checked(display.enabled)}${disabled(lock)}>${escapeHTML(t('Enabled'))}</label><label class="field">${escapeHTML(t('Scaling mode'))}<select data-change="displayConfig" data-id="${escapeHTML(id)}" data-display-id="${escapeHTML(display.id)}" data-setting="scalingMode"${disabled(lock)}>${selectOptions([['none', t('Original size')], ['stretch', t('Stretch')], ['match', t('Fit')], ['fill', t('Fill')]], display.scalingMode)}</select></label><label class="field">${escapeHTML(t('Scale factor'))}<input type="number" min="${Number.MIN_VALUE}" step="any" value="${Number(display.scalingFactor)}" data-change="displayConfig" data-id="${escapeHTML(id)}" data-display-id="${escapeHTML(display.id)}" data-setting="scalingFactor"${disabled(lock)}></label><label class="field">${escapeHTML(t('Frame rate'))}<input type="number" min="1" max="${Number(display.maxFps) || 240}" step="1" value="${Number(display.fps)}" data-change="displayConfig" data-id="${escapeHTML(id)}" data-display-id="${escapeHTML(display.id)}" data-setting="fps"${disabled(lock)}></label>${button(t('Remove from display'), 'eject', { id, displayID: display.id }, { className: 'link', disabled: lock })}</div></details>`).join('') || `<p class="muted">${escapeHTML(t('Apply this wallpaper to a display to configure playback.'))}</p>`}</div></details></section>`;
+    <section class="inspector-section"><details ${keyAttr(`displays-${id}`)}><summary>${escapeHTML(t('Displays'))}${icon('chevronRight', 14)}</summary><div class="section-content">${(options.displays || []).map(display => `<details class="display-options" open ${keyAttr(display.id)}><summary>${escapeHTML(display.title)}${icon('chevronRight', 13)}</summary><div class="section-content"><label class="check-label"><input type="checkbox" data-change="displayConfig" data-id="${escapeHTML(id)}" data-display-id="${escapeHTML(display.id)}" data-setting="enabled"${checked(display.enabled)}${disabled(lock)}>${escapeHTML(t('Enabled'))}</label><label class="field">${escapeHTML(t('Scaling mode'))}<select data-change="displayConfig" data-id="${escapeHTML(id)}" data-display-id="${escapeHTML(display.id)}" data-setting="scalingMode"${disabled(lock)}>${selectOptions([['none', t('Original size')], ['stretch', t('Stretch')], ['match', t('Fit')], ['fill', t('Fill')]], display.scalingMode)}</select></label><label class="field">${escapeHTML(t('Scale factor'))}<input type="number" min="${Number.MIN_VALUE}" step="any" value="${Number(display.scalingFactor)}" data-change="displayConfig" data-id="${escapeHTML(id)}" data-display-id="${escapeHTML(display.id)}" data-setting="scalingFactor"${disabled(lock)}></label><label class="field">${escapeHTML(t('Frame rate'))}<input type="number" min="1" max="${Number(display.maxFps) || 240}" step="1" value="${Number(display.fps)}" data-change="displayConfig" data-id="${escapeHTML(id)}" data-display-id="${escapeHTML(display.id)}" data-setting="fps"${disabled(lock)}></label>${(() => { const limited = performanceLimitedFps(display.fps, state.settings || {}); return limited == null ? '' : `<p class="muted field-note"><small>${escapeHTML(t('Limited to {fps} fps by Performance settings', { fps: limited }))}</small> ${button(t('Open Performance'), 'openPerformance', {}, { className: 'link' })}</p>`; })()}${button(t('Remove from display'), 'eject', { id, displayID: display.id }, { className: 'link', disabled: lock })}</div></details>`).join('') || `<p class="muted">${escapeHTML(t('Apply this wallpaper to a display to configure playback.'))}</p>`}</div></details></section>`;
 }
 function renderInspectorSave(options) {
   const id = options.id;
@@ -978,6 +1006,9 @@ async function handleAction(action, data, element) {
     case 'clearProperty': await deliver('property', { id, propertyID: data.propertyId, value: '' }); return;
     case 'restoreProperty': drafts.delete(draftKey(id, data.propertyId)); await deliver(action, { id, propertyID: data.propertyId }); return;
     case 'revert': for (const key of drafts.keys()) if (key.startsWith(`${id}\u0000`)) drafts.delete(key); await deliver(action, { id }); return;
+    case 'activate':
+      try { await deliver(action, { id }); activationFailures.delete(id); } catch (error) { activationFailures.set(id, error?.message || String(error)); throw error; } finally { render(); }
+      return;
     case 'apply':
       for (const [key, value] of [...drafts]) if (key.startsWith(`${id}\u0000`)) { await deliver('property', { id, propertyID: key.split('\u0000')[1], value }); if (drafts.get(key) === value) drafts.delete(key); }
       await deliver(action, { id }); return;
@@ -987,6 +1018,7 @@ async function handleAction(action, data, element) {
     case 'toggleSortDirection': installed.descending = !installed.descending; render(); return;
     case 'workshopPage': await deliver(action, { page: Math.min(workshopMaxPages(), Math.max(1, Number(data.workshopPage) || 1)) }); $('wallpaper-grid').scrollTop = 0; return;
     case 'openExternal': await deliver(action, { url: data.url }); return;
+    case 'openPerformance': revealSettingsSection('performance'); await deliver('navigate', { page: 'settings' }); return;
     case 'import': await deliver(action, { duplicates: importDuplicates }); return;
     default: {
       const args = {};

@@ -257,9 +257,14 @@ final class WebWallpaperHost {
                 let page = WebWallpaperPage(
                     projectURL: projectURL, entryFile: wallpaper.entryFile,
                     surface: surface, counters: counters)
+                let load = AppLog.beginLoad("web", project: wallpaper.projectPath, detail: """
+                    wallpaper \(wallpaper.wallpaperId) “\(wallpaper.title)” entry \(wallpaper.entryFile), \
+                    \(DiagnosticEnvironment.display(displayID)), fps \(wallpaper.fps), paused \(wallpaper.paused)
+                    """)
+                page.logLoad = load
                 counters.record(.webPageCreated, for: surface)
                 page.onFailure = { [weak self] message in
-                    AppLog.error("web wallpaper \(wallpaper.wallpaperId) on display \(displayID): \(message)")
+                    AppLog.error("web wallpaper \(wallpaper.wallpaperId) on display \(displayID): \(message)", load: load)
                     self?.onError?(String(localized: "Web wallpaper “\(wallpaper.title)” could not load: \(message)"))
                 }
                 page.onLoaded = { [weak self] in
@@ -283,7 +288,7 @@ final class WebWallpaperHost {
                 push(wallpaper, into: page, previous: nil)
                 page.load()
                 window.orderFrontRegardless()
-                AppLog.info("web wallpaper \(wallpaper.wallpaperId) opened on display \(displayID)")
+                AppLog.info("web wallpaper \(wallpaper.wallpaperId) opened on display \(displayID)", load: load)
                 changed = true
             }
         }

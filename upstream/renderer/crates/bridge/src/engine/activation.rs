@@ -44,6 +44,14 @@ pub struct ActivationInputs<'a> {
     /// Refusals the native player recorded, per wallpaper and then per
     /// admission key. See [`NativeVideoRejections`].
     pub native_video_rejected: &'a NativeVideoRejections,
+    /// Global frame-rate ceiling. `None` means no limit. This is the saved
+    /// cap only: the battery cap is applied live to open scenes, not baked
+    /// into descriptors. Web and native-video rates use it because those
+    /// hosts have no later `set_fps`.
+    pub frame_rate_cap: Option<u32>,
+    /// Transient mute composed on top of each slot's saved mute. Web has no
+    /// mute channel and ignores this.
+    pub audio_suppressed: bool,
 }
 
 /// Refusals recorded per wallpaper id, then per admission key.
@@ -256,7 +264,7 @@ impl ActivationInputs<'_> {
     /// into a scene.
     pub fn build(&self) -> Result<Vec<SceneDesc>, BridgeError> {
         let (direct, mirrors) = self.slots();
-        let group_targets = Self::mirror_group_targets(&mirrors);
+        let group_targets = self.mirror_group_targets(&mirrors);
         let mut scenes = Vec::new();
         for slot in direct {
             // A wallpaper routed to a host-rendered backend must not also get a
@@ -307,11 +315,7 @@ impl ActivationInputs<'_> {
             scene.paused = self.display_paused(scene.display.display_id);
             scene.scaling_mode = mirror.settings.parse_scaling_mode();
             scene.scaling_factor = mirror.settings.scaling_factor;
-            scene.fps = scene
-                .display
-                .refresh_rate_hz
-                .max(1)
-                .min(mirror.settings.target_fps.max(1));
+            scene.fps = mirror.settings.fps_on(scene.display.refresh_rate_hz);
             scene.audio_volume = audio_volume;
             scene.audio_muted = mirror.settings.muted;
             scene.validate().map_err(|error| BridgeError::Error {
@@ -353,17 +357,7 @@ impl ActivationInputs<'_> {
                 .map(|property| (property.id.clone(), property.effective_value(&overrides)))
                 .collect();
             let paused = self.display_paused(slot.display.display_id);
-            let render = RenderOverrideResolver {
-                wallpaper: slot.wallpaper,
-                monitor: slot.monitor,
-                display: &slot.display,
-                displays: self.displays,
-            }
-            .resolve();
-            let fps = render
-                .map_or(60, |render| render.fps)
-                .max(1)
-                .min(slot.display.refresh_rate_hz.max(1));
+            let fps = self.slot_fps(&slot);
             web.push(WebWallpaperDesc {
                 display: slot.display,
                 wallpaper_id: slot.wallpaper_id.to_string(),
@@ -392,11 +386,7 @@ impl ActivationInputs<'_> {
                 continue;
             };
             mirrored.push(mirror.display.clone());
-            let fps = mirror
-                .settings
-                .target_fps
-                .max(1)
-                .min(mirror.display.refresh_rate_hz.max(1));
+            let fps = self.mirror_fps(&mirror);
             let paused = self.display_paused(mirror.display.display_id);
             web.push(WebWallpaperDesc {
                 display: mirror.display,
@@ -487,7 +477,7 @@ impl ActivationInputs<'_> {
     /// drop records whose configuration is gone.
     pub fn native_video_admission_keys(&self) -> BTreeMap<String, BTreeSet<u64>> {
         let (direct, mirrors) = self.slots();
-        let group_targets = Self::mirror_group_targets(&mirrors);
+        let group_targets = self.mirror_group_targets(&mirrors);
         let mut keys: BTreeMap<String, BTreeSet<u64>> = BTreeMap::new();
         for slot in direct {
             let admission_fps = self.slot_admission_fps(&slot, &group_targets);
@@ -511,7 +501,7 @@ impl ActivationInputs<'_> {
     #[must_use]
     pub fn render_backends(&self) -> RenderBackendSurvey {
         let (direct, mirrors) = self.slots();
-        let group_targets = Self::mirror_group_targets(&mirrors);
+        let group_targets = self.mirror_group_targets(&mirrors);
         let mut videos: Vec<VideoBackendRouting> = Vec::new();
         let mut render_scale_supported = false;
         for slot in direct {
@@ -605,33 +595,42 @@ impl ActivationInputs<'_> {
                 continue;
             }
             mirrored.push(mirror.display.clone());
-            rates.insert(mirror.display.display_id, Self::mirror_fps(mirror));
+            rates.insert(mirror.display.display_id, self.mirror_fps(mirror));
         }
         rates
     }
 
-    /// This slot's effective target frame rate: the user's requested rate for
-    /// the monitor, never above what the display can actually present.
+    /// This slot's effective target frame rate: the user's requested rate, or
+    /// the display's own refresh when they have not chosen one, never above
+    /// what the display can present or the global cap.
     fn slot_fps(&self, slot: &DirectSlot<'_>) -> u32 {
-        RenderOverrideResolver {
-            wallpaper: slot.wallpaper,
-            monitor: slot.monitor,
-            display: &slot.display,
-            displays: self.displays,
-        }
-        .resolve()
-        .map_or(60, |render| render.fps)
-        .max(1)
-        .min(slot.display.refresh_rate_hz.max(1))
+        let refresh = slot.display.refresh_rate_hz;
+        // A missing override is "follow native", the same answer `fps_on`
+        // gives a default render, without allocating that default on the
+        // common unsaved path.
+        let fps = crate::config::resolve_frame_rate(
+            RenderOverrideResolver {
+                wallpaper: slot.wallpaper,
+                monitor: slot.monitor,
+                display: &slot.display,
+                displays: self.displays,
+            }
+            .resolve()
+            .and_then(|render| render.frame_rate),
+            refresh,
+        );
+        self.apply_frame_rate_cap(fps)
     }
 
-    /// One mirror display's effective target frame rate.
-    fn mirror_fps(mirror: &MirrorSlot) -> u32 {
-        mirror
-            .settings
-            .target_fps
-            .max(1)
-            .min(mirror.display.refresh_rate_hz.max(1))
+    /// One mirror display's effective target frame rate, under the global cap.
+    fn mirror_fps(&self, mirror: &MirrorSlot) -> u32 {
+        let fps = mirror.settings.fps_on(mirror.display.refresh_rate_hz);
+        self.apply_frame_rate_cap(fps)
+    }
+
+    fn apply_frame_rate_cap(&self, fps: u32) -> u32 {
+        self.frame_rate_cap
+            .map_or(fps, |cap| fps.min(cap.max(1)))
     }
 
     /// The strictest mirror target per source display id.
@@ -639,7 +638,7 @@ impl ActivationInputs<'_> {
     /// Mirrors are deduplicated by physical display exactly as the build loops
     /// deduplicate them, so the rate a group is judged at is the rate a group
     /// member will actually run at.
-    fn mirror_group_targets(mirrors: &[MirrorSlot]) -> BTreeMap<u32, u32> {
+    fn mirror_group_targets(&self, mirrors: &[MirrorSlot]) -> BTreeMap<u32, u32> {
         let mut strictest: BTreeMap<u32, u32> = BTreeMap::new();
         let mut counted: Vec<DisplayDesc> = Vec::new();
         for mirror in mirrors {
@@ -650,7 +649,7 @@ impl ActivationInputs<'_> {
                 continue;
             }
             counted.push(mirror.display.clone());
-            let fps = Self::mirror_fps(mirror);
+            let fps = self.mirror_fps(mirror);
             strictest
                 .entry(mirror.source_display_id)
                 .and_modify(|current| *current = (*current).min(fps))
@@ -686,7 +685,7 @@ impl ActivationInputs<'_> {
     /// range.
     pub fn build_native_video(&self) -> Result<Vec<NativeVideoWallpaperDesc>, BridgeError> {
         let (direct, mirrors) = self.slots();
-        let group_targets = Self::mirror_group_targets(&mirrors);
+        let group_targets = self.mirror_group_targets(&mirrors);
         let mut videos = Vec::new();
         for slot in direct {
             let admission_fps = self.slot_admission_fps(&slot, &group_targets);
@@ -710,7 +709,7 @@ impl ActivationInputs<'_> {
                 admission_key: admission.admission_key,
                 paused: self.display_paused(slot.display.display_id),
                 volume: slot.wallpaper.audio.volume,
-                muted: slot.wallpaper.audio.muted,
+                muted: slot.wallpaper.audio.muted || self.audio_suppressed,
                 scaling_mode: render
                     .map(crate::config::wallpaper::MonitorRender::parse_scaling_mode)
                     .unwrap_or_default(),
@@ -735,7 +734,7 @@ impl ActivationInputs<'_> {
                 continue;
             };
             mirrored.push(mirror.display.clone());
-            let fps = Self::mirror_fps(&mirror);
+            let fps = self.mirror_fps(&mirror);
             // A mirror takes the source's `admission_fps` and `admission_key`
             // through `..source`, and that is correct rather than convenient:
             // the source was judged at the group minimum, which already
@@ -749,7 +748,7 @@ impl ActivationInputs<'_> {
                 fps,
                 paused: self.display_paused(mirror.display.display_id),
                 volume: mirror.settings.volume,
-                muted: mirror.settings.muted,
+                muted: mirror.settings.muted || self.audio_suppressed,
                 scaling_mode: mirror.settings.parse_scaling_mode(),
                 scaling_factor: mirror.settings.scaling_factor,
                 display: mirror.display,
@@ -964,8 +963,10 @@ impl SceneDescBuilderExt for SceneDescBuilder {
             displays: context.displays,
         }
         .resolve();
-        let fps = render_override.map_or(60, |render| render.fps);
-        let max_fps = context.display.refresh_rate_hz.max(1);
+        let fps = crate::config::resolve_frame_rate(
+            render_override.and_then(|render| render.frame_rate),
+            context.display.refresh_rate_hz,
+        );
         let scaling_mode = render_override
             .map(crate::config::wallpaper::MonitorRender::parse_scaling_mode)
             .unwrap_or_default();
@@ -1002,7 +1003,7 @@ impl SceneDescBuilderExt for SceneDescBuilder {
         };
         let mut builder = SceneTemplate::builder(project_json.to_string_lossy())
             .assets_path(assets_path.to_string_lossy())
-            .fps(fps.max(1).min(max_fps))
+            .fps(fps)
             .paused(context.paused)
             .scaling_mode(scaling_mode)
             .scaling_factor(scaling_factor)

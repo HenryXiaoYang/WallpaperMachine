@@ -42,72 +42,74 @@ goes. Trimming is allowed; editing an entry's recorded result is not.
 - Not run: Release build, package.py, CI on macos-15. Local Homebrew dylibs are minos 26/27, so a local package still requires this host's release.
 - Gap: nothing was launched on macOS 15; WebUI on Safari 18 WebKit, MediaRemote adapter and the Liquid Glass fallback are unchecked there.
 
-## 2026-09-26 — Release build: welcome guide changes
+## 2026-09-27 — Release build for energy readout verification
 
-- python3 scripts/build.py --swift-only --configuration Release: OK after the passing full gate (581 passed, 0 failed, 11 skipped).
-- The bundled Contents/Resources/WebUI welcome.js, welcome.css and locales/zh-Hans.js are byte-identical to WebUI/.
-- The app was not launched; its visual behavior was not checked in the delivered app.
+- python3 scripts/build.py --configuration Release: OK (full build; renderer sources have uncommitted changes in the tree).
+- Bundle check: WebUI settings.js, panel.js, settings.css, panel.css, locales/zh-Hans.js identical to WebUI/; binary contains EnergyRatings.json and AppleSmartBattery strings.
+- Delivered: build/Build/Products/Release/WallpaperMachine.app. Not launched; user verifies after quitting and reopening.
 
-## 2026-09-26 — Welcome guide: lock-screen switch, shorter tips, compatibility card
 
-- python3 scripts/test.py: 581 passed, 0 failed, 11 skipped (592).
-- ControlPanelShellTests (19/19): guide shows lock switch off/disabled when unavailable; native refusal keeps it off with the error shown; drafts untouched; Tips has 3 rows and 2 allowlisted GitHub links.
-- Throwaway headless-Chromium harness (stubbed bridge, deleted): lock switch applies at once, Skip reverts it, busy status has no doubled ellipsis; Tips fits 760x560 without scrolling in en/zh-Hans, light/dark.
-- impeccable detect on welcome.js/welcome.css: 0 findings. The in-browser overlay was blocked by the CSP (no wasm-unsafe-eval).
-- Not verified: WKWebView rendering in the real app and actually enabling the lock screen. No Release build.
+## 2026-09-27 — Energy readout: grade, battery share, before/after, per-wallpaper rating
 
-## 2026-09-26 — Quit restores inherited Spaces to the real wallpaper
+- python3 scripts/test.py: 640 passed, 0 failed, 11 skipped (Python script tests all OK).
+- Targeted: EnergyUsageMonitorTests, WallpaperEnergyRatingsTests, WebPanelEnergyUsageTests, WebPanelPerformanceSettingsTests passed (31).
+- WebUI smoke in headless Chromium (throwaway harness, removed): Performance order energy→quality→playback; readout states measuring/ready/pending/after/contended in en and zh-Hans; inspector energy line rated/unrated.
+- BatteryCapacity.fullChargeWattHours on this MacBook Pro: 98.5 Wh (8,532 mAh × 3 × 3.85 V).
+- Not run: live app (no desktop authorization); background recorder and settingChanged wiring unobserved in the running app. Not rebuilt (no Release build).
+- Gap: WKWebView rendering not checked; Chromium only.
 
-- Bug: Spaces journaled with a pathless (inherited) original, or showing an unjournaled poster, kept a poster after quit.
-- Fix: DesktopWallpaperLedger substitutes the display's first real original (then any display's) at capture and restore.
-- python3 scripts/test.py --only DesktopWallpaperTests: 29/29 pass; the 2 new regression tests fail on the HEAD ledger.
-- Read-only dry run against the live journal/Spaces: old restore wrote {} to display 2 Spaces BCDD1D84/83FBBBB8, new restores Big Sur Coastline.heic on all 4.
-- python3 scripts/test.py: 581 passed, 0 failed, 11 skipped.
-- Not run: real quit on the desktop (no wallpaper-change authorization); Release app not rebuilt.
 
-## 2026-09-26 — Release build with wallpaper-window canHide fix
+## 2026-09-27 — Native refresh default fps; welcome guide Performance step
 
-- python3 scripts/build.py --configuration Release: OK (cargo, uniffi-bindgen, xcodegen, xcodebuild; pre-existing warnings only); generated bindings unchanged.
-- Built binary 2026-09-26 18:56 contains the setCanHide: selector reference.
-- Delivered: build/Build/Products/Release/WallpaperMachine.app. Not launched; two-display apply/hide behavior not checked on the desktop.
+- cargo test -p wallpaper-bridge --release: 343 passed, 0 failed (new: native-refresh default per descriptor, legacy fps/target_fps migration, top-of-range stored as follow-native).
+- python3 scripts/build.py --renderer-only: OK; bindings regenerated, API unchanged.
+- python3 scripts/check_renderer.py: all generated cases pooled/isolated exit 0, pixels equal, 0 reload-cycle failures.
+- python3 scripts/test.py: 630 passed, 0 failed, 11 skipped (641). First attempt failed to compile on a concurrent AppDelegate edit (startWallpaperEnergyRecorder) by another author; rerun after it landed.
+- ControlPanelShellTests welcome walkthrough: 6 steps; Performance page defaults to High with Native refresh rate readout; Low + 24 fps slider stays draft, Continue sends renderScale 0.5 and frameRateCap 24.
+- Not checked: visual layout of the welcome Performance page on a real display; no desktop run or Release build.
 
-## 2026-09-26 — Wallpaper windows survive app hide (canHide=false)
 
-- Bug: after an activation NSApp.hide(nil) (e8aab7b) also hid every wallpaper window (AppKit canHide default YES); occlusion then suspended both displays. Evidence: app log 20260926-180315 shows 'presentation suspended for displays [1, 2]' after each of 5 activations; no [1, 2] suspension in any session before 2026-09-26 14:24.
-- Fix: canHide=false on MWEWallpaperDesktopWindow (crates/core window.rs), MWEWebWallpaperDesktopWindow, MWENativeVideoDesktopWindow; provenance note and architecture.md updated.
-- python3 scripts/build.py --renderer-only: passed (pre-existing unused-code warnings only).
-- cargo test --release -p wallpaper-core --lib window: 12 passed.
-- python3 scripts/test.py: 574 passed, 0 failed, 11 skipped.
-- Not run: desktop hide/apply check on two displays (needs desktop authorization); no Release build.
-- Separate finding, not changed: each scene's text worker reads the 78 MB PingFang fallback font twice per text update under the process-wide g_freetype_mutex (TextLayer.cpp CreateFallbackFace); a sample showed the two scenes' workers waiting on each other (333 mutex-wait samples).
+## 2026-09-27 — Release build
 
-## 2026-09-26 — Top bar/About version display + Release build
+- python3 scripts/test.py: 630 passed, 0 failed, 11 skipped
+- python3 scripts/build.py --configuration Release: OK
+- Bundled WebUI matches WebUI/
 
-- Removed top-bar version and GitHub button; About shows 'beta (unreleased)' and component versions 0.1.0 (display-only); removed bigsaltyfishes renderer row.
-- Updated ControlPanelShellTests top-bar tests (repository link removed).
-- python3 scripts/test.py: 574 passed, 0 failed, 11 skipped.
-- python3 scripts/build.py --swift-only --configuration Release: OK; bundled WebUI identical to WebUI/.
-- Not checked: visual rendering of Settings/About on a desktop run.
 
-## 2026-09-26 — Release pipeline follow-ups: reference bytes, real transport, safer rebuild
+## 2026-09-27 — Settings energy readout (coalition CPU/GPU energy)
 
-After review: the .DS_Store and alias writers are held to ds_store 1.3.3 / mac_alias 2.2.3 output, the model call has a 600 s deadline and claim rules, --rebuild-changelog never calls the model and keeps recorded sections, the image copy sheds extended attributes, and DMG inputs are checked in the packaging preflight. Python-only changes after the previous entry's full gate.
+- Full gate python3 scripts/test.py: 630 passed, 0 failed, 11 skipped (Tests-20260927-024741-849396).
+- New: EnergyUsageMonitorTests (mW arithmetic, missing coalitions, contention threshold, window, live kernel counters) and WebPanelEnergyUsageTests (sampling only while Settings visible).
+- First gate hung ControlPanelSyncTests/ShellTests at 120 s; bisected to a settingsSection post from settings.js draw(); removed, gating is now window visible on Settings.
+- Standalone smoke: CoalitionEnergySource resolved its private symbols, found the running extension's coalition, ~2.6 ms per sample over ~740 coalitions.
+- Accounting cross-check (pm_compare.py, user-run powermetrics): coalition sum vs whole GPU within 5% idle, 6-9% under load; contention overstates the app (0.59 W alone, 15 W beside a saturating load).
+- WebUI smoke in headless Chromium with a fake bridge: row renders Measuring…, then CPU 141 mW · GPU 1.6 W and the contention note in zh-Hans; no page errors. Screenshot capture timed out, so layout was not visually checked.
+- Not checked: the readout inside the running app; no Release build.
 
-- `python3 scripts/tests/test_release_notes.py` — exit 0; 45 tests, including the real HTTP request against a local server (headers, the gateway's 401 message, the deadline)
-- `python3 scripts/tests/test_dmg.py` — exit 0; 11 tests: writers byte-identical to the reference goldens; a bundle carrying Finder info round-trips and verifies
-- `test_brand.py` 6 and `test_publish_release.py` 13 — exit 0
-- `python3 scripts/package.py --configuration Release --check` — exit 0; preflight including the DMG inputs, bundle unchanged
-- `release_notes.py --ai --tag v0.6.0 --to HEAD` through the real request — 37 s; opt-in features read optional and off by default, no power claims
-- Native suite not rerun: no Swift change since the previous entry's full gate
 
-## 2026-09-26 — Release pipeline: drag-to-install disk image and model-written release notes
+## 2026-09-27 — Application log and diagnostics report
 
-The distributable is now WallpaperMachine-<version>-arm64.dmg (scripts/lib/dmg.py, standard library only) and the in-app updater installs from it; release notes are written by claude-opus-5-5 through the sub2api gateway and recorded once in CHANGELOG.md. The Release app in build/ was running and was neither rebuilt nor packaged.
+- cargo test --release -p wallpaper-core --lib: 216 passed; -p wallpaper-bridge --lib: 339 passed (line format, load tag, session/file retention, verbose setting persistence, project summary).
+- python3 scripts/test.py: 622 passed, 0 failed, 11 skipped (includes AppLogRouterTests, DiagnosticsRedactorTests, DiagnosticsBundleTests).
+- python3 scripts/check_renderer.py: 10 generated cases pooled/isolated pixel-equal, 0 diagnostics; reload cycles 0.
+- Throwaway core smoke: a real OWE scene with owe_scene_wallpaper_set_log_scope(99) before init logged 'main/render looper started|stopped' tagged load 99; set after init refused; frame timer thread untagged.
+- Throwaway bridge smoke (installed logger, fake engine): session header, configuration line, host load header with project summary, Swift line kept its supplied timestamp and load#1, debug hidden until verbose on and logged after.
+- Not checked: a desktop scene load, the Save panel and Finder reveal (no desktop run authorized); app not rebuilt for Release.
 
-- `python3 scripts/test.py` — exit 0; 14 script test modules OK (test_dmg 7, test_release_notes 41, test_brand 6, test_publish_release 13); native 579 passed, 0 failed, 11 skipped of 590
-- `python3 scripts/test.py --only AppUpdateTests --only ControlPanelShellTests` — exit 0; 48 passed, including installs from real hdiutil images that end detached
-- scripts/lib/dmg.py against dmgbuild 1.6.7 in a throwaway venv (not a dependency) — .DS_Store (16388 bytes) and background alias (394 bytes) byte-identical for the same inputs; a built image's records equal dmgbuild's
-- scripts/package.py run on a copy of the Release app outside build/ — preflight, 19 relocated dylibs, ad-hoc signing, 33 MB ULFO image, mounted verification, `shasum -a 256 -c` OK; nothing left attached
-- `release_notes.py --ai --tag v0.6.0 --to HEAD` against the gateway — 93 commits, summary plus 14 New / 8 Improved / 20 Fixed, streamed in 44 s
-- Finder window of that image — checked and confirmed by the user on macOS 27.2 beta; not checked on macOS 26.x
-- Not run: the CI workflows (Build stays behind the LICENSING.md gate; the RELEASE_NOTES_API_KEY repository secret is not set yet)
+
+## 2026-09-27 — Performance page: frame-rate cap, battery mode, playback rules
+
+- cargo test --release -p wallpaper-bridge --lib (build.py cargo env, --skip smoke_logging_throwaway): 339 passed, 0 failed, 1 filtered
+- python3 scripts/build.py --renderer-only: bindings regenerated (setBatteryMode, setFrameRateCap, setPresentationUnloaded, setAudioSuppressed)
+- python3 scripts/test.py: Python suites OK; native 622 passed, 0 failed, 11 skipped of 633
+- python3 scripts/test.py --only WebPanelPerformanceSettingsTests --only ControlPanelShellTests after catalog cleanup: 32 passed
+- Core Audio probe (throwaway, unsandboxed): kAudioHardwarePropertyProcessObjectList + IsRunningOutput readable without a permission prompt
+- WKWebView snapshots (throwaway test, deleted): Performance page default/custom/760px, app-rules editor, Displays 'Limited to 24 fps' note rendered correctly
+- Not verified: live desktop behavior (display sleep Stop/reload, app rules, other-app audio mute/pause) on real wallpapers; no Release build
+
+
+## 2026-09-27 — Release build: inspector report link and unified version
+
+- python3 scripts/build.py --swift-only --configuration Release: OK (incremental, after the gate in the previous entry passed).
+- Bundled Contents/Resources/WebUI identical to WebUI/ (diff -r); Info.plist 1.0.0 (17).
+- Delivered build/Build/Products/Release/WallpaperMachine.app; not launched. Visual check on the desktop is left to the user.

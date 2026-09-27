@@ -57,7 +57,7 @@ impl WallpaperOptionsDraft {
                 {
                     current_render.scaling_factor = committed_render.scaling_factor;
                 } else if current_render.scaling_mode == MonitorRender::default().scaling_mode
-                    && current_render.fps == MonitorRender::default().fps
+                    && current_render.frame_rate == MonitorRender::default().frame_rate
                 {
                     current_render.scaling_factor = MonitorRender::default().scaling_factor;
                     committed.monitors.push(current_render.clone());
@@ -292,7 +292,8 @@ impl WallpaperOptionsDraft {
     }
 
     pub fn set_target_fps(&mut self, selector: SerializedSelector, fps: u32, max_fps: u32) {
-        self.ensure_monitor_render(selector).fps = fps.min(max_fps.max(1));
+        self.ensure_monitor_render(selector).frame_rate =
+            crate::config::stored_frame_rate(fps, max_fps);
     }
 
     #[must_use]
@@ -303,16 +304,21 @@ impl WallpaperOptionsDraft {
         max_fps: u32,
     ) -> WallpaperConfig {
         self.set_target_fps(selector.clone(), fps, max_fps);
-        let fps = fps.min(max_fps.max(1));
+        let frame_rate = self
+            .current
+            .monitors
+            .iter()
+            .find(|render| render.selector == selector)
+            .and_then(|render| render.frame_rate);
         self.committed
             .monitors
             .iter_mut()
             .find(|render| render.selector == selector)
-            .map(|render| render.fps = fps)
+            .map(|render| render.frame_rate = frame_rate)
             .unwrap_or_else(|| {
                 self.committed.monitors.push(MonitorRender {
                     selector,
-                    fps,
+                    frame_rate,
                     ..MonitorRender::default()
                 });
             });

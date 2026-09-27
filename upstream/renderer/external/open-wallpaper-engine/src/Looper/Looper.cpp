@@ -15,6 +15,8 @@ using Lock = std::unique_lock<std::mutex>;
 
 void Looper::setName(std::string_view name) { m_name.assign(name); }
 
+void Looper::setLogScope(uint64_t scope) { m_log_scope = scope; }
+
 const std::string_view Looper::name() const { return m_name; }
 
 Looper::Looper() {}
@@ -46,8 +48,10 @@ status_t Looper::start() {
     // using weak_ptr to allow looper deleted at looper->loop() end
     std::weak_ptr<Looper> wlooper = shared_from_this();
     std::string           name { m_name };
+    const uint64_t        log_scope { m_log_scope };
     m_thread                      = std::thread(
-        [](std::weak_ptr<Looper> wlooper, std::string name) {
+        [](std::weak_ptr<Looper> wlooper, std::string name, uint64_t log_scope) {
+            SetWallpaperLogScope(log_scope);
 #if defined(__APPLE__)
             std::string thread_name = "owe-" + name;
             pthread_setname_np(thread_name.substr(0, 63).c_str());
@@ -70,7 +74,8 @@ status_t Looper::start() {
             LOG_INFO("%s looper stopped", name.c_str());
         },
         wlooper,
-        name);
+        name,
+        log_scope);
     return status_t::OK;
 }
 

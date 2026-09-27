@@ -40,16 +40,17 @@ use crate::{
             SetDisplayPresentationSuspended,
             FanOutSystemMediaArtwork, FanOutSystemMediaEvent, GetSystemMediaConsentHandles,
             GetSystemMediaSceneHandles, SetFilter,
-            SetGlobalPlayback,
+            SetFrameRateCap, SetGlobalPlayback,
             SetLaunchAtLogin, SetMediaIntegrationEnabled,
             SetMirrorMuted, SetMirrorScalingFactor,
             SetMirrorScalingMode, SetMirrorTarget, SetMirrorTargetFps, SetMirrorVolume, SetMuted,
-            SetPauseOnBatteryPower, SetPowerSource, SetPresentationSuspended, SetPropertyPath,
+            SetAudioSuppressed, SetBatteryMode, SetPowerSource, SetPresentationSuspended,
+            SetPresentationUnloaded, SetPropertyPath,
             SetRenderScale,
             SetRendererCountersEnabled, SetScalingFactor, SetScalingMode,
             SetSceneOnDemandEnabled, SetSceneOptimizationEnabled, SetSceneRenderer,
             SetSceneVideoPlaneSamplingEnabled, SetSharedVideoDecodeEnabled, SetTargetFps,
-            SetVideoBackend, SetVolume, SetWebAudioSubscribed,
+            SetVerboseLogging, SetVideoBackend, SetVolume, SetWebAudioSubscribed,
             Shutdown,
         },
         state::BridgeActorState,
@@ -638,12 +639,29 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
             .effective_render_scale(self.state.power_source == crate::power::PowerSource::Battery)
     }
 
-    /// The frame-rate ceiling the active power profile imposes, if any.
+    /// The frame-rate ceiling in force: the global cap, the battery cap while
+    /// reduced quality is selected and the machine is on battery, or the
+    /// stricter of the two.
     fn active_target_fps_cap(&self) -> Option<u32> {
         let quality = &self.state.app_config.quality;
-        (quality.battery_profile_enabled
+        let global = quality.frame_rate_cap.map(|cap| cap.max(1));
+        let battery = (self.state.app_config.power.on_battery
+            == crate::config::BatteryModeCfg::ReducedQuality
             && self.state.power_source == crate::power::PowerSource::Battery)
-            .then(|| quality.battery.target_fps.max(1))
+            .then(|| quality.battery.target_fps.max(1));
+        match (global, battery) {
+            (Some(global), Some(battery)) => Some(global.min(battery)),
+            (Some(global), None) => Some(global),
+            (None, Some(battery)) => Some(battery),
+            (None, None) => None,
+        }
+    }
+
+    /// Saved rate, never above the ceiling currently in force.
+    fn live_target_fps(&self, rate: u32) -> u32 {
+        self.active_target_fps_cap()
+            .map_or(rate, |cap| rate.min(cap))
+            .max(1)
     }
 
     fn quality_runtime(&self) -> QualityRuntime {
@@ -662,6 +680,11 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
     async fn apply_quality_profile(&self) -> Result<(), BridgeError> {
         self.apply_effective_render_scale().await?;
         let cap = self.active_target_fps_cap();
+        log::info!(
+            "quality profile in force: frame-rate ceiling {}, render scale {}",
+            cap.map_or_else(|| "none".to_string(), |cap| format!("{cap} fps")),
+            self.effective_render_scale()
+        );
         let displays = self.engine.display_snapshot();
         let rates = self
             .activation_inputs(&displays, self.playback_paused())
@@ -683,18 +706,26 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
     }
 
     async fn apply_power_policy(&mut self) -> Result<(), BridgeError> {
-        // The quality profile and the pause policy are independent opt-ins: a
-        // user who enabled only the quality profile must still have it applied
-        // when the power source changes. With the profile off this touches
-        // nothing, so a power transition cannot restate a rate or a scale on a
-        // user who never asked for the feature.
-        if self.state.app_config.quality.battery_profile_enabled {
+        let mode = self.state.app_config.power.on_battery;
+        // Reduced quality is the only mode whose running scale and rate follow
+        // the power source. Keep running and pause must not restate a rate the
+        // user did not ask to change. A global frame-rate cap is independent
+        // of the power source and is applied when it is set.
+        if mode == crate::config::BatteryModeCfg::ReducedQuality {
             self.apply_quality_profile().await?;
         }
-        if !self.state.app_config.power.pause_on_battery_power {
-            self.state.auto_paused_for_battery = false;
+        if mode != crate::config::BatteryModeCfg::Pause {
             self.state.battery_pause_suppressed = false;
             self.state.pending_battery_pause_after_initial_frame = false;
+            // Leaving pause, or a power sample that arrives after it was left,
+            // has to resume a pause this policy asked for. Clearing the flag
+            // first is what used to leave playback paused.
+            if self.state.auto_paused_for_battery {
+                log::info!("resuming wallpaper playback; pause on battery is no longer in force");
+                self.set_playback(BridgePlaybackState::Playing, PlaybackChangeOrigin::Power)
+                    .await?;
+                self.state.auto_paused_for_battery = false;
+            }
             return Ok(());
         }
 
@@ -855,6 +886,18 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
 
     async fn reconcile_configured(&mut self) -> Result<(), BridgeError> {
         self.load_wallpapers()?;
+        if self.state.presentation_unloaded {
+            // A refresh or a repair must not reopen what unload closed, and
+            // must close anything a raced reconcile opened. Active marks stay.
+            let displays = self.engine.display_snapshot();
+            if displays.iter().any(|entry| entry.handle.is_some()) {
+                let app_config = self.state.app_config.clone();
+                let wallpaper_configs = self.state.wallpaper_configs.clone();
+                let _scenes = self.reconcile_engine(app_config, wallpaper_configs).await?;
+            }
+            self.refresh_mouse_polling_policy();
+            return Ok(());
+        }
         let has_configured_wallpapers = !self.state.configured_ids().is_empty();
         let displays = self.engine.display_snapshot();
         if !has_configured_wallpapers || displays.is_empty() {
@@ -894,6 +937,8 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
             project_models: &self.state.project_models,
             native_video_enabled: self.state.app_config.video_backend == VideoBackendModeCfg::NativePreferred,
             native_video_rejected: &self.state.native_video_rejected,
+            frame_rate_cap: self.state.app_config.quality.frame_rate_cap,
+            audio_suppressed: self.state.audio_suppressed,
         }
     }
 
@@ -953,6 +998,9 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
     /// Empty whenever the backend is off, so the host creates nothing and the
     /// scene engine keeps every wallpaper.
     fn native_video_wallpapers(&self) -> Result<Vec<BridgeNativeVideoWallpaper>, BridgeError> {
+        if self.state.presentation_unloaded {
+            return Ok(Vec::new());
+        }
         let displays = self.engine.display_snapshot();
         self.activation_inputs(&displays, self.playback_paused())
             .build_native_video()?
@@ -991,6 +1039,9 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
     }
 
     fn web_wallpapers(&self) -> Result<Vec<BridgeWebWallpaper>, BridgeError> {
+        if self.state.presentation_unloaded {
+            return Ok(Vec::new());
+        }
         let displays = self.engine.display_snapshot();
         self.activation_inputs(&displays, self.playback_paused())
             .build_web()?
@@ -1129,6 +1180,12 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
         &self,
         displays: &[DisplaySnapshotEntry],
     ) -> Result<Option<Vec<SceneDesc>>, BridgeError> {
+        // Configured scenes are not what should be open while unloaded, and
+        // they are not already applied on the way back in. Returning Some
+        // here is what would skip both the close and the reopen.
+        if self.state.presentation_unloaded {
+            return Ok(None);
+        }
         let scenes = self.activation_inputs(displays, self.playback_paused()).build()?;
         let snapshot = self.engine.display_snapshot();
         let has_direct_runtime = |entry: &&DisplaySnapshotEntry| {
@@ -1265,6 +1322,8 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
         let native_video_rejected_snapshot = self.state.native_video_rejected.clone();
         let quality = self.quality_runtime();
         let paths = self.paths.clone();
+        let presentation_unloaded = self.state.presentation_unloaded;
+        let audio_suppressed = self.state.audio_suppressed;
         tokio::spawn(async move {
             let result = reconcile_with(
                 engine,
@@ -1277,6 +1336,8 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
                 false,
                 native_video_rejected_snapshot,
                 quality,
+                presentation_unloaded,
+                audio_suppressed,
             )
             .await;
             let _ = actor
@@ -1339,6 +1400,8 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
             force_shader_refresh,
             self.state.native_video_rejected.clone(),
             self.quality_runtime(),
+            self.state.presentation_unloaded,
+            self.state.audio_suppressed,
         )
         .await
     }
@@ -1359,6 +1422,8 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
         let native_video_rejected_snapshot = self.state.native_video_rejected.clone();
         let quality = self.quality_runtime();
         let paths = self.paths.clone();
+        let presentation_unloaded = self.state.presentation_unloaded;
+        let audio_suppressed = self.state.audio_suppressed;
         ctx.spawn(async move {
             let scenes = match reconcile_with(
                 engine,
@@ -1371,6 +1436,8 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
                 false,
                 native_video_rejected_snapshot,
                 quality,
+                presentation_unloaded,
+                audio_suppressed,
             )
             .await
             {
@@ -1715,21 +1782,29 @@ async fn reconcile_with<E: EngineFacade>(
     force_shader_refresh: bool,
     native_video_rejected: NativeVideoRejections,
     quality: QualityRuntime,
+    presentation_unloaded: bool,
+    audio_suppressed: bool,
 ) -> Result<Vec<SceneDesc>, BridgeError> {
     let displays = engine.display_snapshot();
-    let scenes = ActivationInputs {
-        app_config: &app_config,
-        wallpapers: &wallpaper_configs,
-        suspended_displays: &suspended_displays,
-        displays: &displays,
-        paused,
-        paths: &paths,
-        force_shader_refresh,
-        project_models: &project_models,
-        native_video_enabled: app_config.video_backend == VideoBackendModeCfg::NativePreferred,
-        native_video_rejected: &native_video_rejected,
-    }
-    .build()?;
+    let scenes = if presentation_unloaded {
+        Vec::new()
+    } else {
+        ActivationInputs {
+            app_config: &app_config,
+            wallpapers: &wallpaper_configs,
+            suspended_displays: &suspended_displays,
+            displays: &displays,
+            paused,
+            paths: &paths,
+            force_shader_refresh,
+            project_models: &project_models,
+            native_video_enabled: app_config.video_backend == VideoBackendModeCfg::NativePreferred,
+            native_video_rejected: &native_video_rejected,
+            frame_rate_cap: app_config.quality.frame_rate_cap,
+            audio_suppressed,
+        }
+        .build()?
+    };
     let results = engine
         .reconcile_scenes(scenes.clone())
         .await
@@ -1759,7 +1834,7 @@ async fn reconcile_with<E: EngineFacade>(
             .await
             .map_err(|error| BridgeError::engine(error.to_string()))?;
         engine
-            .set_audio_muted(handle, scene.audio_muted)
+            .set_audio_muted(handle, scene.audio_muted || audio_suppressed)
             .await
             .map_err(|error| BridgeError::engine(error.to_string()))?;
         engine
@@ -2004,6 +2079,8 @@ impl<E: EngineFacade + Clone> Message<ClearShaderCache> for BridgeActor<E> {
             true,
             self.state.native_video_rejected.clone(),
             self.quality_runtime(),
+            self.state.presentation_unloaded,
+            self.state.audio_suppressed,
         )
         .await;
         self.refresh_mouse_polling_policy();
@@ -2152,6 +2229,9 @@ impl<E: EngineFacade + Clone> Message<InjectDisplayForTest> for BridgeActor<E> {
                 selected_mirror_target: None,
                 scaling_mode: BridgeScalingMode::from(ScalingMode::default()),
                 scaling_factor: 1.0,
+                // No refresh was injected with this synthetic display, so 60/60
+                // is an unknown-refresh placeholder, not a saved rate that
+                // should follow a native refresh this row does not have.
                 target_fps: 60,
                 max_fps: 60,
                 muted: false,
@@ -2576,13 +2656,14 @@ impl<E: EngineFacade + Clone> Message<SetMirrorTargetFps> for BridgeActor<E> {
         let handle = self.mirror_display_handle(&selector, &displays);
         let mut app_config = self.normalized_config(&displays);
         reply_try!(Self::require_mirror_monitor(&app_config, &selector));
-        let target_fps = msg.fps.max(1).min(max_fps);
-        Self::monitor_settings_mut(&mut app_config, selector).target_fps = target_fps;
+        let settings = Self::monitor_settings_mut(&mut app_config, selector);
+        settings.frame_rate = crate::config::stored_frame_rate(msg.fps, max_fps);
+        let resolved = settings.fps_on(max_fps);
         reply_try!(self.commit_app_config(app_config));
         if let Some(handle) = handle {
             reply_try!(
                 self.engine
-                    .set_fps(handle, target_fps)
+                    .set_fps(handle, self.live_target_fps(resolved))
                     .await
                     .map_err(|error| BridgeError::engine(error.to_string()))
             );
@@ -2665,7 +2746,7 @@ impl<E: EngineFacade + Clone> Message<SetMirrorMuted> for BridgeActor<E> {
         if let Some(handle) = handle {
             reply_try!(
                 self.engine
-                    .set_audio_muted(handle, msg.muted)
+                    .set_audio_muted(handle, msg.muted || self.state.audio_suppressed)
                     .await
                     .map_err(|error| BridgeError::engine(error.to_string()))
             );
@@ -2688,24 +2769,140 @@ impl<E: EngineFacade + Clone> Message<SetLaunchAtLogin> for BridgeActor<E> {
     }
 }
 
-impl<E: EngineFacade + Clone> Message<SetPauseOnBatteryPower> for BridgeActor<E> {
-    type Reply = messages::SetPauseOnBatteryPowerReply;
+impl<E: EngineFacade + Clone> Message<SetBatteryMode> for BridgeActor<E> {
+    type Reply = messages::SetBatteryModeReply;
 
     async fn handle(
         &mut self,
-        msg: SetPauseOnBatteryPower,
+        msg: SetBatteryMode,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.state.app_config.power.pause_on_battery_power = msg.enabled;
+        self.state.app_config.power.on_battery = msg.mode;
         if let Some(store) = &self.config_store {
             store.save_app_config(&self.state.app_config)?;
         }
-        if !msg.enabled {
-            self.state.auto_paused_for_battery = false;
-            self.state.battery_pause_suppressed = false;
-            self.state.pending_battery_pause_after_initial_frame = false;
-        }
+        // Leaving reduced quality has to hand the saved scale and rates back
+        // in this step, not on the next power sample.
+        self.apply_quality_profile().await?;
         self.apply_power_policy().await?;
+        self.bump_generation();
+        Ok(self.all_snapshots())
+    }
+}
+
+impl<E: EngineFacade + Clone> Message<SetFrameRateCap> for BridgeActor<E> {
+    type Reply = messages::SetFrameRateCapReply;
+
+    async fn handle(
+        &mut self,
+        msg: SetFrameRateCap,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let before = self.native_video_admission_keys();
+        self.state.app_config.quality.frame_rate_cap = msg.cap.map(|cap| cap.max(1));
+        if let Some(store) = &self.config_store {
+            store.save_app_config(&self.state.app_config)?;
+        }
+        self.apply_quality_profile().await?;
+        if self.native_video_admission_keys() != before {
+            self.prune_stale_native_video_rejections();
+            if !self.state.presentation_unloaded {
+                let app_config = self.state.app_config.clone();
+                let wallpaper_configs = self.state.wallpaper_configs.clone();
+                let scenes = self.reconcile_engine(app_config, wallpaper_configs).await?;
+                self.state.set_active_ids_from_scenes(&scenes);
+            }
+        }
+        self.bump_generation();
+        Ok(self.all_snapshots())
+    }
+}
+
+impl<E: EngineFacade + Clone> Message<SetPresentationUnloaded> for BridgeActor<E> {
+    type Reply = messages::SetPresentationUnloadedReply;
+
+    async fn handle(
+        &mut self,
+        msg: SetPresentationUnloaded,
+        ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        if self.state.presentation_unloaded == msg.unloaded {
+            return Ok(self.all_snapshots());
+        }
+        let previous = self.state.presentation_unloaded;
+        self.state.presentation_unloaded = msg.unloaded;
+        let generation = self.reserve_reconcile();
+        let reconciled = if msg.unloaded {
+            let app_config = self.state.app_config.clone();
+            let wallpaper_configs = self.state.wallpaper_configs.clone();
+            self.reconcile_engine(app_config, wallpaper_configs)
+                .await
+                .map(|_| ())
+        } else {
+            self.reconcile_configured().await
+        };
+        match reconciled {
+            Ok(()) => {
+                self.finish_reconcile(generation, ctx.actor_ref().clone());
+                Ok(self.all_snapshots())
+            }
+            Err(error) => {
+                self.state.presentation_unloaded = previous;
+                self.reconcile_failure(
+                    generation,
+                    duplicate_error(&error),
+                    ctx.actor_ref().clone(),
+                );
+                Err(error)
+            }
+        }
+    }
+}
+
+impl<E: EngineFacade + Clone> Message<SetAudioSuppressed> for BridgeActor<E> {
+    type Reply = messages::SetAudioSuppressedReply;
+
+    async fn handle(
+        &mut self,
+        msg: SetAudioSuppressed,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.state.audio_suppressed = msg.suppressed;
+        let displays = self.engine.display_snapshot();
+        let scenes = self
+            .activation_inputs(&displays, self.playback_paused())
+            .build()?;
+        for scene in &scenes {
+            let Some(handle) = displays
+                .iter()
+                .find(|entry| entry.desc.display_id == scene.display.display_id)
+                .and_then(|entry| entry.handle)
+            else {
+                continue;
+            };
+            self.engine
+                .set_audio_muted(handle, scene.audio_muted || msg.suppressed)
+                .await
+                .map_err(|error| BridgeError::engine(error.to_string()))?;
+        }
+        self.bump_generation();
+        Ok(self.all_snapshots())
+    }
+}
+
+impl<E: EngineFacade + Clone> Message<SetVerboseLogging> for BridgeActor<E> {
+    type Reply = messages::SetVerboseLoggingReply;
+
+    async fn handle(
+        &mut self,
+        msg: SetVerboseLogging,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.state.app_config.diagnostics.verbose_logging = msg.enabled;
+        if let Some(store) = &self.config_store {
+            store.save_app_config(&self.state.app_config)?;
+        }
+        crate::logging::ApplicationLogger::set_verbose(msg.enabled);
         self.bump_generation();
         Ok(self.all_snapshots())
     }
@@ -2918,15 +3115,13 @@ impl<E: EngineFacade + Clone> Message<SetBatteryQualityProfile> for BridgeActor<
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let quality = &mut self.state.app_config.quality;
-        quality.battery_profile_enabled = msg.enabled;
         quality.battery.render_scale = crate::config::clamp_render_scale(msg.render_scale);
         quality.battery.target_fps = msg.target_fps.max(1);
         if let Some(store) = &self.config_store {
             store.save_app_config(&self.state.app_config)?;
         }
-        // Turning the profile off has to hand the renderer back the user's own
-        // settings in the same step, or a machine that is on battery right now
-        // stays degraded until it is unplugged and replugged.
+        // A machine already on reduced quality has to pick the new scale and
+        // rate up now. Leaving that mode is `SetBatteryMode`'s restore.
         self.apply_quality_profile().await?;
         self.bump_generation();
         Ok(self.all_snapshots())
@@ -3721,7 +3916,7 @@ impl<E: EngineFacade + Clone> Message<SetMuted> for BridgeActor<E> {
         self.save_wallpaper(msg.wallpaper_id.clone(), wallpaper_config)?;
         for handle in self.wallpaper_handles(&msg.wallpaper_id, false) {
             self.engine
-                .set_audio_muted(handle, msg.muted)
+                .set_audio_muted(handle, msg.muted || self.state.audio_suppressed)
                 .await
                 .map_err(|error| BridgeError::engine(error.to_string()))?;
         }
@@ -3921,7 +4116,10 @@ impl<E: EngineFacade + Clone> Message<SetTargetFps> for BridgeActor<E> {
             .ok_or_else(|| {
                 BridgeError::invalid_input(format!("unknown display id {source_display_id}"))
             })?;
-        let target_fps = msg.fps.min(max_fps.max(1));
+        let resolved = crate::config::resolve_frame_rate(
+            crate::config::stored_frame_rate(msg.fps, max_fps),
+            max_fps,
+        );
         let wallpaper_config = self
             .state
             .wallpaper_draft_mut(&msg.wallpaper_id)?
@@ -3929,7 +4127,7 @@ impl<E: EngineFacade + Clone> Message<SetTargetFps> for BridgeActor<E> {
         self.save_wallpaper(msg.wallpaper_id.clone(), wallpaper_config)?;
         if let Some(handle) = self.display_handle(&msg.wallpaper_id, &selector) {
             self.engine
-                .set_fps(handle, target_fps)
+                .set_fps(handle, self.live_target_fps(resolved))
                 .await
                 .map_err(|error| BridgeError::engine(error.to_string()))?;
         }
@@ -4061,6 +4259,8 @@ impl<E: EngineFacade + Clone> Message<ApplyWallpaperOptions> for BridgeActor<E> 
                         project_models: &self.state.project_models,
                         native_video_enabled: app_config.video_backend == VideoBackendModeCfg::NativePreferred,
                         native_video_rejected: &self.state.native_video_rejected,
+                        frame_rate_cap: app_config.quality.frame_rate_cap,
+                        audio_suppressed: self.state.audio_suppressed,
                     }
                     .build()
                 })
@@ -4076,6 +4276,8 @@ impl<E: EngineFacade + Clone> Message<ApplyWallpaperOptions> for BridgeActor<E> 
             let native_video_rejected_snapshot = self.state.native_video_rejected.clone();
             let quality = self.quality_runtime();
             let paths = self.paths.clone();
+            let presentation_unloaded = self.state.presentation_unloaded;
+            let audio_suppressed = self.state.audio_suppressed;
             return ctx.spawn(async move {
                 let scenes = match reconcile_with(
                     engine,
@@ -4088,6 +4290,8 @@ impl<E: EngineFacade + Clone> Message<ApplyWallpaperOptions> for BridgeActor<E> 
                     false,
                     native_video_rejected_snapshot,
                     quality,
+                    presentation_unloaded,
+                    audio_suppressed,
                 )
                 .await
                 {

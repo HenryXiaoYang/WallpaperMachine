@@ -52,6 +52,12 @@
     "Choose Image" : {
       "localizations" : {"en" : {"stringUnit" : {"state" : "translated", "value" : "Choose Image"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "选择图片"}}}
     },
+    "Choose App" : {
+      "localizations" : {"en" : {"stringUnit" : {"state" : "translated", "value" : "Choose App"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "选择应用"}}}
+    },
+    "This app has no bundle identifier, so it can’t be used in an app rule." : {
+      "localizations" : {"en" : {"stringUnit" : {"state" : "translated", "value" : "This app has no bundle identifier, so it can’t be used in an app rule."}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "这个应用没有 bundle identifier，不能用于应用规则。"}}}
+    },
     "Preparing import…" : {
       "localizations" : {"en" : {"stringUnit" : {"state" : "translated", "value" : "Preparing import…"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "正在准备导入…"}}}
     },
@@ -1065,6 +1071,12 @@
     "Clear Logs" : {
       "localizations" : {"en" : {"stringUnit" : {"state" : "translated", "value" : "Clear Logs"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "清除日志"}}}
     },
+    "Export Diagnostics" : {
+      "localizations" : {"en" : {"stringUnit" : {"state" : "translated", "value" : "Export Diagnostics"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "导出诊断报告"}}}
+    },
+    "Attach this file to your bug report." : {
+      "localizations" : {"en" : {"stringUnit" : {"state" : "translated", "value" : "Attach this file to your bug report."}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "请将此文件附在问题报告中。"}}}
+    },
     "Clear unused caches?" : {
       "localizations" : {"en" : {"stringUnit" : {"state" : "translated", "value" : "Clear unused caches?"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "要清除未使用的缓存吗？"}}}
     },
@@ -1415,6 +1427,9 @@
     },
     "Unavailable" : {
       "localizations" : {"en" : {"stringUnit" : {"state" : "translated", "value" : "Unavailable"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "不可用"}}}
+    },
+    "That app rule no longer exists." : {
+      "localizations" : {"en" : {"stringUnit" : {"state" : "translated", "value" : "That app rule no longer exists."}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "该应用规则已不存在。"}}}
     }
   },
   "version" : "1.0"

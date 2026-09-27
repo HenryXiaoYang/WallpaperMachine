@@ -447,6 +447,22 @@ fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterInt64: FfiConverterPrimitive {
+    typealias FfiType = Int64
+    typealias SwiftType = Int64
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Int64 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: Int64, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterFloat: FfiConverterPrimitive {
     typealias FfiType = Float
     typealias SwiftType = Float
@@ -596,6 +612,13 @@ public protocol WallpaperBridgeProtocol : AnyObject {
     func applyWallpaperOptions(wallpaperId: String) async throws  -> BridgeWallpaperMutationBundle
     
     /**
+     * Starts the log of a wallpaper load the host performs itself (web
+     * pages, native video): allocates its `load#N` and writes the header
+     * naming the project at `project_path` and the host's `detail`.
+     */
+    func beginHostLoadLog(kind: String, projectPath: String, detail: String)  -> UInt64
+    
+    /**
      * # Errors
      *
      * Returns an error when display refresh, library refresh, config load, or
@@ -655,11 +678,16 @@ public protocol WallpaperBridgeProtocol : AnyObject {
     func ejectWallpaperFromDisplay(displayId: String, wallpaperId: String) async throws  -> BridgeDisplayMutationBundle
     
     /**
+     * Writes one line from the host. `load` attributes it to a wallpaper load
+     * from [`Self::begin_host_load_log`]; `unix_millis` is when the host
+     * produced it, so lines it buffered before the bridge existed keep their
+     * time.
+     *
      * # Errors
      *
      * Returns an error when GUI log emission cannot be accepted.
      */
-    func emitGuiLog(level: BridgeLogLevel, file: String, line: UInt32, message: String) throws 
+    func emitGuiLog(level: BridgeLogLevel, file: String, line: UInt32, message: String, load: UInt64?, unixMillis: Int64?) throws 
     
     /**
      * # Errors
@@ -834,19 +862,39 @@ public protocol WallpaperBridgeProtocol : AnyObject {
     func setAudioResponseEnabled(wallpaperId: String, enabled: Bool) async throws  -> BridgeWallpaperMutationBundle
     
     /**
-     * Sets the quality profile used while the machine is on battery power.
+     * Mutes or restores every open scene on top of its saved mute. Not
+     * persisted. A user unmute while this is set stays muted until it clears.
      *
-     * Disabling it restores the user's saved render scale and per-display
-     * target rates immediately, rather than waiting for the next power
-     * transition. It never changes playback, so a pause the user asked for
-     * survives.
+     * # Errors
+     *
+     * Returns an error when a running scene rejects the mute.
+     */
+    func setAudioSuppressed(suppressed: Bool) async throws  -> BridgeSnapshotBundle
+    
+    /**
+     * Chooses what wallpapers do on battery: keep running, reduced quality,
+     * or pause. Leaving pause resumes a pause this policy asked for. Leaving
+     * reduced quality restores the saved scale and rates immediately.
+     *
+     * # Errors
+     *
+     * Returns an error when the setting cannot be persisted or an immediate
+     * power-policy playback transition fails.
+     */
+    func setBatteryMode(mode: BridgeBatteryMode) async throws  -> BridgeSnapshotBundle
+    
+    /**
+     * Sets the scale and frame rate used while battery mode is reduced quality.
+     *
+     * Does not itself select that mode. A machine already on reduced quality
+     * picks the new values up immediately.
      *
      * # Errors
      *
      * Returns an error when the profile cannot be saved or a running scene
      * rejects the resulting scale or rate.
      */
-    func setBatteryQualityProfile(enabled: Bool, renderScale: Float, targetFps: UInt32) async throws  -> BridgeSnapshotBundle
+    func setBatteryQualityProfile(renderScale: Float, targetFps: UInt32) async throws  -> BridgeSnapshotBundle
     
     /**
      * Turns content pacing on or off for the renderer process.
@@ -902,6 +950,18 @@ public protocol WallpaperBridgeProtocol : AnyObject {
      * Returns an error when filter state cannot be persisted.
      */
     func setFilter(kind: BridgeWallpaperKind, enabled: Bool) async throws  -> BridgeSnapshotBundle
+    
+    /**
+     * Sets the global frame-rate ceiling. `None` means no limit. A number is
+     * stored at least 1. Open scenes take it live; saved per-display rates
+     * are not rewritten.
+     *
+     * # Errors
+     *
+     * Returns an error when the cap cannot be saved or a running scene
+     * rejects the resulting rate.
+     */
+    func setFrameRateCap(cap: UInt32?) async throws  -> BridgeSnapshotBundle
     
     /**
      * # Errors
@@ -990,14 +1050,6 @@ public protocol WallpaperBridgeProtocol : AnyObject {
     func setNativeVideoBackendEnabled(enabled: Bool) async throws  -> BridgeSnapshotBundle
     
     /**
-     * # Errors
-     *
-     * Returns an error when the setting cannot be persisted or an immediate
-     * power-policy playback transition fails.
-     */
-    func setPauseOnBatteryPower(enabled: Bool) async throws  -> BridgeSnapshotBundle
-    
-    /**
      * Suspends or resumes rendering and system-audio capture for every
      * wallpaper without changing the user-visible playback state. Used for
      * conditions where no wallpaper pixel can reach a display: screens asleep,
@@ -1009,6 +1061,18 @@ public protocol WallpaperBridgeProtocol : AnyObject {
      * to apply the pause.
      */
     func setPresentationSuspended(suspended: Bool) async throws 
+    
+    /**
+     * Closes every scene runtime so the host can free wallpaper memory,
+     * without changing assignments. Clearing it opens the configured scenes
+     * again, paused if playback is paused.
+     *
+     * # Errors
+     *
+     * Returns an error when the scene list cannot be reconciled. The previous
+     * unload state is restored and a repair is scheduled.
+     */
+    func setPresentationUnloaded(unloaded: Bool) async throws  -> BridgeSnapshotBundle
     
     /**
      * Stores the path the host staged for a file or directory property, or
@@ -1155,6 +1219,15 @@ public protocol WallpaperBridgeProtocol : AnyObject {
      * persistence fails.
      */
     func setTargetFps(wallpaperId: String, displayId: String, fps: UInt32) async throws  -> BridgeWallpaperMutationBundle
+    
+    /**
+     * Records debug-level lines too, from now on and after relaunch.
+     *
+     * # Errors
+     *
+     * Returns an error when the setting cannot be persisted.
+     */
+    func setVerboseLogging(enabled: Bool) async throws  -> BridgeSnapshotBundle
     
     /**
      * Chooses which renderer plays plain local videos.
@@ -1441,6 +1514,21 @@ open func applyWallpaperOptions(wallpaperId: String)async throws  -> BridgeWallp
 }
     
     /**
+     * Starts the log of a wallpaper load the host performs itself (web
+     * pages, native video): allocates its `load#N` and writes the header
+     * naming the project at `project_path` and the host's `detail`.
+     */
+open func beginHostLoadLog(kind: String, projectPath: String, detail: String) -> UInt64 {
+    return try!  FfiConverterUInt64.lift(try! rustCall() {
+    uniffi_wallpaper_bridge_fn_method_wallpaperbridge_begin_host_load_log(self.uniffiClonePointer(),
+        FfiConverterString.lower(kind),
+        FfiConverterString.lower(projectPath),
+        FfiConverterString.lower(detail),$0
+    )
+})
+}
+    
+    /**
      * # Errors
      *
      * Returns an error when display refresh, library refresh, config load, or
@@ -1600,16 +1688,23 @@ open func ejectWallpaperFromDisplay(displayId: String, wallpaperId: String)async
 }
     
     /**
+     * Writes one line from the host. `load` attributes it to a wallpaper load
+     * from [`Self::begin_host_load_log`]; `unix_millis` is when the host
+     * produced it, so lines it buffered before the bridge existed keep their
+     * time.
+     *
      * # Errors
      *
      * Returns an error when GUI log emission cannot be accepted.
      */
-open func emitGuiLog(level: BridgeLogLevel, file: String, line: UInt32, message: String)throws  {try rustCallWithError(FfiConverterTypeBridgeError.lift) {
+open func emitGuiLog(level: BridgeLogLevel, file: String, line: UInt32, message: String, load: UInt64?, unixMillis: Int64?)throws  {try rustCallWithError(FfiConverterTypeBridgeError.lift) {
     uniffi_wallpaper_bridge_fn_method_wallpaperbridge_emit_gui_log(self.uniffiClonePointer(),
         FfiConverterTypeBridgeLogLevel.lower(level),
         FfiConverterString.lower(file),
         FfiConverterUInt32.lower(line),
-        FfiConverterString.lower(message),$0
+        FfiConverterString.lower(message),
+        FfiConverterOptionUInt64.lower(load),
+        FfiConverterOptionInt64.lower(unixMillis),$0
     )
 }
 }
@@ -2047,25 +2142,75 @@ open func setAudioResponseEnabled(wallpaperId: String, enabled: Bool)async throw
 }
     
     /**
-     * Sets the quality profile used while the machine is on battery power.
+     * Mutes or restores every open scene on top of its saved mute. Not
+     * persisted. A user unmute while this is set stays muted until it clears.
      *
-     * Disabling it restores the user's saved render scale and per-display
-     * target rates immediately, rather than waiting for the next power
-     * transition. It never changes playback, so a pause the user asked for
-     * survives.
+     * # Errors
+     *
+     * Returns an error when a running scene rejects the mute.
+     */
+open func setAudioSuppressed(suppressed: Bool)async throws  -> BridgeSnapshotBundle {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_wallpaper_bridge_fn_method_wallpaperbridge_set_audio_suppressed(
+                    self.uniffiClonePointer(),
+                    FfiConverterBool.lower(suppressed)
+                )
+            },
+            pollFunc: ffi_wallpaper_bridge_rust_future_poll_rust_buffer,
+            completeFunc: ffi_wallpaper_bridge_rust_future_complete_rust_buffer,
+            freeFunc: ffi_wallpaper_bridge_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeBridgeSnapshotBundle.lift,
+            errorHandler: FfiConverterTypeBridgeError.lift
+        )
+}
+    
+    /**
+     * Chooses what wallpapers do on battery: keep running, reduced quality,
+     * or pause. Leaving pause resumes a pause this policy asked for. Leaving
+     * reduced quality restores the saved scale and rates immediately.
+     *
+     * # Errors
+     *
+     * Returns an error when the setting cannot be persisted or an immediate
+     * power-policy playback transition fails.
+     */
+open func setBatteryMode(mode: BridgeBatteryMode)async throws  -> BridgeSnapshotBundle {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_wallpaper_bridge_fn_method_wallpaperbridge_set_battery_mode(
+                    self.uniffiClonePointer(),
+                    FfiConverterTypeBridgeBatteryMode.lower(mode)
+                )
+            },
+            pollFunc: ffi_wallpaper_bridge_rust_future_poll_rust_buffer,
+            completeFunc: ffi_wallpaper_bridge_rust_future_complete_rust_buffer,
+            freeFunc: ffi_wallpaper_bridge_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeBridgeSnapshotBundle.lift,
+            errorHandler: FfiConverterTypeBridgeError.lift
+        )
+}
+    
+    /**
+     * Sets the scale and frame rate used while battery mode is reduced quality.
+     *
+     * Does not itself select that mode. A machine already on reduced quality
+     * picks the new values up immediately.
      *
      * # Errors
      *
      * Returns an error when the profile cannot be saved or a running scene
      * rejects the resulting scale or rate.
      */
-open func setBatteryQualityProfile(enabled: Bool, renderScale: Float, targetFps: UInt32)async throws  -> BridgeSnapshotBundle {
+open func setBatteryQualityProfile(renderScale: Float, targetFps: UInt32)async throws  -> BridgeSnapshotBundle {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_wallpaper_bridge_fn_method_wallpaperbridge_set_battery_quality_profile(
                     self.uniffiClonePointer(),
-                    FfiConverterBool.lower(enabled),FfiConverterFloat.lower(renderScale),FfiConverterUInt32.lower(targetFps)
+                    FfiConverterFloat.lower(renderScale),FfiConverterUInt32.lower(targetFps)
                 )
             },
             pollFunc: ffi_wallpaper_bridge_rust_future_poll_rust_buffer,
@@ -2211,6 +2356,33 @@ open func setFilter(kind: BridgeWallpaperKind, enabled: Bool)async throws  -> Br
                 uniffi_wallpaper_bridge_fn_method_wallpaperbridge_set_filter(
                     self.uniffiClonePointer(),
                     FfiConverterTypeBridgeWallpaperKind.lower(kind),FfiConverterBool.lower(enabled)
+                )
+            },
+            pollFunc: ffi_wallpaper_bridge_rust_future_poll_rust_buffer,
+            completeFunc: ffi_wallpaper_bridge_rust_future_complete_rust_buffer,
+            freeFunc: ffi_wallpaper_bridge_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeBridgeSnapshotBundle.lift,
+            errorHandler: FfiConverterTypeBridgeError.lift
+        )
+}
+    
+    /**
+     * Sets the global frame-rate ceiling. `None` means no limit. A number is
+     * stored at least 1. Open scenes take it live; saved per-display rates
+     * are not rewritten.
+     *
+     * # Errors
+     *
+     * Returns an error when the cap cannot be saved or a running scene
+     * rejects the resulting rate.
+     */
+open func setFrameRateCap(cap: UInt32?)async throws  -> BridgeSnapshotBundle {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_wallpaper_bridge_fn_method_wallpaperbridge_set_frame_rate_cap(
+                    self.uniffiClonePointer(),
+                    FfiConverterOptionUInt32.lower(cap)
                 )
             },
             pollFunc: ffi_wallpaper_bridge_rust_future_poll_rust_buffer,
@@ -2458,29 +2630,6 @@ open func setNativeVideoBackendEnabled(enabled: Bool)async throws  -> BridgeSnap
 }
     
     /**
-     * # Errors
-     *
-     * Returns an error when the setting cannot be persisted or an immediate
-     * power-policy playback transition fails.
-     */
-open func setPauseOnBatteryPower(enabled: Bool)async throws  -> BridgeSnapshotBundle {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_wallpaper_bridge_fn_method_wallpaperbridge_set_pause_on_battery_power(
-                    self.uniffiClonePointer(),
-                    FfiConverterBool.lower(enabled)
-                )
-            },
-            pollFunc: ffi_wallpaper_bridge_rust_future_poll_rust_buffer,
-            completeFunc: ffi_wallpaper_bridge_rust_future_complete_rust_buffer,
-            freeFunc: ffi_wallpaper_bridge_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterTypeBridgeSnapshotBundle.lift,
-            errorHandler: FfiConverterTypeBridgeError.lift
-        )
-}
-    
-    /**
      * Suspends or resumes rendering and system-audio capture for every
      * wallpaper without changing the user-visible playback state. Used for
      * conditions where no wallpaper pixel can reach a display: screens asleep,
@@ -2504,6 +2653,33 @@ open func setPresentationSuspended(suspended: Bool)async throws  {
             completeFunc: ffi_wallpaper_bridge_rust_future_complete_void,
             freeFunc: ffi_wallpaper_bridge_rust_future_free_void,
             liftFunc: { $0 },
+            errorHandler: FfiConverterTypeBridgeError.lift
+        )
+}
+    
+    /**
+     * Closes every scene runtime so the host can free wallpaper memory,
+     * without changing assignments. Clearing it opens the configured scenes
+     * again, paused if playback is paused.
+     *
+     * # Errors
+     *
+     * Returns an error when the scene list cannot be reconciled. The previous
+     * unload state is restored and a repair is scheduled.
+     */
+open func setPresentationUnloaded(unloaded: Bool)async throws  -> BridgeSnapshotBundle {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_wallpaper_bridge_fn_method_wallpaperbridge_set_presentation_unloaded(
+                    self.uniffiClonePointer(),
+                    FfiConverterBool.lower(unloaded)
+                )
+            },
+            pollFunc: ffi_wallpaper_bridge_rust_future_poll_rust_buffer,
+            completeFunc: ffi_wallpaper_bridge_rust_future_complete_rust_buffer,
+            freeFunc: ffi_wallpaper_bridge_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeBridgeSnapshotBundle.lift,
             errorHandler: FfiConverterTypeBridgeError.lift
         )
 }
@@ -2800,6 +2976,30 @@ open func setTargetFps(wallpaperId: String, displayId: String, fps: UInt32)async
             completeFunc: ffi_wallpaper_bridge_rust_future_complete_rust_buffer,
             freeFunc: ffi_wallpaper_bridge_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypeBridgeWallpaperMutationBundle.lift,
+            errorHandler: FfiConverterTypeBridgeError.lift
+        )
+}
+    
+    /**
+     * Records debug-level lines too, from now on and after relaunch.
+     *
+     * # Errors
+     *
+     * Returns an error when the setting cannot be persisted.
+     */
+open func setVerboseLogging(enabled: Bool)async throws  -> BridgeSnapshotBundle {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_wallpaper_bridge_fn_method_wallpaperbridge_set_verbose_logging(
+                    self.uniffiClonePointer(),
+                    FfiConverterBool.lower(enabled)
+                )
+            },
+            pollFunc: ffi_wallpaper_bridge_rust_future_poll_rust_buffer,
+            completeFunc: ffi_wallpaper_bridge_rust_future_complete_rust_buffer,
+            freeFunc: ffi_wallpaper_bridge_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeBridgeSnapshotBundle.lift,
             errorHandler: FfiConverterTypeBridgeError.lift
         )
 }
@@ -5681,7 +5881,11 @@ public struct BridgeSettingsSnapshot {
     public var displays: [BridgeDisplaySettingsRow]
     public var launchAtLoginAvailable: Bool
     public var launchAtLoginEnabled: Bool
-    public var pauseOnBatteryPower: Bool
+    public var batteryMode: BridgeBatteryMode
+    /**
+     * Debug-level lines are recorded too; see `set_verbose_logging`.
+     */
+    public var verboseLogging: Bool
     public var gitSha: String
     public var bridgeVersion: String
     public var coreVersion: String
@@ -5752,7 +5956,11 @@ public struct BridgeSettingsSnapshot {
      */
     public var renderScale: Float
     public var preferredRenderScale: Float
-    public var batteryProfileEnabled: Bool
+    /**
+     * Global frame-rate ceiling. `None` means no limit. Saved per-display
+     * rates are not rewritten to this.
+     */
+    public var frameRateCap: UInt32?
     public var batteryRenderScale: Float
     public var batteryTargetFps: UInt32
     public var onBatteryPower: Bool
@@ -5764,7 +5972,10 @@ public struct BridgeSettingsSnapshot {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(displays: [BridgeDisplaySettingsRow], launchAtLoginAvailable: Bool, launchAtLoginEnabled: Bool, pauseOnBatteryPower: Bool, gitSha: String, bridgeVersion: String, coreVersion: String, shaderPipelineVersion: String, storage: BridgeStorageStatus, 
+    public init(displays: [BridgeDisplaySettingsRow], launchAtLoginAvailable: Bool, launchAtLoginEnabled: Bool, batteryMode: BridgeBatteryMode, 
+        /**
+         * Debug-level lines are recorded too; see `set_verbose_logging`.
+         */verboseLogging: Bool, gitSha: String, bridgeVersion: String, coreVersion: String, shaderPipelineVersion: String, storage: BridgeStorageStatus, 
         /**
          * `"compatibility"` or `"native_preferred"`: the user's choice, which for
          * a given display may or may not be what `video_backends` reports.
@@ -5814,7 +6025,11 @@ public struct BridgeSettingsSnapshot {
         /**
          * The internal rasterization scale in force right now, after any power
          * profile. `preferred_render_scale` is what the user saved.
-         */renderScale: Float, preferredRenderScale: Float, batteryProfileEnabled: Bool, batteryRenderScale: Float, batteryTargetFps: UInt32, onBatteryPower: Bool, 
+         */renderScale: Float, preferredRenderScale: Float, 
+        /**
+         * Global frame-rate ceiling. `None` means no limit. Saved per-display
+         * rates are not rewritten to this.
+         */frameRateCap: UInt32?, batteryRenderScale: Float, batteryTargetFps: UInt32, onBatteryPower: Bool, 
         /**
          * False when nothing running can honour an internal render scale, so the
          * control describes a preference that changes nothing on screen today.
@@ -5822,7 +6037,8 @@ public struct BridgeSettingsSnapshot {
         self.displays = displays
         self.launchAtLoginAvailable = launchAtLoginAvailable
         self.launchAtLoginEnabled = launchAtLoginEnabled
-        self.pauseOnBatteryPower = pauseOnBatteryPower
+        self.batteryMode = batteryMode
+        self.verboseLogging = verboseLogging
         self.gitSha = gitSha
         self.bridgeVersion = bridgeVersion
         self.coreVersion = coreVersion
@@ -5843,7 +6059,7 @@ public struct BridgeSettingsSnapshot {
         self.userAssetsPath = userAssetsPath
         self.renderScale = renderScale
         self.preferredRenderScale = preferredRenderScale
-        self.batteryProfileEnabled = batteryProfileEnabled
+        self.frameRateCap = frameRateCap
         self.batteryRenderScale = batteryRenderScale
         self.batteryTargetFps = batteryTargetFps
         self.onBatteryPower = onBatteryPower
@@ -5864,7 +6080,10 @@ extension BridgeSettingsSnapshot: Equatable, Hashable {
         if lhs.launchAtLoginEnabled != rhs.launchAtLoginEnabled {
             return false
         }
-        if lhs.pauseOnBatteryPower != rhs.pauseOnBatteryPower {
+        if lhs.batteryMode != rhs.batteryMode {
+            return false
+        }
+        if lhs.verboseLogging != rhs.verboseLogging {
             return false
         }
         if lhs.gitSha != rhs.gitSha {
@@ -5927,7 +6146,7 @@ extension BridgeSettingsSnapshot: Equatable, Hashable {
         if lhs.preferredRenderScale != rhs.preferredRenderScale {
             return false
         }
-        if lhs.batteryProfileEnabled != rhs.batteryProfileEnabled {
+        if lhs.frameRateCap != rhs.frameRateCap {
             return false
         }
         if lhs.batteryRenderScale != rhs.batteryRenderScale {
@@ -5949,7 +6168,8 @@ extension BridgeSettingsSnapshot: Equatable, Hashable {
         hasher.combine(displays)
         hasher.combine(launchAtLoginAvailable)
         hasher.combine(launchAtLoginEnabled)
-        hasher.combine(pauseOnBatteryPower)
+        hasher.combine(batteryMode)
+        hasher.combine(verboseLogging)
         hasher.combine(gitSha)
         hasher.combine(bridgeVersion)
         hasher.combine(coreVersion)
@@ -5970,7 +6190,7 @@ extension BridgeSettingsSnapshot: Equatable, Hashable {
         hasher.combine(userAssetsPath)
         hasher.combine(renderScale)
         hasher.combine(preferredRenderScale)
-        hasher.combine(batteryProfileEnabled)
+        hasher.combine(frameRateCap)
         hasher.combine(batteryRenderScale)
         hasher.combine(batteryTargetFps)
         hasher.combine(onBatteryPower)
@@ -5989,7 +6209,8 @@ public struct FfiConverterTypeBridgeSettingsSnapshot: FfiConverterRustBuffer {
                 displays: FfiConverterSequenceTypeBridgeDisplaySettingsRow.read(from: &buf), 
                 launchAtLoginAvailable: FfiConverterBool.read(from: &buf), 
                 launchAtLoginEnabled: FfiConverterBool.read(from: &buf), 
-                pauseOnBatteryPower: FfiConverterBool.read(from: &buf), 
+                batteryMode: FfiConverterTypeBridgeBatteryMode.read(from: &buf), 
+                verboseLogging: FfiConverterBool.read(from: &buf), 
                 gitSha: FfiConverterString.read(from: &buf), 
                 bridgeVersion: FfiConverterString.read(from: &buf), 
                 coreVersion: FfiConverterString.read(from: &buf), 
@@ -6010,7 +6231,7 @@ public struct FfiConverterTypeBridgeSettingsSnapshot: FfiConverterRustBuffer {
                 userAssetsPath: FfiConverterString.read(from: &buf), 
                 renderScale: FfiConverterFloat.read(from: &buf), 
                 preferredRenderScale: FfiConverterFloat.read(from: &buf), 
-                batteryProfileEnabled: FfiConverterBool.read(from: &buf), 
+                frameRateCap: FfiConverterOptionUInt32.read(from: &buf), 
                 batteryRenderScale: FfiConverterFloat.read(from: &buf), 
                 batteryTargetFps: FfiConverterUInt32.read(from: &buf), 
                 onBatteryPower: FfiConverterBool.read(from: &buf), 
@@ -6022,7 +6243,8 @@ public struct FfiConverterTypeBridgeSettingsSnapshot: FfiConverterRustBuffer {
         FfiConverterSequenceTypeBridgeDisplaySettingsRow.write(value.displays, into: &buf)
         FfiConverterBool.write(value.launchAtLoginAvailable, into: &buf)
         FfiConverterBool.write(value.launchAtLoginEnabled, into: &buf)
-        FfiConverterBool.write(value.pauseOnBatteryPower, into: &buf)
+        FfiConverterTypeBridgeBatteryMode.write(value.batteryMode, into: &buf)
+        FfiConverterBool.write(value.verboseLogging, into: &buf)
         FfiConverterString.write(value.gitSha, into: &buf)
         FfiConverterString.write(value.bridgeVersion, into: &buf)
         FfiConverterString.write(value.coreVersion, into: &buf)
@@ -6043,7 +6265,7 @@ public struct FfiConverterTypeBridgeSettingsSnapshot: FfiConverterRustBuffer {
         FfiConverterString.write(value.userAssetsPath, into: &buf)
         FfiConverterFloat.write(value.renderScale, into: &buf)
         FfiConverterFloat.write(value.preferredRenderScale, into: &buf)
-        FfiConverterBool.write(value.batteryProfileEnabled, into: &buf)
+        FfiConverterOptionUInt32.write(value.frameRateCap, into: &buf)
         FfiConverterFloat.write(value.batteryRenderScale, into: &buf)
         FfiConverterUInt32.write(value.batteryTargetFps, into: &buf)
         FfiConverterBool.write(value.onBatteryPower, into: &buf)
@@ -7006,6 +7228,80 @@ public func FfiConverterTypeBridgeWebWallpaper_lower(_ value: BridgeWebWallpaper
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
+ * What wallpapers do while the machine is on battery.
+ */
+
+public enum BridgeBatteryMode {
+    
+    case keepRunning
+    case reducedQuality
+    case pause
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeBridgeBatteryMode: FfiConverterRustBuffer {
+    typealias SwiftType = BridgeBatteryMode
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> BridgeBatteryMode {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .keepRunning
+        
+        case 2: return .reducedQuality
+        
+        case 3: return .pause
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: BridgeBatteryMode, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .keepRunning:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .reducedQuality:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .pause:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeBridgeBatteryMode_lift(_ buf: RustBuffer) throws -> BridgeBatteryMode {
+    return try FfiConverterTypeBridgeBatteryMode.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeBridgeBatteryMode_lower(_ value: BridgeBatteryMode) -> RustBuffer {
+    return FfiConverterTypeBridgeBatteryMode.lower(value)
+}
+
+
+
+extension BridgeBatteryMode: Equatable, Hashable {}
+
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
  * How a directory property hands its contents to the page.
  */
 
@@ -7908,6 +8204,78 @@ extension BridgeWallpaperKind: Equatable, Hashable {}
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionUInt32: FfiConverterRustBuffer {
+    typealias SwiftType = UInt32?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt32.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt32.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
+    typealias SwiftType = UInt64?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt64.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt64.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionInt64: FfiConverterRustBuffer {
+    typealias SwiftType = Int64?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterInt64.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterInt64.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionBool: FfiConverterRustBuffer {
     typealias SwiftType = Bool?
 
@@ -8546,6 +8914,9 @@ private var initializationResult: InitializationResult = {
     if (uniffi_wallpaper_bridge_checksum_method_wallpaperbridge_apply_wallpaper_options() != 10903) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_wallpaper_bridge_checksum_method_wallpaperbridge_begin_host_load_log() != 7518) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_wallpaper_bridge_checksum_method_wallpaperbridge_bootstrap() != 5781) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -8570,7 +8941,7 @@ private var initializationResult: InitializationResult = {
     if (uniffi_wallpaper_bridge_checksum_method_wallpaperbridge_eject_wallpaper_from_display() != 4644) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_wallpaper_bridge_checksum_method_wallpaperbridge_emit_gui_log() != 771) {
+    if (uniffi_wallpaper_bridge_checksum_method_wallpaperbridge_emit_gui_log() != 47926) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallpaper_bridge_checksum_method_wallpaperbridge_library_snapshot() != 36547) {
@@ -8627,7 +8998,13 @@ private var initializationResult: InitializationResult = {
     if (uniffi_wallpaper_bridge_checksum_method_wallpaperbridge_set_audio_response_enabled() != 32236) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_wallpaper_bridge_checksum_method_wallpaperbridge_set_battery_quality_profile() != 37220) {
+    if (uniffi_wallpaper_bridge_checksum_method_wallpaperbridge_set_audio_suppressed() != 35975) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_wallpaper_bridge_checksum_method_wallpaperbridge_set_battery_mode() != 27323) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_wallpaper_bridge_checksum_method_wallpaperbridge_set_battery_quality_profile() != 23514) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallpaper_bridge_checksum_method_wallpaperbridge_set_content_pacing_enabled() != 63477) {
@@ -8646,6 +9023,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallpaper_bridge_checksum_method_wallpaperbridge_set_filter() != 4762) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_wallpaper_bridge_checksum_method_wallpaperbridge_set_frame_rate_cap() != 42906) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallpaper_bridge_checksum_method_wallpaperbridge_set_launch_at_login() != 35969) {
@@ -8678,10 +9058,10 @@ private var initializationResult: InitializationResult = {
     if (uniffi_wallpaper_bridge_checksum_method_wallpaperbridge_set_native_video_backend_enabled() != 10196) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_wallpaper_bridge_checksum_method_wallpaperbridge_set_pause_on_battery_power() != 21085) {
+    if (uniffi_wallpaper_bridge_checksum_method_wallpaperbridge_set_presentation_suspended() != 9550) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_wallpaper_bridge_checksum_method_wallpaperbridge_set_presentation_suspended() != 9550) {
+    if (uniffi_wallpaper_bridge_checksum_method_wallpaperbridge_set_presentation_unloaded() != 5102) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallpaper_bridge_checksum_method_wallpaperbridge_set_property_path() != 4178) {
@@ -8712,6 +9092,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallpaper_bridge_checksum_method_wallpaperbridge_set_target_fps() != 37128) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_wallpaper_bridge_checksum_method_wallpaperbridge_set_verbose_logging() != 22895) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wallpaper_bridge_checksum_method_wallpaperbridge_set_video_backend() != 4355) {

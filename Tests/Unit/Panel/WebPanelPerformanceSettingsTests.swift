@@ -46,18 +46,105 @@ final class WebPanelPerformanceSettingsTests: XCTestCase {
     XCTAssertEqual(context.bridge.videoBackends, ["native_preferred"])
   }
 
-  func testBatteryFrameRateIsClampedAndTheUnchangedProfileFieldsAreKept() async throws {
+  func testBatteryFrameRateIsClampedAndTheUnchangedScaleIsKept() async throws {
     let context = try Context()
     defer { context.tearDown() }
-    context.store.settingsSnapshot.batteryProfileEnabled = true
     context.store.settingsSnapshot.batteryRenderScale = 0.5
+    context.store.settingsSnapshot.batteryTargetFps = 30
 
     try await context.controller.perform("setting", body: ["key": "batteryTargetFps", "value": 1000])
 
     let profile = try XCTUnwrap(context.bridge.batteryProfiles.first)
     XCTAssertEqual(profile.targetFps, 240, "Frame rate must be clamped to 1...240")
-    XCTAssertTrue(profile.enabled, "Changing one field must not turn the profile off")
     XCTAssertEqual(profile.renderScale, 0.5, "Changing one field must not reset the other")
+  }
+
+  func testBatteryModeRoundTripsAndAnUnknownValueIsRefused() async throws {
+    let context = try Context()
+    defer { context.tearDown() }
+
+    do {
+      try await context.controller.perform("setting", body: ["key": "batteryMode", "value": "sometimes"])
+      XCTFail("An unknown battery mode must be refused")
+    } catch {}
+    XCTAssertTrue(context.bridge.batteryModes.isEmpty)
+
+    try await context.controller.perform("setting", body: ["key": "batteryMode", "value": "pause"])
+    XCTAssertEqual(context.bridge.batteryModes, [.pause])
+  }
+
+  func testFrameRateCapClampsANumberAndTreatsNullAsNoLimit() async throws {
+    let context = try Context()
+    defer { context.tearDown() }
+
+    try await context.controller.perform("setting", body: ["key": "frameRateCap", "value": 0])
+    try await context.controller.perform("setting", body: ["key": "frameRateCap", "value": 300])
+    try await context.controller.perform("setting", body: ["key": "frameRateCap", "value": NSNull()])
+
+    XCTAssertEqual(context.bridge.frameRateCaps.count, 3)
+    XCTAssertEqual(context.bridge.frameRateCaps[0], 1)
+    XCTAssertEqual(context.bridge.frameRateCaps[1], 240)
+    XCTAssertNil(context.bridge.frameRateCaps[2])
+  }
+
+  func testQualityPresetAppliesRenderScaleAndFrameRateCapTogether() async throws {
+    let context = try Context()
+    defer { context.tearDown() }
+
+    try await context.controller.perform("setting", body: ["key": "qualityPreset", "value": "low"])
+    XCTAssertEqual(context.bridge.renderScales, [0.5])
+    XCTAssertEqual(context.bridge.frameRateCaps, [30])
+
+    try await context.controller.perform("setting", body: ["key": "qualityPreset", "value": "high"])
+    XCTAssertEqual(context.bridge.renderScales, [0.5, 1])
+    XCTAssertEqual(context.bridge.frameRateCaps.count, 2)
+    XCTAssertNil(context.bridge.frameRateCaps[1], "High is the default: no frame-rate limit")
+
+    do {
+      try await context.controller.perform("setting", body: ["key": "qualityPreset", "value": "ultra"])
+      XCTFail("An unknown preset must be refused")
+    } catch {}
+    XCTAssertEqual(context.bridge.renderScales.count, 2, "A refused preset must not apply a scale")
+  }
+
+  func testAppRuleAddUpdateAndRemoveRoundTripAndAnUnknownIdIsRefused() async throws {
+    let context = try Context()
+    defer { context.tearDown() }
+    let app = context.root.appendingPathComponent("Sample.app")
+    try FileManager.default.createDirectory(at: app, withIntermediateDirectories: true)
+    try """
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+    <plist version="1.0"><dict>
+    <key>CFBundleIdentifier</key><string>com.example.sample</string>
+    <key>CFBundleName</key><string>Sample</string>
+    </dict></plist>
+    """.write(to: app.appendingPathComponent("Info.plist"), atomically: true, encoding: .utf8)
+    context.controller.chooseApplication = { app }
+
+    try await context.controller.perform("appRuleAdd", body: [:])
+    let added = try XCTUnwrap(context.playback.appRules.first)
+    XCTAssertEqual(added.bundleIdentifier, "com.example.sample")
+    XCTAssertFalse(added.name.isEmpty)
+    XCTAssertEqual(added.condition, .running)
+    XCTAssertEqual(added.action, .pause)
+
+    try await context.controller.perform(
+      "appRuleUpdate", body: ["id": added.id.uuidString, "key": "condition", "value": "frontmost"])
+    try await context.controller.perform(
+      "appRuleUpdate", body: ["id": added.id.uuidString, "key": "action", "value": "mute"])
+    XCTAssertEqual(context.playback.appRules.first?.condition, .frontmost)
+    XCTAssertEqual(context.playback.appRules.first?.action, .mute)
+
+    do {
+      try await context.controller.perform(
+        "appRuleUpdate", body: ["id": UUID().uuidString, "key": "action", "value": "stop"])
+      XCTFail("An unknown rule id must be refused")
+    } catch {}
+    XCTAssertEqual(context.playback.appRules.count, 1)
+
+    try await context.controller.perform("appRuleRemove", body: ["id": added.id.uuidString])
+    XCTAssertTrue(context.playback.appRules.isEmpty)
   }
 
   func testSceneOptimizationDefaultsOnAndRoundTripsThroughTheEngine() async throws {
@@ -147,10 +234,14 @@ final class WebPanelPerformanceSettingsTests: XCTestCase {
     context.store.settingsSnapshot.renderScale = 0.75
     context.store.settingsSnapshot.preferredRenderScale = 1
     context.store.settingsSnapshot.renderScaleSupported = true
-    context.store.settingsSnapshot.batteryProfileEnabled = true
+    context.store.settingsSnapshot.batteryMode = .reducedQuality
     context.store.settingsSnapshot.batteryRenderScale = 0.75
     context.store.settingsSnapshot.batteryTargetFps = 30
     context.store.settingsSnapshot.onBatteryPower = true
+    context.store.settingsSnapshot.frameRateCap = 45
+    context.playback.displaySleepAction = .stop
+    context.playback.otherAudioAction = .mute
+    _ = context.playback.addRule(bundleIdentifier: "com.example.sample", name: "Sample")
 
     let settings = try XCTUnwrap(context.controller.snapshot()["settings"] as? [String: Any])
 
@@ -162,10 +253,20 @@ final class WebPanelPerformanceSettingsTests: XCTestCase {
     XCTAssertEqual(settings["renderScale"] as? Double, 0.75)
     XCTAssertEqual(settings["preferredRenderScale"] as? Double, 1)
     XCTAssertEqual(settings["renderScaleSupported"] as? Bool, true)
-    XCTAssertEqual(settings["batteryProfileEnabled"] as? Bool, true)
+    XCTAssertEqual(settings["batteryMode"] as? String, "reducedQuality")
     XCTAssertEqual(settings["batteryRenderScale"] as? Double, 0.75)
     XCTAssertEqual(settings["batteryTargetFps"] as? Int, 30)
     XCTAssertEqual(settings["onBatteryPower"] as? Bool, true)
+    XCTAssertEqual(settings["frameRateCap"] as? Int, 45)
+    XCTAssertEqual(settings["frameRateCapMax"] as? Int, 60)
+    XCTAssertEqual(settings["displaySleepAction"] as? String, "stop")
+    XCTAssertEqual(settings["otherAudioAction"] as? String, "mute")
+    let rules = try XCTUnwrap(settings["appRules"] as? [[String: Any]])
+    XCTAssertEqual(rules.count, 1)
+    XCTAssertEqual(rules[0]["name"] as? String, "Sample")
+    XCTAssertEqual(rules[0]["bundleID"] as? String, "com.example.sample")
+    XCTAssertEqual(rules[0]["condition"] as? String, "running")
+    XCTAssertEqual(rules[0]["action"] as? String, "pause")
 
     let reports = try XCTUnwrap(settings["videoBackends"] as? [[String: Any]])
     XCTAssertEqual(reports.count, 1)
@@ -191,6 +292,7 @@ final class WebPanelPerformanceSettingsTests: XCTestCase {
     let defaults: UserDefaults
     let workshop: WorkshopStore
     let controller: WebPanelController
+    let playback: PlaybackPreferences
 
     init() throws {
       store = BridgeStore(bridge: bridge)
@@ -198,9 +300,10 @@ final class WebPanelPerformanceSettingsTests: XCTestCase {
       workshop = WorkshopStore(
         downloader: WorkshopDownloadManager(sessionDirectory: root), supportDirectory: root,
         defaults: defaults)
+      playback = PlaybackPreferences(defaults: defaults)
       controller = WebPanelController(
         store: store, navigation: ControlPanelNavigation(), workshop: workshop, defaults: defaults,
-        appLanguage: .english())
+        appLanguage: .english(), playback: playback)
       bridge.snapshots = { [store] in
         BridgeSnapshotBundle(
           app: store.appSnapshot, library: store.librarySnapshot, wallpaperOptions: nil,
@@ -218,7 +321,6 @@ final class WebPanelPerformanceSettingsTests: XCTestCase {
 
 private final class RecordingBridge: WallpaperBridge {
   struct Profile {
-    let enabled: Bool
     let renderScale: Float
     let targetFps: UInt32
   }
@@ -227,6 +329,8 @@ private final class RecordingBridge: WallpaperBridge {
   @MainActor var renderScales: [Float] = []
   @MainActor var videoBackends: [String] = []
   @MainActor var batteryProfiles: [Profile] = []
+  @MainActor var batteryModes: [BridgeBatteryMode] = []
+  @MainActor var frameRateCaps: [UInt32?] = []
   @MainActor var sceneOptimization: [Bool] = []
   @MainActor var sceneVideoPlaneSampling: [Bool] = []
 
@@ -255,13 +359,20 @@ private final class RecordingBridge: WallpaperBridge {
     return bundle
   }
 
-  override func setBatteryQualityProfile(
-    enabled: Bool, renderScale: Float, targetFps: UInt32
-  ) async throws -> BridgeSnapshotBundle {
+  override func setBatteryQualityProfile(renderScale: Float, targetFps: UInt32) async throws
+    -> BridgeSnapshotBundle
+  {
     await record {
-      $0.batteryProfiles.append(
-        Profile(enabled: enabled, renderScale: renderScale, targetFps: targetFps))
+      $0.batteryProfiles.append(Profile(renderScale: renderScale, targetFps: targetFps))
     }
+  }
+
+  override func setBatteryMode(mode: BridgeBatteryMode) async throws -> BridgeSnapshotBundle {
+    await record { $0.batteryModes.append(mode) }
+  }
+
+  override func setFrameRateCap(cap: UInt32?) async throws -> BridgeSnapshotBundle {
+    await record { $0.frameRateCaps.append(cap) }
   }
 
   @MainActor private func record(_ note: @MainActor (RecordingBridge) -> Void)

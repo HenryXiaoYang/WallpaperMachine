@@ -183,7 +183,11 @@ pub struct SetLaunchAtLogin {
     pub enabled: bool,
 }
 
-pub struct SetPauseOnBatteryPower {
+pub struct SetBatteryMode {
+    pub mode: crate::config::BatteryModeCfg,
+}
+
+pub struct SetVerboseLogging {
     pub enabled: bool,
 }
 
@@ -194,6 +198,14 @@ pub struct SetPresentationSuspended {
 pub struct SetDisplayPresentationSuspended {
     pub display_id: String,
     pub suspended: bool,
+}
+
+pub struct SetPresentationUnloaded {
+    pub unloaded: bool,
+}
+
+pub struct SetAudioSuppressed {
+    pub suppressed: bool,
 }
 
 pub struct SetRendererCountersEnabled {
@@ -214,8 +226,11 @@ pub struct SetRenderScale {
     pub scale: f32,
 }
 
+pub struct SetFrameRateCap {
+    pub cap: Option<u32>,
+}
+
 pub struct SetBatteryQualityProfile {
-    pub enabled: bool,
     pub render_scale: f32,
     pub target_fps: u32,
 }
@@ -387,9 +402,12 @@ pub type SetMirrorVolumeReply = DisplayMutationReply;
 pub type SetMirrorMutedReply = DisplayMutationReply;
 pub type EjectWallpaperFromDisplayReply = DisplayMutationReply;
 pub type SetGlobalPlaybackReply = AllSnapshotsReply;
-pub type SetPauseOnBatteryPowerReply = AllSnapshotsReply;
+pub type SetBatteryModeReply = AllSnapshotsReply;
+pub type SetVerboseLoggingReply = AllSnapshotsReply;
 pub type SetPresentationSuspendedReply = Result<(), BridgeError>;
 pub type SetDisplayPresentationSuspendedReply = Result<(), BridgeError>;
+pub type SetPresentationUnloadedReply = AllSnapshotsReply;
+pub type SetAudioSuppressedReply = AllSnapshotsReply;
 pub type SetPowerSourceReply = AllSnapshotsReply;
 pub type InitialFrameReadyReply = AllSnapshotsReply;
 pub type ShutdownReply = Result<(), BridgeError>;
@@ -400,6 +418,7 @@ pub type SetRendererCountersEnabledReply = Result<(), BridgeError>;
 pub type RendererCountersReply = Result<BridgeRendererCountersReport, BridgeError>;
 pub type SetVideoBackendReply = AllSnapshotsReply;
 pub type SetRenderScaleReply = AllSnapshotsReply;
+pub type SetFrameRateCapReply = AllSnapshotsReply;
 pub type SetBatteryQualityProfileReply = AllSnapshotsReply;
 pub type SetContentPacingEnabledReply = AllSnapshotsReply;
 pub type SetSharedVideoDecodeEnabledReply = AllSnapshotsReply;

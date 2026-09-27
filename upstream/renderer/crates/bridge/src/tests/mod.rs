@@ -14,6 +14,7 @@ mod persistence_corruption;
 mod persistence_round_trip;
 mod playback;
 mod power_settings;
+mod performance_settings;
 mod quality_settings;
 mod scene_settings;
 mod production_constructor;

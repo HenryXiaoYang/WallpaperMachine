@@ -11,8 +11,8 @@ use wallpaper_core::{
 };
 
 use crate::{
-    BridgeErrorKind, BridgePlaybackState, BridgeScalingMode, api::BridgeBuilder,
-    config::ConfigStore, engine::FakeEngineFacade,
+    BridgeDisplayMode, BridgeErrorKind, BridgePlaybackState, BridgeScalingMode,
+    api::BridgeBuilder, config::ConfigStore, engine::FakeEngineFacade,
 };
 
 fn assert_f32_close(actual: f32, expected: f32) {
@@ -221,6 +221,75 @@ async fn target_fps_is_clamped_to_display_refresh_rate() {
         .unwrap();
     assert_eq!(options.display_configurations[0].max_fps, 75);
     assert_eq!(options.display_configurations[0].target_fps, 75);
+}
+
+#[tokio::test]
+async fn requested_rate_at_the_refresh_is_stored_as_follow_native() {
+    let root = tempfile::tempdir().unwrap();
+    let engine = FakeEngineFacade::default();
+    engine.set_snapshot(vec![display_snapshot(7, 120), display_snapshot(8, 120)]);
+    let bridge = BridgeBuilder::new(engine)
+        .with_config_store(ConfigStore::open(root.path().to_path_buf()))
+        .build()
+        .expect("tokio runtime and config load for wallpaper bridge");
+    bridge
+        .inject_scene_wallpaper_config_for_test("100", "Scene")
+        .await;
+
+    bridge
+        .set_target_fps("100".into(), "7".into(), 120)
+        .await
+        .unwrap();
+    let wallpaper_path = root.path().join("wallpapers").join("100.json");
+    assert_saved_monitor_rate(&wallpaper_path, None);
+
+    bridge
+        .set_target_fps("100".into(), "7".into(), 30)
+        .await
+        .unwrap();
+    assert_saved_monitor_rate(&wallpaper_path, Some(30));
+
+    bridge
+        .set_display_mode("8".into(), BridgeDisplayMode::Mirror)
+        .await
+        .unwrap();
+    bridge.set_mirror_target_fps("8".into(), 120).await.unwrap();
+    assert_eq!(saved_mirror_rate(root.path()), None);
+    bridge.set_mirror_target_fps("8".into(), 45).await.unwrap();
+    assert_eq!(saved_mirror_rate(root.path()), Some(45));
+}
+
+fn assert_saved_monitor_rate(path: &std::path::Path, expected: Option<u32>) {
+    let written = fs::read_to_string(path).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&written).unwrap();
+    let monitor = &value["monitors"][0];
+    assert!(monitor.get("fps").is_none(), "{written}");
+    match expected {
+        None => assert!(monitor.get("frame_rate").is_none(), "{written}"),
+        Some(rate) => {
+            assert_eq!(monitor["frame_rate"], rate, "{written}");
+        }
+    }
+}
+
+fn saved_mirror_rate(root: &std::path::Path) -> Option<u32> {
+    let written = fs::read_to_string(root.join("config.toml")).unwrap();
+    let value: toml::Value = toml::from_str(&written).unwrap();
+    let settings = value
+        .get("monitor_settings")
+        .and_then(toml::Value::as_array)
+        .and_then(|rows| {
+            rows.iter()
+                .find(|row| row.get("display_id").and_then(toml::Value::as_integer) == Some(8))
+        })
+        .unwrap_or_else(|| panic!("missing mirror settings in {written}"));
+    assert!(
+        settings.get("target_fps").is_none(),
+        "legacy target_fps must not be written: {written}"
+    );
+    settings
+        .get("frame_rate")
+        .map(|rate| u32::try_from(rate.as_integer().unwrap()).unwrap())
 }
 
 #[tokio::test]
@@ -1345,7 +1414,7 @@ async fn lock_screen_export_ignores_presentation_suspension_but_preserves_playba
     assert!(bridge.lock_screen_scenes().await.unwrap()[0].paused);
     bridge.play_all().await.unwrap();
 
-    bridge.set_pause_on_battery_power(true).await.unwrap();
+    bridge.set_battery_mode(crate::BridgeBatteryMode::Pause).await.unwrap();
     bridge
         .set_power_source_for_test(crate::power::PowerSource::Battery)
         .await;

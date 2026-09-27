@@ -38,7 +38,7 @@ same interface on a demo library, so you can
 | [**Settings**](docs/features/control-panel.md#properties) | Every option its artist made, saved for each wallpaper when you apply your changes. |
 | [**Music**](docs/features/audio-response.md) | Turn on Audio response and wallpapers made for sound move with what your Mac plays. Turn on [Media integration](docs/features/media-integration.md) and ones with a music display show the song that's on. |
 | [**Displays**](docs/features/control-panel.md#target-display) | Every display gets its own wallpaper, or mirrors another, with its own scaling, frame rate and volume. |
-| [**Battery**](docs/features/performance.md#battery-profile) | On battery, pause, or drop to a render scale and frame rate you choose. Both are off until you turn them on. |
+| [**Battery**](docs/features/performance.md#playback) | On battery, keep running, drop to a render scale and frame rate you choose, or pause. One choice, off until you pick it. The rest of playback and quality is on [Performance](docs/features/performance.md). |
 | [**Native**](docs/features/appearance.md) | Light, dark and your accent colour, like the rest of macOS, in English or [简体中文](docs/features/control-panel.md#language). |
 | [**Import**](docs/features/control-panel.md#downloads-and-import) | Bring the Wallpaper Engine folders you already have. The app copies them and leaves the originals alone. |
 | [**Out of sight, paused**](docs/architecture.md#desktop-wallpaper-windows-and-private-api-handling) | A covered display stops its own wallpaper, and sleep or lock pauses them all. Your own pause stays yours. |

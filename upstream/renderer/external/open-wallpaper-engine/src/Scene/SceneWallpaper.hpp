@@ -71,6 +71,9 @@ public:
     bool init();
     bool inited() const;
     void shutdown();
+    /// Tags every line this scene's threads log with `scope`. Call before
+    /// `init()`; see `SetWallpaperLogScope`.
+    void setLogScope(uint64_t scope);
 
     void initVulkan(const RenderInitInfo&);
     void applyConfig(const SceneWallpaperConfig&);

@@ -268,7 +268,7 @@ impl BridgeActorState {
                         ScalingMode::Fill => BridgeScalingMode::Fill,
                     },
                     scaling_factor: render.scaling_factor,
-                    target_fps: render.fps.min(max_fps),
+                    target_fps: render.fps_on(max_fps),
                     max_fps,
                     muted: config.audio.muted,
                     volume: config.audio.volume,
@@ -374,8 +374,7 @@ impl BridgeActorState {
                     }),
                     scaling_mode: scaling_mode.to_string(),
                     target_fps: render
-                        .fps
-                        .min(display.desc.refresh_rate_hz.max(1))
+                        .fps_on(display.desc.refresh_rate_hz)
                         .to_string(),
                     audio_response: self.wallpaper_configs.get(wallpaper_id).map_or_else(
                         || crate::config::AudioCfg::default().response_enabled,
@@ -569,7 +568,7 @@ impl BridgeActorState {
                         selected_mirror_target,
                         scaling_mode,
                         scaling_factor: settings.scaling_factor,
-                        target_fps: settings.target_fps.min(max_fps),
+                        target_fps: settings.fps_on(max_fps),
                         max_fps,
                         muted: settings.muted,
                         volume: settings.volume,
@@ -590,6 +589,8 @@ impl BridgeActorState {
             native_video_enabled: self.app_config.video_backend
                 == VideoBackendModeCfg::NativePreferred,
             native_video_rejected: &self.native_video_rejected,
+            frame_rate_cap: self.app_config.quality.frame_rate_cap,
+            audio_suppressed: self.audio_suppressed,
         }
         .render_backends();
         let video_backends = backends
@@ -678,7 +679,8 @@ impl BridgeActorState {
                 LaunchAtLoginStatus::Available { enabled } => enabled,
                 LaunchAtLoginStatus::Unavailable => false,
             },
-            pause_on_battery_power: self.app_config.power.pause_on_battery_power,
+            battery_mode: self.app_config.power.on_battery.into(),
+            verbose_logging: self.app_config.diagnostics.verbose_logging,
             git_sha: match option_env!("GIT_SHORT_COMMIT").unwrap_or(crate::build::SHORT_COMMIT) {
                 value if value.trim().is_empty() => UNKNOWN_GIT_SHA.to_string(),
                 value => value.to_string(),
@@ -728,7 +730,7 @@ impl BridgeActorState {
             user_assets_path: paths.user_assets_root().to_string_lossy().into_owned(),
             render_scale: self.app_config.effective_render_scale(on_battery),
             preferred_render_scale: self.app_config.quality.render_scale,
-            battery_profile_enabled: self.app_config.quality.battery_profile_enabled,
+            frame_rate_cap: self.app_config.quality.frame_rate_cap,
             battery_render_scale: self.app_config.quality.battery.render_scale,
             battery_target_fps: self.app_config.quality.battery.target_fps,
             on_battery_power: on_battery,

@@ -1,25 +1,33 @@
 import { t } from './i18n.js';
+import { qualityPresets, qualityPresetLabels, activeQualityPreset, frameRateCapSlider, frameRateCapValue, frameRateCapReadout } from './settings.js';
 
-// First-run guide: five full-window pages shown once per Mac, and again on request from
+// First-run guide: six full-window pages shown once per Mac, and again on request from
 // Settings → Library & Steam. Language, appearance and the lock screen apply the moment they
-// are chosen (Skip puts back what was there when the guide opened); the other preferences are
-// drafts committed by Continue; the Steam page runs a sign-in-only SteamCMD session through the
-// same job pipeline as a download, so Steam's own password and Steam Guard prompts are answered
-// right here. The password never leaves this module except as the answer to Steam's password prompt.
+// are chosen (Skip puts back what was there when the guide opened); the performance choices and
+// the other preferences are drafts committed by Continue; the Steam page runs a sign-in-only
+// SteamCMD session through the same job pipeline as a download, so Steam's own password and
+// Steam Guard prompts are answered right here. The password never leaves this module except as
+// the answer to Steam's password prompt.
 export const SIGN_IN_ID = 'steam-sign-in';
 const STEPS = [
   ['language', 'Language & appearance'],
   ['steam', 'Steam'],
+  ['performance', 'Performance'],
   ['preferences', 'Preferences'],
   ['tips', 'Tips'],
   ['start', 'Start'],
 ];
+const stepIndex = key => STEPS.findIndex(([id]) => id === key);
+const PRESET_NOTES = {
+  low: 'Up to 30 fps at half resolution. Uses the least energy.',
+  medium: 'Up to 60 fps at 75% resolution.',
+  high: 'Each display’s native refresh rate at full resolution. The default.',
+};
 const PREFERENCES = [
   ['launchAtLogin', 'power', 'Launch at login', 'Wallpapers come back on their own after a restart.'],
-  ['pauseOnBattery', 'pause', 'Pause on battery', 'Pauses wallpapers while your Mac runs on battery and resumes when you plug in.'],
-  ['batteryProfileEnabled', 'batteryCharging', 'Reduced quality on battery', 'Renders at a lower scale and frame rate on battery instead of pausing.'],
   ['keepWindowsOnWallpaperClick', 'mousePointerClick', 'Keep windows in place when clicking the wallpaper', 'Turns off macOS’s “Click wallpaper to reveal desktop” so clicks reach interactive wallpapers.'],
 ];
+const BATTERY_MODES = [['keepRunning', 'Keep running'], ['reducedQuality', 'Reduced quality'], ['pause', 'Pause']];
 const TIPS = [
   ['search', 'Browse wallpapers in Discover. No account needed.'],
   ['download', 'Download one, then double-click it to apply.'],
@@ -43,6 +51,8 @@ export function createWelcome(helpers) {
   let dismissedJob = false;
   let setupRequested = false;
   const prefs = new Map();
+  // Performance drafts: `frameRateCap` (null is no limit) and `renderScale`, as Settings sends them.
+  const perf = new Map();
   const pending = new Set();
   let error = '';
   let lastStepRendered = -1;
@@ -61,7 +71,7 @@ export function createWelcome(helpers) {
   const languageValue = () => state?.language?.preference || 'system';
   const lockScreenValue = () => Boolean(state?.settings?.lockScreenEnabled);
   const snapshotInitial = () => ({ mode: themeMode(), language: languageValue(), lockScreen: lockScreenValue() });
-  const navigationBusy = () => pending.has('language') || pending.has('theme') || pending.has('preferences') || pending.has('lockScreen');
+  const navigationBusy = () => pending.has('language') || pending.has('theme') || pending.has('performance') || pending.has('preferences') || pending.has('lockScreen');
 
   function isOpen() { return open; }
   function openGuide() {
@@ -72,6 +82,7 @@ export function createWelcome(helpers) {
     lastStepRendered = -1;
     lastSteamFocusKey = null;
     prefs.clear();
+    perf.clear();
     signIn.secret = null;
     signIn.reveal = false;
     signIn.remember = state?.rememberSession ?? true;
@@ -131,7 +142,7 @@ export function createWelcome(helpers) {
     morph(container, shell());
     if (lastStepRendered !== step) {
       lastStepRendered = step;
-      const target = container.querySelector('.welcome-page input:not([disabled]):not([type="checkbox"])') || container.querySelector('#welcome-title');
+      const target = container.querySelector('.welcome-page input:not([disabled]):not([type="checkbox"]):not([type="range"])') || container.querySelector('#welcome-title');
       target?.focus({ preventScroll: false });
       container.querySelector('.welcome-body')?.scrollTo(0, 0);
     } else if (step === 1 && steamFocusKey !== lastSteamFocusKey) {
@@ -169,28 +180,29 @@ export function createWelcome(helpers) {
       const name = attention ? t('{summary} · needs attention', { summary: t(label) }) : t(label);
       return `<li data-key="progress-${key}"><button type="button" data-action="go" data-step="${index}" class="welcome-step${index === step ? ' current' : index < step ? ' done' : ''}${attention ? ' attention' : ''}" aria-label="${e(name)}" title="${e(name)}"${index === step ? ' aria-current="step"' : ''}${navigationBusy() ? ' disabled' : ''}><span class="welcome-step-dot" aria-hidden="true">${attention ? icon('shield', 11) : index < step ? icon('check', 11) : ''}</span><span class="welcome-step-label">${e(t(label))}</span></button></li>`;
     }).join('');
-    const pages = [pageLanguage, pageSteam, pagePreferences, pageTips, pageStart];
+    const pages = [pageLanguage, pageSteam, pagePerformance, pagePreferences, pageTips, pageStart];
     return `<div class="welcome-bar" data-key="bar"><ol class="welcome-progress" aria-label="${e(t('Setup progress'))}">${progress}</ol></div><div class="welcome-body" data-key="body"><section class="welcome-page" data-key="page-${step}" data-step="${STEPS[step][0]}" aria-labelledby="welcome-title">${pages[step](done)}</section></div><div class="welcome-footer" data-key="footer"><div class="welcome-footer-row">${footer(done)}</div></div>`;
   }
 
   function footer(done) {
     const back = step > 0 ? button(t('Back'), 'back', {}, { icon: 'chevronLeft', className: 'quiet', disabled: navigationBusy() }) : '<span></span>';
     const next = (label, action, extra = {}) => button(label, action, {}, { icon: 'arrowRight', className: 'primary welcome-continue', ...extra });
-    switch (step) {
-      case 0: return `${back}<span class="welcome-footer-actions">${button(t('Skip'), 'skipLanguage', {}, { className: 'quiet', disabled: pending.size > 0 })}${next(t('Continue'), 'continue', { disabled: pending.size > 0 })}</span>`;
-      case 1: {
+    switch (STEPS[step][0]) {
+      case 'language': return `${back}<span class="welcome-footer-actions">${button(t('Skip'), 'skipLanguage', {}, { className: 'quiet', disabled: pending.size > 0 })}${next(t('Continue'), 'continue', { disabled: pending.size > 0 })}</span>`;
+      case 'steam': {
         const job = signInJob();
         const running = Boolean(job?.pending || signInRequest());
         return `${back}<span class="welcome-footer-actions">${done ? next(t('Continue'), 'continue') : button(running ? t('Skip and cancel sign-in') : t('Skip for now'), 'skipSteam', {}, { className: 'quiet' })}</span>`;
       }
-      case 2: return `${back}<span class="welcome-footer-actions">${button(t('Skip'), 'skipPreferences', {}, { className: 'quiet', disabled: navigationBusy() })}${next(t('Continue'), 'savePreferences', { disabled: navigationBusy() })}</span>`;
-      case 3: return `${back}<span class="welcome-footer-actions">${next(t('Continue'), 'continue')}</span>`;
+      case 'performance': return `${back}<span class="welcome-footer-actions">${button(t('Skip'), 'skipPerformance', {}, { className: 'quiet', disabled: navigationBusy() })}${next(t('Continue'), 'savePerformance', { disabled: navigationBusy() })}</span>`;
+      case 'preferences': return `${back}<span class="welcome-footer-actions">${button(t('Skip'), 'skipPreferences', {}, { className: 'quiet', disabled: navigationBusy() })}${next(t('Continue'), 'savePreferences', { disabled: navigationBusy() })}</span>`;
+      case 'tips': return `${back}<span class="welcome-footer-actions">${next(t('Continue'), 'continue')}</span>`;
       default: return `${back}<span class="welcome-footer-actions">${button(t('Start using the app'), 'finish', {}, { icon: 'check', className: 'primary welcome-continue' })}</span>`;
     }
   }
 
   const head = (title, lead) => `<header class="welcome-head"><h1 id="welcome-title" tabindex="-1">${e(title)}</h1>${lead ? `<p class="welcome-lead">${e(lead)}</p>` : ''}</header>`;
-  const option = (action, value, checked, body, off) => `<button type="button" role="radio" aria-checked="${checked}" tabindex="${checked ? '0' : '-1'}" data-action="${action}" data-value="${e(value)}" class="welcome-option" data-key="${action}-${e(value)}"${off ? ' disabled' : ''}>${body}<span class="welcome-option-check" aria-hidden="true">${icon('check', 13)}</span></button>`;
+  const option = (action, value, checked, body, off, focusable = checked) => `<button type="button" role="radio" aria-checked="${checked}" tabindex="${focusable ? '0' : '-1'}" data-action="${action}" data-value="${e(value)}" class="welcome-option" data-key="${action}-${e(value)}"${off ? ' disabled' : ''}>${body}<span class="welcome-option-check" aria-hidden="true">${icon('check', 13)}</span></button>`;
 
   function pageLanguage() {
     const languageBusy = pending.has('language');
@@ -273,15 +285,46 @@ export function createWelcome(helpers) {
     </form>`;
   }
 
+  function committedPerformance(key) {
+    const settings = state.settings || {};
+    if (key === 'renderScale') return Number(settings.preferredRenderScale ?? 1);
+    return settings.frameRateCap ?? null;
+  }
+  const performanceValue = key => perf.has(key) ? perf.get(key) : committedPerformance(key);
+  const performanceChanged = ([key, value]) => key === 'renderScale' ? Math.abs(value - committedPerformance(key)) > 0.001 : value !== committedPerformance(key);
+  function pagePerformance() {
+    const settings = state.settings;
+    const unavailable = !settings;
+    const off = unavailable || pending.has('performance');
+    const draft = { frameRateCapMax: settings?.frameRateCapMax, frameRateCap: performanceValue('frameRateCap'), preferredRenderScale: performanceValue('renderScale') };
+    const active = unavailable ? null : activeQualityPreset(draft);
+    // A radio group needs one tab stop; with no preset matching, the first one takes it.
+    const presets = qualityPresetLabels.map(([id, label], index) => option('preset', id, id === active, `<span class="welcome-option-title">${e(t(label))}</span><span class="welcome-option-note">${e(t(PRESET_NOTES[id]))}</span>`, off, id === active || (active === 'custom' && index === 0))).join('');
+    const slider = frameRateCapSlider(draft);
+    const limit = `<div class="welcome-range"><input id="welcome-frame-rate" type="range" data-performance="frameRateCap" min="10" max="${slider.max}" step="1" value="${slider.value}" aria-label="${e(t('Frame rate limit'))}"${off ? ' disabled' : ''}><output for="welcome-frame-rate" data-performance-readout>${e(frameRateCapReadout(slider.value, slider.max))}</output></div>`;
+    return `${head(t('Performance'), t('Choose how smoothly wallpapers run and how much energy they use. You can change this later in Settings › Performance.'))}${unavailable ? `<p class="notice">${e(t('Settings are unavailable right now. You can set these later in Settings.'))}</p>` : ''}
+      <fieldset class="welcome-choice"><legend>${icon('slidersVertical', 15)}${e(t('Quality preset'))}</legend><div class="welcome-options" role="radiogroup" aria-label="${e(t('Quality preset'))}">${presets}</div>${active === 'custom' ? `<p class="welcome-note">${e(t('Custom: the frame-rate limit and render scale match none of the presets.'))}</p>` : ''}</fieldset>
+      <fieldset class="welcome-choice"><legend>${icon('monitor', 15)}${e(t('Frame rate limit'))}</legend>${limit}<p class="welcome-note">${e(t('At the top of the slider each display runs at its native refresh rate, such as 120 fps on a MacBook Pro and 60 fps on a MacBook Air. A lower limit saves energy.'))}</p></fieldset>
+      ${error ? `<p class="notice error" role="alert">${e(error)}</p>` : ''}`;
+  }
+
+  function committedPreference(key) {
+    if (key === 'batteryMode') return state.settings?.batteryMode || 'keepRunning';
+    return Boolean(state.settings?.[key]);
+  }
   function pagePreferences() {
     const settings = state.settings;
     const unavailable = !settings;
-    const rows = PREFERENCES.map(([key, glyph, title, note]) => {
+    const toggle = ([key, glyph, title, note]) => {
       const off = unavailable || pending.has('preferences') || (key === 'launchAtLogin' && !settings?.launchAtLoginAvailable);
       const value = prefs.has(key) ? prefs.get(key) : Boolean(settings?.[key]);
       const extra = key === 'launchAtLogin' && settings && !settings.launchAtLoginAvailable ? ` ${t('Move the app to Applications to enable.')}` : '';
       return `<label class="welcome-pref" data-key="pref-${key}"><span class="dialog-guide-icon">${icon(glyph, 18)}</span><span class="welcome-pref-body"><span class="welcome-pref-title">${e(t(title))}</span><span class="welcome-pref-note">${e(t(note))}${e(extra)}</span></span><span class="settings-switch"><input type="checkbox" role="switch" data-pref="${key}" aria-label="${e(t(title))}"${value ? ' checked' : ''}${off ? ' disabled' : ''}><span aria-hidden="true"></span></span></label>`;
-    }).join('');
+    };
+    const battery = prefs.has('batteryMode') ? prefs.get('batteryMode') : (settings?.batteryMode || 'keepRunning');
+    const batteryOff = unavailable || pending.has('preferences');
+    const batteryRow = `<label class="welcome-pref" data-key="pref-batteryMode"><span class="dialog-guide-icon">${icon('batteryCharging', 18)}</span><span class="welcome-pref-body"><span class="welcome-pref-title">${e(t('On battery'))}</span><span class="welcome-pref-note">${e(t('Keep wallpapers running, lower their quality, or pause them while on battery.'))}</span><select data-pref="batteryMode" aria-label="${e(t('On battery'))}"${batteryOff ? ' disabled' : ''}>${BATTERY_MODES.map(([id, label]) => `<option value="${id}"${battery === id ? ' selected' : ''}>${e(t(label))}</option>`).join('')}</select></span></label>`;
+    const rows = `${toggle(PREFERENCES[0])}${batteryRow}${toggle(PREFERENCES[1])}`;
     return `${head(t('A few preferences'), t('You can change these later in Settings.'))}${unavailable ? `<p class="notice">${e(t('Settings are unavailable right now. You can set these later in Settings.'))}</p>` : ''}<div class="welcome-prefs">${rows}${lockScreenRow(settings)}</div>${settings?.lockScreenError ? `<p class="notice error" role="alert">${e(settings.lockScreenError)}</p>` : ''}${error ? `<p class="notice error" role="alert">${e(error)}</p>` : ''}`;
   }
 
@@ -298,8 +341,8 @@ export function createWelcome(helpers) {
   function pageTips() {
     const repository = helpers.safeLink(state.repositoryURL);
     const tips = TIPS.map(([glyph, text]) => `<li><span class="dialog-guide-icon">${icon(glyph, 18)}</span><p>${e(t(text))}</p></li>`).join('');
-    // The inspector's report button pre-fills the issue with the wallpaper, so the page points at it by its glyph.
-    const report = e(t('Videos usually play. Scenes are experimental, and Application wallpapers can’t run on macOS. If one fails, report it with {icon} in its details. Pull requests are welcome too.')).replace('{icon}', `<span class="welcome-inline-icon" role="img" aria-label="${e(t('Report a problem on GitHub'))}">${icon('triangleAlert', 13)}</span>`);
+    // Names the inspector's report link, which pre-fills the issue with the wallpaper.
+    const report = e(t('Videos usually play. Scenes are experimental, and Application wallpapers can’t run on macOS. If one doesn’t work, use “Report on GitHub” in its details. Pull requests are welcome too.'));
     const links = repository ? `<div class="welcome-status-actions">${button(t('Report an issue'), 'openExternal', { url: `${repository.replace(/\/$/, '')}/issues` }, { icon: 'external', className: 'link' })}${button(t('Contribute on GitHub'), 'openExternal', { url: repository }, { icon: 'external', className: 'link' })}</div>` : '';
     const support = `<section class="welcome-support" aria-labelledby="welcome-support-title"><span class="dialog-guide-icon">${icon('github', 18)}</span><div class="welcome-status-body"><p class="welcome-status-title" id="welcome-support-title">${e(t('Not every wallpaper works yet'))}</p><p class="welcome-status-text">${report}</p>${links}</div></section>`;
     return `${head(t('The basics'))}<ol class="welcome-tips">${tips}</ol>${support}`;
@@ -312,8 +355,10 @@ export function createWelcome(helpers) {
     const request = signInRequest();
     const waiting = !done && (job?.pending || request);
     const steam = done ? t('Signed in as {account}', { account: done }) : job?.pending ? job.status || t('Waiting for Steam') : request ? request.stage === 'setup' ? state.setup?.status || helpers.stageHint('setup') : helpers.stageHint(request.stage) : t('Not signed in. You’ll be asked at your first download.');
-    const unsaved = [...prefs].filter(([key, value]) => Boolean(state.settings?.[key]) !== value).length;
-    const recap = `<dl class="welcome-recap"><div><dt>${e(t('Language'))}</dt><dd>${e(language ? language[1] : t('System (Auto)'))}</dd></div><div><dt>${e(t('Appearance'))}</dt><dd>${e(t(mode))}</dd></div><div><dt>${e(t('Steam'))}</dt><dd>${e(steam)}</dd>${waiting ? button(t('Finish sign-in'), 'go', { step: 1 }, { className: 'link' }) : ''}</div>${unsaved ? `<div><dt>${e(t('Preferences'))}</dt><dd>${e(t(unsaved === 1 ? '{count} change not saved' : '{count} changes not saved', { count: unsaved }))}</dd>${button(t('Review'), 'go', { step: 2 }, { className: 'link' })}</div>` : ''}</dl>`;
+    const unsavedPreferences = [...prefs].filter(([key, value]) => committedPreference(key) !== value).length;
+    const unsavedPerformance = [...perf].filter(performanceChanged).length;
+    const unsaved = (label, count, key) => count ? `<div><dt>${e(t(label))}</dt><dd>${e(t(count === 1 ? '{count} change not saved' : '{count} changes not saved', { count }))}</dd>${button(t('Review'), 'go', { step: stepIndex(key) }, { className: 'link' })}</div>` : '';
+    const recap = `<dl class="welcome-recap"><div><dt>${e(t('Language'))}</dt><dd>${e(language ? language[1] : t('System (Auto)'))}</dd></div><div><dt>${e(t('Appearance'))}</dt><dd>${e(t(mode))}</dd></div><div><dt>${e(t('Steam'))}</dt><dd>${e(steam)}</dd>${waiting ? button(t('Finish sign-in'), 'go', { step: stepIndex('steam') }, { className: 'link' }) : ''}</div>${unsaved('Performance', unsavedPerformance, 'performance')}${unsaved('Preferences', unsavedPreferences, 'preferences')}</dl>`;
     return `${head(t('Setup complete'), t('Your desktop won’t change until you apply a wallpaper.'))}${recap}<div class="welcome-start"><button type="button" class="welcome-start-option" data-action="browse"><span class="dialog-guide-icon">${icon('search', 18)}</span><span class="welcome-pref-body"><span class="welcome-pref-title">${e(t('Browse the Workshop'))}</span><span class="welcome-pref-note">${e(t('Find wallpapers from Steam in Discover.'))}</span></span>${icon('chevronRight', 16)}</button><button type="button" class="welcome-start-option" data-action="import"><span class="dialog-guide-icon">${icon('plus', 18)}</span><span class="welcome-pref-body"><span class="welcome-pref-title">${e(t('Import wallpapers'))}</span><span class="welcome-pref-note">${e(t('Bring in wallpaper folders or files you already have.'))}</span></span>${icon('chevronRight', 16)}</button></div><p class="welcome-note">${e(t('You can open this guide again from Settings → Library & Steam.'))}</p>`;
   }
 
@@ -386,23 +431,32 @@ export function createWelcome(helpers) {
     // A refused change must not leave the switch showing it; a focused input keeps its own state across renders.
     if (input.isConnected) input.checked = lockScreenValue();
   }
+  function choosePreset(id) {
+    const preset = qualityPresets[id];
+    if (!preset) return;
+    perf.set('frameRateCap', preset.frameRateCap);
+    perf.set('renderScale', preset.renderScale);
+    render(state);
+  }
   async function skipPreferences() {
     prefs.clear();
     if (initial && lockScreenValue() !== initial.lockScreen) await perform('lockScreen', 'setting', { key: 'lockScreenEnabled', value: initial.lockScreen });
     go(step + 1);
   }
-  async function savePreferences() {
-    const changed = [...prefs].filter(([key, value]) => Boolean(state.settings?.[key]) !== value);
-    if (!changed.length) { go(step + 1); return; }
-    pending.add('preferences');
+  // Sends each changed draft as the same `setting` Settings uses, then moves on. A refusal stays
+  // on the page with its reason; drafts already sent now match what native reports.
+  async function commitDrafts(drafts, key, changed) {
+    const entries = [...drafts].filter(changed);
+    if (!entries.length) { drafts.clear(); go(step + 1); return; }
+    pending.add(key);
     render(state);
     try {
-      for (const [key, value] of changed) await send('setting', { key, value });
-      prefs.clear();
-      pending.delete('preferences');
+      for (const [setting, value] of entries) await send('setting', { key: setting, value });
+      drafts.clear();
+      pending.delete(key);
       go(step + 1);
     } catch (failure) {
-      pending.delete('preferences');
+      pending.delete(key);
       error = failure?.message || String(failure);
       helpers.clearError?.();
       render(state);
@@ -418,8 +472,11 @@ export function createWelcome(helpers) {
       case 'back': go(step - 1); return;
       case 'continue': go(step + 1); return;
       case 'skipLanguage': run(skipLanguage()); return;
+      case 'preset': choosePreset(control.dataset.value); return;
+      case 'skipPerformance': perf.clear(); go(step + 1); return;
+      case 'savePerformance': run(commitDrafts(perf, 'performance', performanceChanged)); return;
       case 'skipPreferences': run(skipPreferences()); return;
-      case 'savePreferences': run(savePreferences()); return;
+      case 'savePreferences': run(commitDrafts(prefs, 'preferences', ([key, value]) => committedPreference(key) !== value)); return;
       case 'skipSteam': run(cancelSignIn().then(() => go(step + 1))); return;
       case 'language': run(chooseLanguage(control.dataset.value)); return;
       case 'theme': run(chooseTheme(control.dataset.value)); return;
@@ -441,11 +498,16 @@ export function createWelcome(helpers) {
   container.addEventListener('input', event => {
     const element = event.target;
     if (element.name === 'account') signIn.account = element.value;
+    if (element.dataset.performance === 'frameRateCap') {
+      const readout = container.querySelector('[data-performance-readout]');
+      if (readout) readout.textContent = frameRateCapReadout(element.value, element.max);
+    }
   });
   container.addEventListener('change', event => {
     const element = event.target;
     if (element.name === 'remember') signIn.remember = element.checked;
-    if (element.dataset.pref) { prefs.set(element.dataset.pref, element.checked); render(state); }
+    if (element.dataset.pref) { prefs.set(element.dataset.pref, element.dataset.pref === 'batteryMode' ? element.value : element.checked); render(state); }
+    if (element.dataset.performance === 'frameRateCap') { perf.set('frameRateCap', frameRateCapValue(element.value, element.max)); render(state); }
     if (element.hasAttribute('data-lock-screen')) run(setLockScreen(element));
   });
   container.addEventListener('submit', event => {

@@ -450,7 +450,11 @@ details[open] > summary svg { transform: rotate(90deg); }
 .inspector-creator, .inspector-meta { text-align: center; font-size: 12px; }
 .inspector-creator { color: var(--accent); font-size: 13px; }
 .inspector-meta { color: var(--muted); font-variant-numeric: tabular-nums; }
-.inspector-compatibility { text-align: center; line-height: 1.35; }
+.inspector-compatibility, .inspector-energy { text-align: center; line-height: 1.35; }
+.inspector-energy { font-variant-numeric: tabular-nums; }
+.inspector-heading > .inspector-report { justify-self: center; font-size: 12px; }
+.inspector-failure { display: grid; gap: 4px; }
+.inspector-failure > button.link { font-size: 12px; min-height: 24px; }
 .inspector-heading .tags { justify-content: center; }
 .inspector-heading .tag { padding: 2px 7px; border: 0; border-radius: 4px; background: var(--raised); font-size: 11px; }
 .inspector-actions { margin-top: 4px; gap: 6px; }

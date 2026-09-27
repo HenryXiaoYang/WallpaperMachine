@@ -123,10 +123,10 @@ final class ControlPanelShellTests: ControlPanelTestCase {
         const startedScrolled = scroll.scrollTop > 0;
         tab('performance').focus({preventScroll:true});
         tab('performance').dispatchEvent(new KeyboardEvent('keydown', {key:'ArrowUp', bubbles:true}));
-        const navigated = !document.getElementById('settings-appearance').hidden
-          && document.activeElement === tab('appearance');
+        const navigated = !document.getElementById('settings-about').hidden
+          && document.activeElement === tab('about');
         const reset = scroll.scrollTop === 0;
-        tab('appearance').dispatchEvent(new KeyboardEvent('keydown', {key:'ArrowDown', bubbles:true}));
+        tab('about').dispatchEvent(new KeyboardEvent('keydown', {key:'ArrowDown', bubbles:true}));
         const input = advanced.querySelector('input');
         input.focus();
         window.wallpaperUI.receive(state);
@@ -452,6 +452,7 @@ final class ControlPanelShellTests: ControlPanelTestCase {
         await waitFor(() => !document.getElementById('settings-content').hidden);
         document.querySelector('[data-section="about"]').click();
         await waitFor(() => !document.getElementById('settings-about').hidden);
+        const appVersion = document.querySelector('[data-key="app-version"] .settings-version').textContent;
         const check = document.querySelector('[data-key="about-updates"] [data-action="checkForUpdates"]');
         if (!check) throw new Error('Check for Updates missing from Settings → About');
         check.click();
@@ -465,7 +466,7 @@ final class ControlPanelShellTests: ControlPanelTestCase {
         const notes = Array.from(document.querySelectorAll('[data-key="about-notes"] li')).map(node => node.textContent);
         const headings = Array.from(document.querySelectorAll('[data-key="about-notes"] h4')).map(node => node.textContent);
         const notesTitle = document.querySelector('[data-key="about-notes"] summary').textContent;
-        return {status: ready.update.status, action: ready.update.action, notes, headings, notesTitle};
+        return {status: ready.update.status, action: ready.update.action, notes, headings, notesTitle, appVersion};
         """, arguments: [:], in: nil, contentWorld: .page) as? [String: Any]
     XCTAssertEqual(byTab?["status"] as? String, "ready")
     XCTAssertEqual(byTab?["action"] as? String, "installUpdate")
@@ -480,6 +481,11 @@ final class ControlPanelShellTests: ControlPanelTestCase {
       byTab?["notes"] as? [String],
       ["scene — Stop a crash", "Plus 2 documentation, test and tooling commits."],
       "The card shows the release's own words and stops at the install footer")
+    let bundleVersion = try XCTUnwrap(
+      Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)
+    XCTAssertEqual(
+      byTab?["appVersion"] as? String, bundleVersion,
+      "About shows the version a GitHub report is filed with")
 
     navigation.revealSettingsSection(.about)
     let restored =
@@ -750,12 +756,12 @@ final class ControlPanelShellTests: ControlPanelTestCase {
     }
   }
 
-  /// The first-run guide covers the whole window and walks five pages: language and appearance
+  /// The first-run guide covers the whole window and walks six pages: language and appearance
   /// (applied at once, put back by Skip), Steam sign-in (a real sign-in-only session whose
-  /// password prompt is answered from the form), preferences (drafts committed by Continue),
-  /// tips with the GitHub links, and the closing choice. It is shown on its own once per Mac and
-  /// again from Settings.
-  func testFirstRunGuideCoversTheWindowWalksFivePagesAndReturnsFromSettings() async throws {
+  /// password prompt is answered from the form), performance and preferences (drafts committed
+  /// by Continue), tips with the GitHub links, and the closing choice. It is shown on its own
+  /// once per Mac and again from Settings.
+  func testFirstRunGuideCoversTheWindowWalksSixPagesAndReturnsFromSettings() async throws {
     try await withPanel { panel in
       XCTAssertFalse(panel.controller.welcomeSeen, "A fresh install has not seen the guide")
       XCTAssertEqual(panel.controller.snapshot()["welcomeSeen"] as? Bool, false)
@@ -788,7 +794,7 @@ final class ControlPanelShellTests: ControlPanelTestCase {
       XCTAssertEqual(first?["languages"] as? [String], ["system"] + AppLanguage.supported.map(\.tag))
       XCTAssertEqual(first?["themes"] as? [String], ["system", "light", "dark"])
       XCTAssertEqual(first?["checked"] as? [String], ["language:system", "theme:system"], "Defaults are selected")
-      XCTAssertEqual(first?["steps"] as? Int, 5)
+      XCTAssertEqual(first?["steps"] as? Int, 6)
       XCTAssertEqual(first?["modal"] as? Int, 0, "The guide is a page, not a modal dialog")
       XCTAssertEqual(first?["focusedTitle"] as? Bool, true, "Focus lands on the page title")
 
@@ -871,23 +877,54 @@ final class ControlPanelShellTests: ControlPanelTestCase {
       XCTAssertEqual(signedIn?["continueLabel"] as? String, "Continue")
       XCTAssertEqual(signedIn?["queue"] as? Bool, false, "A finished sign-in is not listed as a download")
 
-      // Preferences are drafts: nothing reaches native until Continue.
+      // Performance comes before the preferences. High is the default: no limit, so every display
+      // runs at its native refresh rate. Presets and the slider are drafts until Continue.
       _ = try await panel.js("document.querySelector('#welcome [data-action=\"continue\"]').click();")
-      try await panel.waitJS("document.querySelector('#welcome .welcome-page')?.dataset.step === 'preferences'")
+      try await panel.waitJS("document.querySelector('#welcome .welcome-page')?.dataset.step === 'performance'")
       panel.bridge.bundleProvider = {
         BridgeSnapshotBundle(
           app: panel.store.appSnapshot, library: panel.store.librarySnapshot, wallpaperOptions: nil,
           monitorInformation: panel.store.monitorInformationSnapshot, settings: panel.store.settingsSnapshot)
       }
+      let performance = try await panel.js("""
+        const region = document.getElementById('welcome');
+        const read = () => ({
+          checked: [...region.querySelectorAll('[data-action="preset"][aria-checked="true"]')].map(b => b.dataset.value),
+          readout: region.querySelector('[data-performance-readout]').textContent,
+        });
+        const initial = read();
+        region.querySelector('[data-action="preset"][data-value="low"]').click();
+        const low = read();
+        const slider = region.querySelector('input[data-performance="frameRateCap"]');
+        slider.value = '24';
+        slider.dispatchEvent(new Event('change', { bubbles: true }));
+        return { initial, low, custom: read() };
+        """) as? [String: [String: Any]]
+      XCTAssertEqual(performance?["initial"]?["checked"] as? [String], ["high"])
+      XCTAssertEqual(performance?["initial"]?["readout"] as? String, "Native refresh rate")
+      XCTAssertEqual(performance?["low"]?["checked"] as? [String], ["low"])
+      XCTAssertEqual(performance?["low"]?["readout"] as? String, "30 fps")
+      XCTAssertEqual(performance?["custom"]?["checked"] as? [String], [], "A limit no preset uses is Custom")
+      XCTAssertEqual(performance?["custom"]?["readout"] as? String, "24 fps")
+      XCTAssertEqual(panel.bridge.frameRateCapCalls, [], "Choosing a preset or a limit is a draft")
+      XCTAssertEqual(panel.bridge.renderScaleCalls, [])
+      _ = try await panel.js("document.querySelector('#welcome [data-action=\"savePerformance\"]').click();")
+      try await panel.waitJS("document.querySelector('#welcome .welcome-page')?.dataset.step === 'preferences'")
+      XCTAssertEqual(panel.bridge.renderScaleCalls, [0.5], "The Low preset's render scale is kept")
+      XCTAssertEqual(panel.bridge.frameRateCapCalls, [24], "The slider replaces the preset's limit")
+
+      // Preferences are drafts: nothing reaches native until Continue.
       let preferences = try await panel.js("""
         const region = document.getElementById('welcome');
-        region.querySelector('input[data-pref="pauseOnBattery"]').click();
+        const select = region.querySelector('select[data-pref="batteryMode"]');
+        select.value = 'pause';
+        select.dispatchEvent(new Event('change', { bubbles: true }));
         await new Promise(resolve => setTimeout(resolve, 30));
-        return { prefs: region.querySelectorAll('input[data-pref]').length, checked: region.querySelector('input[data-pref="pauseOnBattery"]').checked };
+        return { prefs: region.querySelectorAll('[data-pref]').length, value: select.value };
         """) as? [String: Any]
-      XCTAssertEqual(preferences?["prefs"] as? Int, 4)
-      XCTAssertEqual(preferences?["checked"] as? Bool, true)
-      XCTAssertEqual(panel.bridge.pauseOnBatteryCalls, [], "Toggling a switch is a draft")
+      XCTAssertEqual(preferences?["prefs"] as? Int, 3)
+      XCTAssertEqual(preferences?["value"] as? String, "pause")
+      XCTAssertEqual(panel.bridge.batteryModeCalls, [], "Changing the menu is a draft")
 
       // The lock screen is off by default and, unlike the drafts, applies at once. This fixture
       // has no lock-screen service, so native refuses: the switch stays off and the reason shows.
@@ -905,9 +942,9 @@ final class ControlPanelShellTests: ControlPanelTestCase {
       XCTAssertEqual(lock?["unavailable"] as? [String: Bool], ["checked": false, "disabled": true])
       XCTAssertEqual(lock?["checked"] as? Bool, false, "A refused change does not leave the switch on")
       XCTAssertFalse((lock?["error"] as? String ?? "").isEmpty, "The refusal is shown on the page")
-      XCTAssertEqual(panel.bridge.pauseOnBatteryCalls, [], "Applying the lock screen does not commit the drafts")
+      XCTAssertEqual(panel.bridge.batteryModeCalls, [], "Applying the lock screen does not commit the drafts")
       _ = try await panel.js("document.querySelector('#welcome [data-action=\"savePreferences\"]').click();")
-      try await panel.waitUntil { panel.bridge.pauseOnBatteryCalls == [true] }
+      try await panel.waitUntil { panel.bridge.batteryModeCalls == [.pause] }
       try await panel.waitJS("document.querySelector('#welcome .welcome-page')?.dataset.step === 'tips'")
 
       // Tips: three lines, then the compatibility note with its GitHub links through the same allowlist as every other link.
@@ -964,7 +1001,7 @@ final class ControlPanelShellTests: ControlPanelTestCase {
         const region = document.getElementById('welcome');
         const reopened = !region.hidden && region.querySelector('.welcome-page').dataset.step === 'language';
         const before = window.powerProbe.received.length;
-        region.querySelector('[data-action="go"][data-step="4"]').click();
+        region.querySelector('[data-action="go"][data-step="5"]').click();
         const last = region.querySelector('.welcome-page').dataset.step;
         region.querySelector('[data-action="finish"]').click();
         await new Promise(resolve => setTimeout(resolve, 150));
@@ -1019,7 +1056,7 @@ final class ControlPanelShellTests: ControlPanelTestCase {
       try await panel.waitJS("Math.round(window.innerWidth) === 760")
       let result = try await panel.js("""
         const base = await window.webkit.messageHandlers.native.postMessage({action:'ready'});
-        const state = {...base, page:'settings', settings:{...base.settings, batteryProfileEnabled:true, batteryTargetFps:30}};
+        const state = {...base, page:'settings', settings:{...base.settings, batteryMode:'reducedQuality', batteryTargetFps:30}};
         window.wallpaperUI.receive(state);
         document.querySelector('[data-section="performance"]').click();
         const details = document.querySelector('[data-key="performance-context"]');
@@ -1226,7 +1263,7 @@ final class ControlPanelShellTests: ControlPanelTestCase {
       """
       const region = document.getElementById('welcome');
       if (!region.hidden) {
-        region.querySelector('[data-action="go"][data-step="4"]').click();
+        region.querySelector('[data-action="go"][data-step="5"]').click();
         const finish = region.querySelector('[data-action="finish"]');
         if (!finish || finish.disabled || !finish.getClientRects().length)
           throw new Error('Welcome Finish is not available');
