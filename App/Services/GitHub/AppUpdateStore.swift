@@ -51,6 +51,16 @@ final class AppUpdateStore {
         return await task.value
     }
 
+    /// The unattended path the app runs at launch and on a schedule. When the new version
+    /// can replace this copy in place it is downloaded too, so the prompt that follows is a
+    /// one-click restart. A copy outside Applications stops at `.available`: downloading
+    /// there opens the disk image in Finder, which only a user who asked should see.
+    func checkAndDownloadInBackground() async -> AppUpdateState {
+        let checked = await checkForUpdates()
+        guard case .available = checked, installer.canInstallInPlace else { return checked }
+        return await downloadUpdate()
+    }
+
     func downloadUpdate() async -> AppUpdateState {
         if let downloadTask { return await downloadTask.value }
         guard case .available(_, let version) = state, let release = available, release.version.display == version else {

@@ -358,8 +358,24 @@ written by the model during Build.
 **Settings -> About** is the in-app update surface. It checks the repository's
 latest GitHub Release and, after confirmation, downloads the disk image and
 restart-installs the app from it. **Check for Updates…** in the application menu
-opens that section and starts the same check. The contract it relies on:
+opens that section and starts the same check.
 
+The app also checks on its own, once the library has loaded (whether or not it
+loaded cleanly) and every six hours after, since a menu-bar app can run for weeks.
+When the copy can be replaced in place, a newer version is downloaded in the
+background and one alert offers **Restart to Update** or **Later**; elsewhere the
+alert offers **View Update**, which opens About, because a download there opens
+the image in Finder. Each version prompts once per launch. After **Later**, the
+status menu keeps **Restart to Update to x.y.z** (or **WallpaperMachine x.y.z
+Available…**) until the app restarts. This path ships from 1.0.1; 1.0.0 only
+checks silently at launch and shows the result in About.
+
+The contract it relies on:
+
+- the repository is `WallpaperMachine/WallpaperMachine`
+  (`AppUpdateConfiguration.repository`). 1.0.0 and older still ask for
+  `bobbyhuang-dev/WallpaperMachine` and reach it only through GitHub's rename
+  redirect, so never create a repository at that old path;
 - the release is not a draft or prerelease, and its tag parses as `vx.y.z` (no
   prerelease suffixes, no `nightly`);
 - the asset named exactly `WallpaperMachine-<x.y.z>-arm64.dmg` — what

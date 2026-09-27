@@ -25,6 +25,14 @@ move the oldest entries verbatim into
 (or a new dated archive file) first, and promote anything durable before it
 goes. Trimming is allowed; editing an entry's recorded result is not.
 
+## 2026-09-27 — Automatic update check, background download and prompt
+
+- Live smoke (shipped 1.0.0 client code): GitHub API via bobbyhuang-dev rename redirect -> v1.0.0, asset WallpaperMachine-1.0.0-arm64.dmg downloaded (33426526 B, sha256 verified), hdiutil attach + ditto extract + validate passed.
+- Live smoke: new repository constant WallpaperMachine/WallpaperMachine resolves latest release and selects the arm64 dmg.
+- python3 scripts/test.py --only AppUpdateTests: 30 passed (new testBackgroundUpdateDownloadsOnlyWhatItCanInstallInPlace).
+- python3 scripts/test.py: 645 passed, 0 failed, 11 skipped.
+- Not exercised: the NSAlert prompt, status-menu item and 6-hour schedule in the running app (no desktop run authorized); no Release build.
+
 ## 2026-09-27 — Launch crash: CopyPass left prepared across render-scale rebuild
 
 - Cause: crash reports 2026-09-27 13:45-13:48 SIGSEGV in MVKCmdCopyImage::validate from CopyPass::execute after 'render scale applied: 0.750'; CopyPass::destory was a no-op, so applyRenderScale re-prepared every pass except the copy, which kept freed image handles.
@@ -97,9 +105,3 @@ goes. Trimming is allowed; editing an entry's recorded result is not.
 - python3 scripts/test.py: 630 passed, 0 failed, 11 skipped (641). First attempt failed to compile on a concurrent AppDelegate edit (startWallpaperEnergyRecorder) by another author; rerun after it landed.
 - ControlPanelShellTests welcome walkthrough: 6 steps; Performance page defaults to High with Native refresh rate readout; Low + 24 fps slider stays draft, Continue sends renderScale 0.5 and frameRateCap 24.
 - Not checked: visual layout of the welcome Performance page on a real display; no desktop run or Release build.
-
-## 2026-09-27 — Release build
-
-- python3 scripts/test.py: 630 passed, 0 failed, 11 skipped
-- python3 scripts/build.py --configuration Release: OK
-- Bundled WebUI matches WebUI/

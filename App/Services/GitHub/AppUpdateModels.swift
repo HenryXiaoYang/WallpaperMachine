@@ -1,7 +1,7 @@
 import Foundation
 
 enum AppUpdateConfiguration {
-    static let repository = "bobbyhuang-dev/WallpaperMachine"
+    static let repository = "WallpaperMachine/WallpaperMachine"
     static let bundleIdentifier = "app.wallpapermachine"
     static let productName = "WallpaperMachine"
     static let applicationName = productName + ".app"

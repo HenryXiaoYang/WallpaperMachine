@@ -739,6 +739,69 @@
         "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "检查更新…"}}
       }
     },
+    "WallpaperMachine %@ is ready to install" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {"stringUnit" : {"state" : "translated", "value" : "WallpaperMachine %@ is ready to install"}},
+        "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "WallpaperMachine %@ 已可安装"}}
+      }
+    },
+    "It has been downloaded. WallpaperMachine quits and reopens to finish installing it." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {"stringUnit" : {"state" : "translated", "value" : "It has been downloaded. WallpaperMachine quits and reopens to finish installing it."}},
+        "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "新版本已下载。WallpaperMachine 会退出并重新打开以完成安装。"}}
+      }
+    },
+    "Restart to Update" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {"stringUnit" : {"state" : "translated", "value" : "Restart to Update"}},
+        "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "重启并更新"}}
+      }
+    },
+    "Restart to Update to %@" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {"stringUnit" : {"state" : "translated", "value" : "Restart to Update to %@"}},
+        "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "重启并更新到 %@"}}
+      }
+    },
+    "WallpaperMachine %@ is available" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {"stringUnit" : {"state" : "translated", "value" : "WallpaperMachine %@ is available"}},
+        "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "WallpaperMachine %@ 已发布"}}
+      }
+    },
+    "WallpaperMachine %@ Available…" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {"stringUnit" : {"state" : "translated", "value" : "WallpaperMachine %@ Available…"}},
+        "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "WallpaperMachine %@ 可更新…"}}
+      }
+    },
+    "See what's new and download it in Settings." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {"stringUnit" : {"state" : "translated", "value" : "See what's new and download it in Settings."}},
+        "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "可在“设置”中查看新内容并下载。"}}
+      }
+    },
+    "View Update" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {"stringUnit" : {"state" : "translated", "value" : "View Update"}},
+        "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "查看更新"}}
+      }
+    },
+    "Later" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {"stringUnit" : {"state" : "translated", "value" : "Later"}},
+        "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "稍后"}}
+      }
+    },
     "Check Again" : {
       "extractionState" : "manual",
       "localizations" : {

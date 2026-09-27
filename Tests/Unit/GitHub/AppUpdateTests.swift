@@ -303,6 +303,29 @@ final class AppUpdateTests: XCTestCase {
         XCTAssertEqual(inPlace.revealed, [inPlace.destination])
     }
 
+    func testBackgroundUpdateDownloadsOnlyWhatItCanInstallInPlace() async {
+        let inPlace = Fixture()
+        inPlace.client.release = inPlace.release(version: "1.1.0")
+        await expect(inPlace.store.checkAndDownloadInBackground(), equals: .ready(currentVersion: "1.0.0", availableVersion: "1.1.0"))
+        XCTAssertEqual(inPlace.client.downloadCalls, 1)
+        // A later scheduled run keeps the downloaded update instead of fetching it again.
+        await expect(inPlace.store.checkAndDownloadInBackground(), equals: .ready(currentVersion: "1.0.0", availableVersion: "1.1.0"))
+        XCTAssertEqual(inPlace.client.downloadCalls, 1)
+
+        // Outside Applications a download would pop the disk image open in Finder unasked.
+        let elsewhere = Fixture()
+        elsewhere.installer.canInstallInPlace = false
+        elsewhere.client.release = elsewhere.release(version: "1.1.0")
+        await expect(elsewhere.store.checkAndDownloadInBackground(), equals: .available(currentVersion: "1.0.0", availableVersion: "1.1.0"))
+        XCTAssertEqual(elsewhere.client.downloadCalls, 0)
+        XCTAssertTrue(elsewhere.opened.isEmpty)
+
+        let current = Fixture()
+        current.client.release = current.release(version: "1.0.0")
+        await expect(current.store.checkAndDownloadInBackground(), equals: .upToDate(currentVersion: "1.0.0"))
+        XCTAssertEqual(current.client.downloadCalls, 0)
+    }
+
     func testDownloadProgressIsClampedAndInstallRequiresReadyState() async {
         XCTAssertEqual(AppUpdateProgress.clamped(transferred: 1_500, total: 1_000, rate: 500).percent, 100)
         XCTAssertEqual(AppUpdateProgress.clamped(transferred: 1_500, total: 1_000, rate: 500).transferred, 1_000)

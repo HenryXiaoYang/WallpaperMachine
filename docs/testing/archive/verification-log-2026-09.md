@@ -15,6 +15,12 @@ renderer behaviour and known-failing tests into
 [../renderer.md](../renderer.md), build and code-signing traps into
 [../../build.md](../../build.md).
 
+## 2026-09-27 — Release build
+
+- python3 scripts/test.py: 630 passed, 0 failed, 11 skipped
+- python3 scripts/build.py --configuration Release: OK
+- Bundled WebUI matches WebUI/
+
 ## 2026-09-27 — Settings energy readout (coalition CPU/GPU energy)
 
 - Full gate python3 scripts/test.py: 630 passed, 0 failed, 11 skipped (Tests-20260927-024741-849396).

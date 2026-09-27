@@ -9,6 +9,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private let controlPanelNavigation = ControlPanelNavigation()
     private lazy var workshopStore = WorkshopStore()
     private lazy var appUpdater = AppUpdateStore()
+    private var automaticUpdates: Task<Void, Never>?
+    /// The version the unattended check last prompted for; "Later" holds until the next launch.
+    private var promptedUpdateVersion: String?
     private var displayChangeObserver: NSObjectProtocol?
     private var desktopWallpaperSync: DesktopWallpaperSync?
     private var desktopMediaSession: DesktopMediaSession?
@@ -451,6 +454,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 sender.reply(toApplicationShouldTerminate: false)
                 return
             }
+            automaticUpdates?.cancel()
             appUpdater.cancel()
             await workshopStore.steamCMDSetup.shutdown()
             await workshopStore.downloader.shutdown()
@@ -666,6 +670,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             actions.forEach(menu.addItem)
         }
 
+        if let item = updateMenuItem() {
+            menu.addItem(.separator())
+            menu.addItem(item)
+        }
+
         if let error = startupError ?? lastError {
             menu.addItem(.separator())
             menu.addItem(disabledMenuItem(error.localizedDescription))
@@ -703,6 +712,80 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         controlPanelNavigation.revealSettingsSection(.about)
         showControlPanel(selection: .settings)
         Task { _ = await appUpdater.checkForUpdates() }
+    }
+
+    /// Checks at launch and every six hours after, because a menu-bar app can run for weeks
+    /// without relaunching. `Task.sleep` follows the continuous clock, so a Mac that slept
+    /// through the interval checks as soon as it wakes.
+    private func startAutomaticUpdates() {
+        guard automaticUpdates == nil else { return }
+        automaticUpdates = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.runAutomaticUpdate()
+                try? await Task.sleep(for: .seconds(6 * 60 * 60))
+            }
+        }
+    }
+
+    private func runAutomaticUpdate() async {
+        let state = await appUpdater.checkAndDownloadInBackground()
+        rebuildMenu()
+        guard !shutdownInProgress, !shutdownComplete,
+              let version = state.availableVersion, version != promptedUpdateVersion else { return }
+        switch state {
+        case .ready:
+            promptedUpdateVersion = version
+            promptUpdate(
+                title: String(localized: "WallpaperMachine \(version) is ready to install"),
+                detail: String(localized: "It has been downloaded. WallpaperMachine quits and reopens to finish installing it."),
+                confirm: String(localized: "Restart to Update"),
+                confirmed: installDownloadedUpdate)
+        case .available, .manual:
+            promptedUpdateVersion = version
+            promptUpdate(
+                title: String(localized: "WallpaperMachine \(version) is available"),
+                detail: String(localized: "See what's new and download it in Settings."),
+                confirm: String(localized: "View Update"),
+                confirmed: showUpdate)
+        default:
+            break
+        }
+    }
+
+    private func promptUpdate(title: String, detail: String, confirm: String, confirmed: () -> Void) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = detail
+        alert.addButton(withTitle: confirm)
+        alert.addButton(withTitle: String(localized: "Later"))
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn, !shutdownInProgress else { return }
+        confirmed()
+    }
+
+    /// "Later" leaves the update one click away in the status menu.
+    private func updateMenuItem() -> NSMenuItem? {
+        switch appUpdater.state {
+        case .ready(_, let version):
+            return menuItem("Restart to Update to \(version)", action: #selector(installDownloadedUpdate))
+        case .available(_, let version), .manual(_, let version):
+            return menuItem("WallpaperMachine \(version) Available…", action: #selector(showUpdate))
+        default:
+            return nil
+        }
+    }
+
+    @objc private func installDownloadedUpdate() {
+        Task {
+            await appUpdater.installUpdate()
+            // A failed install explains itself, and offers GitHub Releases, in About.
+            if case .error = appUpdater.state { showUpdate() }
+        }
+    }
+
+    @objc private func showUpdate() {
+        controlPanelNavigation.revealSettingsSection(.about)
+        showControlPanel(selection: .settings)
     }
 
     private func showControlPanel(selection: SidebarSelection) {
@@ -824,9 +907,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 playbackSnapshotCurrent = false
             }
             rebuildMenu()
-            if startupError == nil, lastError == nil {
-                Task { _ = await appUpdater.checkForUpdates() }
-            }
+            // Also after a failed start: the update may be the fix.
+            startAutomaticUpdates()
         }
     }
 
