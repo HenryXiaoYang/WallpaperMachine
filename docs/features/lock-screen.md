@@ -72,8 +72,9 @@ immediately. An error stops automatic monitoring until an explicit retry or
 another existing refresh path succeeds.
 
 Recovery entries represent the last successful journal commit. Repeated checks
-do not rewrite an unchanged journal, but still read the actual system store to
-detect new Spaces and external selections. A revision-only store update may
+  do not rewrite an unchanged journal, but still read the actual system store to
+  detect new Spaces and external selections. Unchanged inputs skip the
+  compatibility check. A revision-only store update may
 still require a wallpaper-service reload without rewriting the journal. The
 recovery union is persisted before changing the store, and pruned only after a
 successful reload; failed writes, reloads or journal removal retain recovery

@@ -24,6 +24,7 @@
 #include "RenderGraph/RenderGraph.hpp"
 #include "VulkanRender/CopyElision.hpp"
 #include "VulkanRender/StaticSubgraphCache.hpp"
+#include "VulkanRender/UnchangedPresent.hpp"
 
 #include "Image.hpp"
 #include "Interface/IImageParser.h"
@@ -1160,6 +1161,11 @@ struct MetalRender::Impl
     /// Whether the graph currently compiled has produced a frame. A poster
     /// composed before that would publish an empty image as the wallpaper.
     bool               frame_drawn { false };
+    /// The last composition that actually reached the layer, and scratch for
+    /// the frame being decided. A frame whose passes were all reused and whose
+    /// composition inputs match takes no drawable and presents nothing.
+    vulkan::UnchangedPresentGate present_gate;
+    vulkan::PresentationKey      present_key;
 
     // ---- host configuration
     uint32_t             output_width { 0 };
@@ -1525,6 +1531,7 @@ struct MetalRender::Impl
     bool fail(std::string message)
     {
         last_error = std::move(message);
+        present_gate.Invalidate();
         LOG_ERROR("metal render: %s", last_error.c_str());
         return false;
     }
@@ -1678,6 +1685,7 @@ void MetalRender::Impl::releaseGraph()
     poster.invalidate();
     releaseSceneOptimization();
     frame_drawn = false;
+    present_gate.Invalidate();
     descriptions.clear();
     prepared.clear();
     targets.clear();
@@ -1716,6 +1724,7 @@ void MetalRender::Impl::releasePresentation()
     // reconfiguration has released the surface.
     poster.invalidate();
     frame_drawn              = false;
+    present_gate.Invalidate();
     present_library          = nil;
     present_vertices         = nil;
     present_vertices_flipped = nil;
@@ -1725,6 +1734,7 @@ void MetalRender::Impl::releasePresentation()
 
 bool MetalRender::Impl::buildPresentation()
 {
+    present_gate.Invalidate();
     NSError* error = nil;
     NSString* source =
         [[NSString alloc] initWithBytes:kPresentShaderSource.data()
@@ -3493,6 +3503,9 @@ bool MetalRender::Impl::applySceneOptimizationSetting(Scene& scene, id<MTLComman
 {
     const bool enabled = vulkan::SceneOptimizationEnabled();
     if (enabled == optimization_applied) return true;
+    // Targets are reallocated and cleared in this frame's own command buffer,
+    // so the frame after a change always composes and presents.
+    present_gate.Invalidate();
     if (! graph_ready) {
         optimization_applied = enabled;
         return true;
@@ -4105,16 +4118,30 @@ bool MetalRender::ApplyRenderScale(Scene& scene, rg::RenderGraph& graph, double 
 void MetalRender::UpdateCameraFillMode(Scene& scene, FillMode fillmode)
 {
     vulkan::ApplyCameraFillMode(scene, fillmode, pImpl->output_width, pImpl->output_height);
+    // The camera moved: reuse signatures see it, but the gate must not let a
+    // frame decided before that change stand in for one after it.
+    pImpl->present_gate.Invalidate();
 }
 
-void MetalRender::SetWallpaperScalingMode(WallpaperScalingMode mode) { pImpl->scaling_mode = mode; }
+void MetalRender::SetWallpaperScalingMode(WallpaperScalingMode mode)
+{
+    pImpl->scaling_mode = mode;
+    pImpl->present_gate.Invalidate();
+}
 
 void MetalRender::SetWallpaperScalingFactor(double factor)
 {
     pImpl->scaling_factor = NormalizeScaleFactor(factor);
+    pImpl->present_gate.Invalidate();
 }
 
-void MetalRender::SetWallpaperHorizontalFlip(bool enabled) { pImpl->horizontal_flip = enabled; }
+void MetalRender::SetWallpaperHorizontalFlip(bool enabled)
+{
+    pImpl->horizontal_flip = enabled;
+    pImpl->present_gate.Invalidate();
+}
+
+void MetalRender::InvalidatePresentedFrame() { pImpl->present_gate.Invalidate(); }
 
 void MetalRender::SetVideoPlaybackPaused(bool paused)
 {
@@ -4175,18 +4202,13 @@ bool MetalRender::drawFrame(Scene& scene, bool* presented)
         auto& impl = *pImpl;
 
         // Bounds how far the CPU may run ahead. Released by the completion
-        // handler below, never by waiting on the command buffer.
+        // handler below, never by waiting on the command buffer. Taken before
+        // the uniform writes, because they fill this frame's ring slot.
         dispatch_semaphore_wait(impl.inflight, DISPATCH_TIME_FOREVER);
 
-        id<CAMetalDrawable> drawable = [impl.layer nextDrawable];
-        if (drawable == nil) {
-            // The layer has no drawable to give right now. Nothing was
-            // submitted, so nothing will signal; release the slot here. Not a
-            // failure, and not a frame either: `presented` stays false so the
-            // caller does not count this tick as one the surface received.
-            dispatch_semaphore_signal(impl.inflight);
-            return true;
-        }
+        // The drawable is taken only after the passes are encoded, at the
+        // point the composition needs it: a frame whose passes were all reused
+        // and whose composition would be identical takes none at all.
 
         id<MTLCommandBuffer> command = [impl.queue commandBuffer];
         if (command == nil) {
@@ -4671,6 +4693,67 @@ bool MetalRender::drawFrame(Scene& scene, bool* presented)
         impl.last_frame_encodes = impl.frame_encodes;
 
         // ---- presentation
+        // What the composition reads besides the scene output's own pixels,
+        // compared exactly with what the last presented composition read.
+        const CGSize drawable_size = impl.layer.drawableSize;
+        const auto   drawable_width  = static_cast<uint32_t>(std::max(1.0, drawable_size.width));
+        const auto   drawable_height = static_cast<uint32_t>(std::max(1.0, drawable_size.height));
+        const auto   composed_output =
+            impl.targets.find(scene.ResolveRenderTargetName(SpecTex_Default));
+        const auto layout = impl.scalingLayout(scene, drawable_width, drawable_height);
+        impl.present_key.Clear();
+        impl.present_key.AddPointer((__bridge const void*)impl.layer);
+        impl.present_key.Add(drawable_width);
+        impl.present_key.Add(drawable_height);
+        impl.present_key.Add(static_cast<uint64_t>(impl.layer.pixelFormat));
+        impl.present_key.AddPointer(composed_output != impl.targets.end()
+                                        ? (__bridge const void*)composed_output->second
+                                        : nullptr);
+        impl.present_key.Add(static_cast<uint64_t>(static_cast<uint32_t>(layout.viewport_px.x)));
+        impl.present_key.Add(static_cast<uint64_t>(static_cast<uint32_t>(layout.viewport_px.y)));
+        impl.present_key.Add(static_cast<uint64_t>(static_cast<uint32_t>(layout.viewport_px.width)));
+        impl.present_key.Add(static_cast<uint64_t>(static_cast<uint32_t>(layout.viewport_px.height)));
+        impl.present_key.Add(static_cast<uint64_t>(static_cast<uint32_t>(layout.scissor_px.x)));
+        impl.present_key.Add(static_cast<uint64_t>(static_cast<uint32_t>(layout.scissor_px.y)));
+        impl.present_key.Add(static_cast<uint64_t>(static_cast<uint32_t>(layout.scissor_px.width)));
+        impl.present_key.Add(static_cast<uint64_t>(static_cast<uint32_t>(layout.scissor_px.height)));
+        impl.present_key.Add(impl.horizontal_flip ? 1u : 0u);
+
+        // Every pass reused or drawing nothing, no feedback trade and no video
+        // to import: the scene output holds exactly the pixels the last
+        // composition read. With identical composition inputs, composing and
+        // presenting again would put the same picture back.
+        const bool nothing_encoded = impl.frame_encodes.render_passes == 0 &&
+                                     impl.frame_encodes.blit_passes == 0 &&
+                                     impl.frame_swaps.empty() && impl.video.empty();
+        if (vulkan::SceneOptimizationEnabled() && nothing_encoded &&
+            impl.present_gate.Matches(impl.present_key, {})) {
+            // The buffer holds nothing and is dropped uncommitted, so the slot
+            // is released here and the uniform ring does not advance: the next
+            // frame rewrites the slot this one filled, which no GPU work reads.
+            // A pending poster is served by the poster request itself, which
+            // composes the retained output without a frame.
+            dispatch_semaphore_signal(impl.inflight);
+            if (impl.counters != nullptr) impl.counters->Add(OWE_RC_PRESENTS_SKIPPED_UNCHANGED);
+            return true;
+        }
+
+        id<CAMetalDrawable> drawable = [impl.layer nextDrawable];
+        if (drawable == nil) {
+            // The layer has no drawable to give right now. The passes already
+            // encoded still run, so the targets and the reuse plan agree, but
+            // nothing reaches the surface: `presented` stays false and the
+            // next frame presents whatever it would have.
+            impl.present_gate.Invalidate();
+            dispatch_semaphore_t semaphore = impl.inflight;
+            [command addCompletedHandler:^(id<MTLCommandBuffer>) {
+              dispatch_semaphore_signal(semaphore);
+            }];
+            [command commit];
+            impl.frame_slot  = (impl.frame_slot + 1) % kFramesInFlight;
+            impl.frame_drawn = true;
+            return true;
+        }
         impl.encodeComposition(command, drawable.texture, scene);
 
         // The poster draws the same composition into a texture this process
@@ -4694,6 +4777,13 @@ bool MetalRender::drawFrame(Scene& scene, bool* presented)
 
         impl.frame_slot = (impl.frame_slot + 1) % kFramesInFlight;
         impl.frame_drawn = true;
+        // With scene optimisation off nothing is remembered, so turning it
+        // back on starts from a real present.
+        if (vulkan::SceneOptimizationEnabled()) {
+            impl.present_gate.Record(impl.present_key, {});
+        } else {
+            impl.present_gate.Invalidate();
+        }
         // Published here, on the thread that owns the pass table, so the host
         // reads a value rather than a table another thread is rewriting.
         impl.reported_path.store(impl.framePathReport(planes_enabled));

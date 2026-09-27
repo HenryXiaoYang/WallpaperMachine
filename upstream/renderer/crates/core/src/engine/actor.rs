@@ -137,6 +137,18 @@ impl EngineActor {
 
     pub fn publish_snapshot(&self) {
         self.snapshots.publish(self.state.snapshot());
+        // Every state change passes here, so a rebuilt or closed renderer
+        // drops out of the set without a path of its own.
+        self.snapshots.audio_requirement().publish(self.state.audio_requiring_handles());
+        self.signal_pending_pointer_sample();
+    }
+
+    /// The sampler waits for input, so a scene whose pointer delivery was
+    /// reset without the cursor moving asks for one sample here.
+    fn signal_pending_pointer_sample(&self) {
+        if self.state.pointer_sample_pending() {
+            self.snapshots.signal_pointer_input();
+        }
     }
 
     fn with_snapshot_update<T>(
@@ -271,10 +283,26 @@ impl EngineActor {
         self.state.scene_mut(handle)?.set_mouse_entered(entered)
     }
 
-    pub fn set_all_paused(&mut self, paused: bool) -> Result<(), EngineError> {
-        let handles: Vec<SceneHandle> = self.state.active_runtime_handles().collect();
+    /// Applies the global pause target to every open scene in one pass. A scene
+    /// on a display in `suspended_displays` stays paused on a global resume,
+    /// so it never runs between the resume and its own re-suspension.
+    pub fn set_all_paused(&mut self, paused: bool, suspended_displays: &[u32]) -> Result<(), EngineError> {
+        let targets: Vec<(SceneHandle, bool)> = self
+            .state
+            .display_records
+            .iter()
+            .filter(|record| record.runtime.is_some())
+            .filter_map(|record| {
+                let suspended = record
+                    .model
+                    .live_display
+                    .as_ref()
+                    .is_some_and(|display| suspended_displays.contains(&display.display_id));
+                Some((record.handle?, paused || suspended))
+            })
+            .collect();
 
-        for handle in handles {
+        for (handle, paused) in targets {
             self.set_paused(handle, paused)?;
         }
 
@@ -406,7 +434,9 @@ impl EngineActor {
         operation: impl FnOnce(&mut SceneRuntime) -> Result<(), EngineError>,
     ) -> Result<(), EngineError> {
         let runtime = self.state.scene_mut(handle)?;
-        operation(runtime)?;
+        let result = operation(runtime);
+        self.signal_pending_pointer_sample();
+        result?;
         self.state.record_runtime_state(handle)
     }
 
@@ -790,7 +820,7 @@ impl Message<messages::SetAllPaused> for EngineActor {
         msg: messages::SetAllPaused,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.with_snapshot_update(|actor| actor.set_all_paused(msg.paused))
+        self.with_snapshot_update(|actor| actor.set_all_paused(msg.paused, &msg.suspended_displays))
     }
 }
 
@@ -993,7 +1023,24 @@ impl Message<messages::NativePointerInputChanged> for EngineActor {
         let changed = self.state.scene_mut(msg.handle).is_ok_and(|runtime| {
             runtime.apply_pointer_input_capability(&msg.renderer_instance, msg.accepts_pointer_input)
         });
-        if changed { self.publish_snapshot(); }
+        if changed { self.publish_snapshot(); } else { self.signal_pending_pointer_sample(); }
+    }
+}
+
+impl Message<messages::NativeAudioRequirementChanged> for EngineActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: messages::NativeAudioRequirementChanged,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) {
+        let changed = self.state.scene_mut(msg.handle).is_ok_and(|runtime| {
+            runtime.apply_audio_requirement(&msg.renderer_instance, msg.requires_audio)
+        });
+        if changed {
+            self.publish_snapshot();
+        }
     }
 }
 

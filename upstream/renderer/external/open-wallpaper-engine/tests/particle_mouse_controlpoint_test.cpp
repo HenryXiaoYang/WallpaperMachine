@@ -29,7 +29,8 @@ public:
     void GenGLData(std::span<const std::unique_ptr<ParticleInstance>> instances,
                    SceneMesh&,
                    ParticleRawGenSpecOp&,
-                   ParticleRenderScale render_scale) override {
+                   ParticleRenderScale render_scale,
+                   ParticleOverflowFlags&) override {
         last_render_scale = render_scale;
         particles.clear();
         for (const auto& instance : instances) {

@@ -27,6 +27,8 @@ typedef void (*owe_first_frame_callback)(void* user_data);
 typedef void (*owe_first_frame_callback_drop)(void* user_data);
 typedef void (*owe_pointer_input_callback)(void* user_data, bool accepts_pointer_input);
 typedef void (*owe_pointer_input_callback_drop)(void* user_data);
+typedef void (*owe_audio_requirement_callback)(void* user_data, bool requires_audio);
+typedef void (*owe_audio_requirement_callback_drop)(void* user_data);
 
 /*
  * One `engine.openUserShortcut` request: the property the wallpaper named and
@@ -152,6 +154,22 @@ int owe_scene_wallpaper_set_pointer_input_callback(
 int owe_scene_wallpaper_set_user_shortcut_callback(
     owe_scene_wallpaper* scene, owe_user_shortcut_callback callback, void* user_data,
     owe_user_shortcut_callback_drop drop_user_data);
+
+/*
+ * Reports whether the committed scene reads system audio (audio-processing
+ * materials or particles, g_AudioSpectrum* uniforms, registerAudioBuffers), on
+ * the native main looper, with an immediate replay there when installed, then
+ * only on changes. A newly committed scene reports false until it marks itself;
+ * the mark is monotonic for that scene, and a late mark from a replaced scene
+ * is dropped. Plain video projects never report true. Optional: a host that
+ * does not install it is unaffected. Requires an initialized scene. Success
+ * transfers user_data ownership to drop_user_data; failure does not.
+ * Replacing/clearing keeps old userdata alive until its last queued/in-flight
+ * callback is released. A null callback clears notifications.
+ */
+int owe_scene_wallpaper_set_audio_requirement_callback(
+    owe_scene_wallpaper* scene, owe_audio_requirement_callback callback, void* user_data,
+    owe_audio_requirement_callback_drop drop_user_data);
 
 /* Direct mouse/pointer forwarding to SceneWallpaper. Coordinates are normalized canvas space. */
 int owe_scene_wallpaper_mouse_input(owe_scene_wallpaper* scene, double x, double y);

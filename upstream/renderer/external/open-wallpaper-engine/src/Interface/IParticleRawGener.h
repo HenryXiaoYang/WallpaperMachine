@@ -48,13 +48,21 @@ inline float EncodeRopeTrailLength(float authored_length, float uv_scale) noexce
     return (authored_length - 1.0f) / RopeUvScaleOrOne(uv_scale) + 1.0f;
 }
 
+/// One subsystem's "already logged" latches. The generator is shared by every
+/// subsystem, so these cannot live on it: one layer overflowing would silence
+/// the log for every other layer, and one layer recovering would re-arm a log
+/// another layer is still overflowing.
+struct ParticleOverflowFlags {
+    bool rope_capacity { false };
+    bool index { false };
+};
 class ParticleInstance;
 class IParticleRawGener {
 public:
     IParticleRawGener()          = default;
     virtual ~IParticleRawGener() = default;
-
     virtual void GenGLData(std::span<const std::unique_ptr<ParticleInstance>>, SceneMesh&,
-                           ParticleRawGenSpecOp&, ParticleRenderScale render_scale) = 0;
+                           ParticleRawGenSpecOp&, ParticleRenderScale render_scale,
+                           ParticleOverflowFlags& overflow_flags) = 0;
 };
 } // namespace wallpaper

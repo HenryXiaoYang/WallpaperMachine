@@ -46,6 +46,7 @@ final class RuntimeDiagnosticsReportTests: XCTestCase {
             presentRequests: presentRequests,
             gpuCompletions: 0,
             simulationTicks: 0,
+            presentsSkippedUnchanged: 0,
             tickIntervalMicros: 16666,
             contentPeriodMicros: 0,
             videoDecodeOutputs: decodeOutputs,

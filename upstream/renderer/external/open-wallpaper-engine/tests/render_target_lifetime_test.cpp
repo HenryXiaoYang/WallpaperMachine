@@ -99,9 +99,10 @@ TEST(RenderTargetLifetime, NestedCompositesClearBeforeChildrenWithoutErasingThem
                 auto outer = Node("outer");
                 auto inner = Node("inner");
                 auto child = Node("child");
-                outer->ID() = 101; inner->ID() = 202; child->ID() = 303;
+                auto sibling = Node("sibling");
+                outer->ID() = 101; inner->ID() = 202; child->ID() = 303; sibling->ID() = 404;
                 outer->SetVisible(visible);
-                outer->AppendChild(inner); inner->AppendChild(child);
+                outer->AppendChild(inner); inner->AppendChild(child); inner->AppendChild(sibling);
                 scene.sceneGraph->AppendChild(outer);
                 for (auto owner : {outer, inner}) {
                     const auto name = owner->Name();
@@ -109,6 +110,9 @@ TEST(RenderTargetLifetime, NestedCompositesClearBeforeChildrenWithoutErasingThem
                     const auto ping_b = std::string(WE_EFFECT_PPONG_PREFIX_B) + name;
                     scene.renderTargets[input] = { .width = dimension, .height = dimension + 1, .allowReuse = true };
                     scene.renderTargets[ping_b] = scene.renderTargets[input];
+                    // Multisampled, so a draw after the transfer clear visibly
+                    // keeps the single-sample path it had while it loaded.
+                    scene.renderTargets[input].sample_count = 4;
                     // Test aliases as well as logical versions of the same key.
                     const auto alias = "_alias_" + name;
                     scene.renderTargetAliases[alias] = input;
@@ -137,9 +141,22 @@ TEST(RenderTargetLifetime, NestedCompositesClearBeforeChildrenWithoutErasingThem
                     }
                     if (auto* draw = dynamic_cast<vulkan::CustomShaderPass*>(graph->getPass(order[i]))) {
                         index[draw->desc().node->Name()] = i;
-                        if (draw->desc().node->Name() == "child" || draw->desc().node->Name() == "inner result") {
+                        const auto& name = draw->desc().node->Name();
+                        // The first draw into a composite cleared to transparent
+                        // opens with that clear (same value, so the separate one is
+                        // redundant); one over a copied background loads it. Every
+                        // draw after the first loads, so nothing drawn is erased.
+                        if (name == "child" || name == "inner result") {
+                            EXPECT_EQ(draw->desc().clear_on_first_use, ! copy_background) << name;
+                            EXPECT_EQ(draw->desc().preserve_target_contents, copy_background) << name;
+                        }
+                        if (name == "sibling") {
                             EXPECT_FALSE(draw->desc().clear_on_first_use);
                             EXPECT_TRUE(draw->desc().preserve_target_contents);
+                        }
+                        if (! copy_background &&
+                            (name == "child" || name == "sibling" || name == "inner result")) {
+                            EXPECT_EQ(draw->desc().sample_count, VK_SAMPLE_COUNT_1_BIT) << name;
                         }
                     }
                 }
@@ -151,7 +168,8 @@ TEST(RenderTargetLifetime, NestedCompositesClearBeforeChildrenWithoutErasingThem
                 // Only a write into the parent's target must follow its clear.
                 EXPECT_LT(index[outer_start], index["inner result"]);
                 EXPECT_LT(index[inner_start], index["child"]);
-                EXPECT_LT(index["child"], index["inner result"]);
+                EXPECT_LT(index["child"], index["sibling"]);
+                EXPECT_LT(index["sibling"], index["inner result"]);
                 EXPECT_LT(index["inner result"], index["outer result"]);
             }
         }

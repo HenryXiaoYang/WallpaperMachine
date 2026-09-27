@@ -901,6 +901,100 @@ TEST_F(MetalSceneDraw, TurningTheOptimisationOffDrawsEveryPassAgain)
     }
 }
 
+TEST_F(MetalSceneDraw, AFrameThatWouldRepeatThePictureTakesNoDrawableAndPresentsNothing)
+{
+    // A static scene: from the second frame every pass is reused, so the
+    // composition would put back exactly the picture already on the layer. That
+    // frame must succeed without a drawable, a commit or a present -- and
+    // anything that changes what the composition reads has to bring the
+    // present back, exactly once.
+    const auto  project = WriteFixture(root_ / "project");
+    LoadedScene loaded;
+    std::string error;
+    ASSERT_TRUE(LoadScene(project, root_ / "cache", loaded, error)) << error;
+    ASSERT_EQ(SelectSceneBackend(*loaded.scene).backend, SceneBackend::NativeMetal);
+
+    RendererCounters::SetEnabled(true);
+    RendererCounters counters;
+    @autoreleasepool {
+        id<MTLDevice> device  = MTLCreateSystemDefaultDevice();
+        CAMetalLayer* layer   = [CAMetalLayer layer];
+        layer.device          = device;
+        layer.pixelFormat     = MTLPixelFormatBGRA8Unorm;
+        layer.drawableSize    = CGSizeMake(640, 360);
+        layer.framebufferOnly = NO;
+
+        MetalRender         render;
+        MetalRenderInitInfo info {
+            .metal_layer          = (__bridge void*)layer,
+            .width                = 640,
+            .height               = 360,
+            .render_width         = 640,
+            .render_height        = 360,
+            .display_scale_factor = 1.0,
+        };
+        ASSERT_TRUE(render.init(info)) << render.lastError();
+        render.SetCounters(&counters);
+        auto graph = sceneToRenderGraph(*loaded.scene);
+        ASSERT_NE(graph, nullptr);
+        ASSERT_TRUE(render.compileRenderGraph(*loaded.scene, *graph)) << render.lastError();
+        render.UpdateCameraFillMode(*loaded.scene, FillMode::ASPECTFIT);
+
+        const auto draw = [&]() {
+            bool presented = false;
+            EXPECT_TRUE(render.drawFrame(*loaded.scene, &presented)) << render.lastError();
+            return presented;
+        };
+        const auto skipped = [&]() { return counters.Get(OWE_RC_PRESENTS_SKIPPED_UNCHANGED); };
+        const auto requests = [&]() { return counters.Get(OWE_RC_PRESENT_REQUESTS); };
+
+        EXPECT_TRUE(draw()) << "the first frame has nothing on the layer to repeat";
+        const auto drawn = ReadOutput(render, *loaded.scene);
+        for (int frame = 0; frame < 5; ++frame) {
+            EXPECT_FALSE(draw()) << "frame " << frame << " repeated the picture and presented it";
+        }
+        EXPECT_EQ(skipped(), 5u);
+        EXPECT_EQ(requests(), 1u) << "a skipped frame was counted as a present request";
+        EXPECT_EQ(ReadOutput(render, *loaded.scene), drawn)
+            << "skipping the present changed what the scene output holds";
+
+        // Each of these changes what the composition reads without touching a
+        // pass, so the next frame presents once and the one after repeats.
+        const std::array<std::function<void()>, 4> changes {
+            [&] { render.SetWallpaperHorizontalFlip(true); },
+            [&] { render.SetWallpaperScalingMode(WallpaperScalingMode::FILL); },
+            [&] { render.SetWallpaperScalingFactor(1.5); },
+            [&] { render.InvalidatePresentedFrame(); },
+        };
+        for (std::size_t i = 0; i < changes.size(); ++i) {
+            changes[i]();
+            EXPECT_TRUE(draw()) << "change " << i << " did not bring the present back";
+            EXPECT_FALSE(draw()) << "change " << i << " presented more than once";
+        }
+        EXPECT_EQ(requests(), 1u + changes.size());
+
+        // A changed layer is new content: it draws and presents.
+        auto* node = FirstDrawableNode(loaded.scene->sceneGraph.get());
+        ASSERT_NE(node, nullptr);
+        node->SetTranslate(Eigen::Vector3f { 96.0f, 64.0f, 0.0f });
+        EXPECT_TRUE(draw()) << "a moved layer was not presented";
+        EXPECT_FALSE(draw());
+
+        // With the optimisation off every frame presents, and switching it back
+        // on starts from a real present rather than from a stale record.
+        wallpaper::vulkan::SetSceneOptimizationEnabled(false);
+        for (int frame = 0; frame < 3; ++frame) {
+            EXPECT_TRUE(draw()) << "a frame was skipped with the setting switched off";
+        }
+        wallpaper::vulkan::SetSceneOptimizationEnabled(true);
+        EXPECT_TRUE(draw()) << "the first frame after turning reuse back on must present";
+        EXPECT_FALSE(draw());
+
+        render.destroy();
+    }
+    RendererCounters::SetEnabled(false);
+}
+
 TEST_F(MetalSceneDraw, GeometryRebuiltEveryFrameIsUploadedAndDrawnFromItsOwnSlot)
 {
     // The particle shape, without a particle system: a mesh marked dynamic,

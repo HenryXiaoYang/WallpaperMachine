@@ -675,6 +675,8 @@ int main() {
             }
             Check(UpdatePreparedPasses(device, rr, frame_passes), "update current frame");
             Begin(rr.command);
+            // As VulkanRender does right after beginning the frame.
+            device.tex_cache().RecordVideoFirstUseTransitions(rr.command);
             Check(vertices.recordUpload(rr.command), "upload vertices");
             Check(dynamic.recordUpload(rr.command), "upload dynamic data");
             // Long samples would otherwise rewrite thousands of intermediate
@@ -682,7 +684,8 @@ int main() {
             const bool dump_passes =
                 std::getenv("WE_TEST_DUMP_PASSES") && frame == frame_count - 1;
             if (!dump_passes)
-                CheckRecording(device, rr, ExecutePreparedPasses(device, rr, frame_passes, scratch));
+                CheckRecording(device, rr,
+                               ExecutePreparedPasses(device, rr, frame_passes, scratch, passes));
             else {
                 int pass_index = 0;
                 for (auto* pass : passes) {

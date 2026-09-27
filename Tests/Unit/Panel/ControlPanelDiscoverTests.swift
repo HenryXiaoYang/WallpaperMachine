@@ -617,8 +617,18 @@ final class ControlPanelDiscoverTests: ControlPanelTestCase {
         const stillOf = id => tile(id)?.querySelector('img.tile-still');
         const liveOf = id => tile(id)?.querySelector('img.tile-live');
         const diagnose = () => ['a', 'b', 'c'].map(id => `${id}: still=${stillOf(id)?.complete}/${stillOf(id)?.naturalWidth} live=${!!liveOf(id)}/${liveOf(id)?.complete}/${liveOf(id)?.naturalWidth} playing=${tile(id)?.classList.contains('playing')}`).join('; ');
+        // The panel samples animation brightness only while its page is visible. This web view
+        // has no window, so WebKit reports the page hidden: first prove nothing is sampled then,
+        // then show the page the way a visibility change would and let the sampling start.
+        let hiddenPlayed = null;
         try {
+          if (!document.hidden) return { error: 'expected a windowless page to report itself hidden' };
           await waitFor(() => ['a', 'b', 'c'].every(id => stillOf(id)?.complete && stillOf(id).naturalWidth > 0), 'stills to load');
+          await waitFor(() => liveOf('a')?.complete && liveOf('a').naturalWidth > 0, 'the bright animation to arrive');
+          await new Promise(resolve => setTimeout(resolve, 600));
+          hiddenPlayed = tile('a').classList.contains('playing');
+          Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });
+          document.dispatchEvent(new Event('visibilitychange'));
           await waitFor(() => tile('a')?.classList.contains('playing'), 'the bright animation to play');
           await waitFor(() => liveOf('b')?.complete && liveOf('b').naturalWidth > 0, 'the black animation to arrive');
         } catch (error) { return { error: `${error.message} — ${diagnose()}` }; }
@@ -628,7 +638,7 @@ final class ControlPanelDiscoverTests: ControlPanelTestCase {
           eagerStills: ['a', 'b', 'c'].every(id => stillOf(id).loading !== 'lazy'),
           aPlaying: tile('a').classList.contains('playing'), aStillKept: !!stillOf('a'),
           bLoaded: !!liveOf('b'), bPlaying: tile('b').classList.contains('playing'),
-          cLive: !!liveOf('c'), cStill: !!stillOf('c'),
+          cLive: !!liveOf('c'), cStill: !!stillOf('c'), hiddenPlayed,
         };
         // Leaving Discover while `a` plays: its Installed tile must show the library still.
         window.wallpaperUI.receive(Object.assign({}, base, { page: 'installed',
@@ -646,6 +656,9 @@ final class ControlPanelDiscoverTests: ControlPanelTestCase {
       result?["stillsFirst"] as? Bool, true,
       "No animation starts before every still on the page has arrived")
     XCTAssertEqual(result?["eagerStills"] as? Bool, true, "Discover stills are not lazy-loaded")
+    XCTAssertEqual(
+      result?["hiddenPlayed"] as? Bool, false,
+      "A hidden page samples no animation brightness, so nothing starts playing")
     XCTAssertEqual(result?["aPlaying"] as? Bool, true, "A bright animation replaces its still")
     XCTAssertEqual(result?["aStillKept"] as? Bool, true, "The still stays underneath for the dark loops")
     XCTAssertEqual(result?["bLoaded"] as? Bool, true, "The black animation loads beneath its still")

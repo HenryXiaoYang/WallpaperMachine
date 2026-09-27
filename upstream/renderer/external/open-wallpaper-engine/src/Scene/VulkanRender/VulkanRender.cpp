@@ -20,6 +20,7 @@
 #include "CustomShaderPass.hpp"
 #include "CopyPass.hpp"
 #include "VulkanRender/StaticSubgraphCache.hpp"
+#include "VulkanRender/UnchangedPresent.hpp"
 #include "VulkanRender/CopyElision.hpp"
 #include "PrePass.hpp"
 #include "FinPass.hpp"
@@ -86,6 +87,68 @@ double NormalizeScaleFactor(double scale_factor) {
     return scale_factor;
 }
 
+/// The largest poster the renderer composes on request, in bytes.
+constexpr std::size_t kPosterByteLimit = 128u * 1024u * 1024u;
+
+/// The image a requested poster is composed into, so the drawable itself is
+/// only ever rendered to. It lives for one frame.
+struct PosterTarget {
+    VmaImageParameters image;
+    vvk::Framebuffer   framebuffer;
+};
+
+/// Allocates an image of the drawable's size and format for `pass` to compose
+/// into. Refused when what was actually allocated exceeds the poster limit.
+bool CreatePosterTarget(const Device& device, VkFormat format, VkExtent3D extent,
+                        VkRenderPass pass, PosterTarget& out) {
+    out = {};
+    if (pass == VK_NULL_HANDLE || extent.width == 0 || extent.height == 0) return false;
+    PosterTarget target;
+    target.image.extent = extent;
+    const VkImageCreateInfo image_info {
+        .sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .imageType     = VK_IMAGE_TYPE_2D,
+        .format        = format,
+        .extent        = extent,
+        .mipLevels     = 1,
+        .arrayLayers   = 1,
+        .samples       = VK_SAMPLE_COUNT_1_BIT,
+        .tiling        = VK_IMAGE_TILING_OPTIMAL,
+        .usage         = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+        .sharingMode   = VK_SHARING_MODE_EXCLUSIVE,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+    };
+    const VmaAllocationCreateInfo allocation { .usage = VMA_MEMORY_USAGE_GPU_ONLY };
+    if (vvk::CreateImage(device.vma_allocator(), image_info, allocation, target.image.handle) !=
+        VK_SUCCESS)
+        return false;
+    VmaAllocationInfo allocated {};
+    vmaGetAllocationInfo(device.vma_allocator(), target.image.handle.Allocation(), &allocated);
+    if (allocated.size > kPosterByteLimit) return false;
+    const VkImageViewCreateInfo view_info {
+        .sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .image            = *target.image.handle,
+        .viewType         = VK_IMAGE_VIEW_TYPE_2D,
+        .format           = format,
+        .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
+    };
+    if (device.handle().CreateImageView(view_info, target.image.view) != VK_SUCCESS) return false;
+    const VkImageView view = *target.image.view;
+    const VkFramebufferCreateInfo framebuffer_info {
+        .sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+        .renderPass      = pass,
+        .attachmentCount = 1,
+        .pAttachments    = &view,
+        .width           = extent.width,
+        .height          = extent.height,
+        .layers          = 1,
+    };
+    if (device.handle().CreateFramebuffer(framebuffer_info, target.framebuffer) != VK_SUCCESS)
+        return false;
+    out = std::move(target);
+    return true;
+}
+
 } // namespace
 
 struct VulkanRender::Impl {
@@ -98,7 +161,7 @@ struct VulkanRender::Impl {
     bool releasePresentation();
     void destroy();
 
-    bool drawFrame(Scene&);
+    bool drawFrame(Scene&, bool* presented);
     VkResult quiesceFrame(bool wait_for_presentation = false);
     VkResult resetRecordings();
     bool failFrame(VkResult result);
@@ -129,6 +192,13 @@ struct VulkanRender::Impl {
     bool quiesceForPassRebuild();
     /// Per frame: samples the varying inputs and marks reusable passes.
     void planStaticSkips(Scene&);
+    /// Whether this frame, as prepared, would put back exactly the picture the
+    /// last present left on the surface. Fills `m_present_key` and
+    /// `m_present_videos` for the record a presented frame leaves.
+    bool frameRepeatsLastPresent(const Scene&);
+    /// True when nothing but the final composition would record work: every
+    /// other pass was reused by the static plan or draws nothing this frame.
+    bool frameRecordsOnlyComposition() const;
     void UpdateCameraFillMode(Scene&, wallpaper::FillMode);
     void SetWallpaperScalingMode(wallpaper::WallpaperScalingMode);
     void SetWallpaperScalingFactor(double);
@@ -155,6 +225,10 @@ struct VulkanRender::Impl {
     ReDrawCB                 m_redraw_cb;
     std::function<bool()> m_wants_poster;
     std::function<void(std::span<const uint8_t>, uint32_t, uint32_t, bool)> m_poster_ready;
+    std::function<bool()> m_poster_pending;
+    std::function<void(uint64_t, double)> m_video_frame_presented;
+    /// PTS of each entry in `m_present_videos`, in the same order.
+    std::vector<double>              m_present_pts;
 
     std::unique_ptr<StagingBuffer> m_vertex_buf { nullptr };
     std::unique_ptr<StagingBuffer> m_dyn_buf { nullptr };
@@ -174,6 +248,7 @@ struct VulkanRender::Impl {
     bool m_static_upload_recording { false };
     bool m_destroying { false };
     VmaBufferParameters m_frame_poster;
+    PosterTarget        m_frame_poster_target;
 
     std::unique_ptr<VulkanExSwapchain>    m_ex_swapchain;
     RenderingResources                    m_rendering_resources;
@@ -214,6 +289,11 @@ struct VulkanRender::Impl {
     /// Owned by the scene that created this renderer; may be null in tests and
     /// standalone tools. Only read on the render thread.
     RendererCounters* m_counters { nullptr };
+    /// The last frame that actually reached the surface, and scratch for the
+    /// frame being decided. Reused, so a repeated frame allocates nothing.
+    UnchangedPresentGate             m_present_gate;
+    PresentationKey                  m_present_key;
+    std::vector<PresentedVideoFrame> m_present_videos;
 };
 
 VulkanRender::VulkanRender(): pImpl(std::make_unique<Impl>()) {}
@@ -233,10 +313,12 @@ bool VulkanRender::resetSurface(const RenderInitInfo& info) {
     return pImpl->initPresentation(info);
 }
 bool VulkanRender::drawFrame(Scene& scene, bool* presented) {
-    const bool drawn = pImpl->drawFrame(scene);
-    if (presented != nullptr) *presented = drawn;
+    bool reached_surface = false;
+    const bool drawn     = pImpl->drawFrame(scene, &reached_surface);
+    if (presented != nullptr) *presented = drawn && reached_surface;
     return drawn;
 }
+void VulkanRender::InvalidatePresentedFrame() { pImpl->m_present_gate.Invalidate(); }
 bool VulkanRender::clearLastRenderGraph() { return pImpl->clearLastRenderGraph(); }
 bool VulkanRender::compileRenderGraph(Scene& scene, rg::RenderGraph& rg) {
     return pImpl->compileRenderGraph(scene, rg);
@@ -329,8 +411,12 @@ bool VulkanRender::Impl::initDevice(const RenderInitInfo& info) {
 
 bool VulkanRender::Impl::initPresentation(const RenderInitInfo& info) {
     if (m_device_lost) return false;
-    m_wants_poster = info.wants_poster;
-    m_poster_ready = info.poster_ready;
+    m_wants_poster   = info.wants_poster;
+    m_poster_ready   = info.poster_ready;
+    m_poster_pending = info.poster_pending;
+    m_video_frame_presented = info.video_frame_presented;
+    // A new surface has shown nothing of this renderer's yet.
+    m_present_gate.Invalidate();
     // Presentation-scoped bookkeeping: these fields are re-read on every
     // surface reconfigure, so they must live here (not in initDevice) to
     // reflect the new display's geometry / scale on each reset.
@@ -429,6 +515,7 @@ VkResult VulkanRender::Impl::resetRecordings() {
         if (m_dyn_buf) m_dyn_buf->finishUpload(false);
         m_draw_recording = false;
         m_frame_poster = {};
+        m_frame_poster_target = {};
     }
     if (m_static_upload_recording && ! m_static_upload_submitted) {
         const auto result = m_upload_cmd ? m_upload_cmd.Reset() : VK_SUCCESS;
@@ -459,6 +546,7 @@ VkResult VulkanRender::Impl::quiesceFrame(bool wait_for_presentation) {
         m_draw_recording = false;
         m_static_upload_recording = false;
         m_frame_poster = {};
+        m_frame_poster_target = {};
         return VK_ERROR_DEVICE_LOST;
     };
     if (m_device_lost) return discard_lost_device();
@@ -501,12 +589,14 @@ VkResult VulkanRender::Impl::quiesceFrame(bool wait_for_presentation) {
     m_draw_recording = false;
     m_static_upload_recording = false;
     m_frame_poster = {};
+    m_frame_poster_target = {};
     return VK_SUCCESS;
 }
 
 bool VulkanRender::Impl::failFrame(VkResult result) {
     LOG_ERROR("renderer frame stopped: %s", vvk::ToString(result));
     m_frame_faulted = true;
+    m_present_gate.Invalidate();
     m_device->tex_cache().InvalidateVideoDestinationPool();
     if (result == VK_ERROR_DEVICE_LOST) m_device_lost = true;
     if (m_device_lost || m_draw_submitted || m_static_upload_submitted) {
@@ -530,6 +620,7 @@ bool VulkanRender::Impl::failFrame(VkResult result) {
 bool VulkanRender::Impl::releasePresentation() {
     if (quiesceFrame(true) != VK_SUCCESS) return false;
     m_direct_present_pass = nullptr;
+    m_present_gate.Invalidate();
     if (m_device && m_device->handle()) {
         std::string error;
         if (! m_device->tex_cache().WaitForPendingUploads(&error)) {
@@ -611,6 +702,7 @@ bool VulkanRender::Impl::initRes() {
 void VulkanRender::Impl::destroy() {
     m_destroying = true;
     m_direct_present_pass = nullptr;
+    m_present_gate.Invalidate();
     const auto result = quiesceFrame(true);
     if (result != VK_SUCCESS && result != VK_ERROR_DEVICE_LOST) {
         LOG_ERROR("cannot destroy renderer resources before GPU completion");
@@ -642,6 +734,7 @@ void VulkanRender::Impl::destroy() {
     m_upload_cmd = {};
     m_cmds = {};
     m_frame_poster = {};
+    m_frame_poster_target = {};
     m_vertex_buf.reset();
     m_dyn_buf.reset();
     m_device.reset();
@@ -694,7 +787,8 @@ void VulkanRender::Impl::DestroyRenderingResource(RenderingResources& rr) {
 
 // VulkanExSwapchain* VulkanRender::exSwapchain() const { return m_ex_swapchain.get(); }
 
-bool VulkanRender::Impl::drawFrame(Scene& scene) {
+bool VulkanRender::Impl::drawFrame(Scene& scene, bool* presented) {
+    *presented = false;
     if (! m_inited || ! m_pass_loaded || m_frame_faulted || m_device_lost) return false;
     if (quiesceFrame() != VK_SUCCESS) return false;
 
@@ -719,6 +813,18 @@ bool VulkanRender::Impl::drawFrame(Scene& scene) {
     if (! UpdatePreparedPasses(*m_device, m_rendering_resources, m_passes))
         return failFrame(VK_ERROR_UNKNOWN);
 
+    // After the update, so the video clock, frame promotion, sprite steps and
+    // uniform writes all ran exactly as they would for a drawn frame; before
+    // the acquire, so a repeat never takes a drawable it would not present.
+    if (! m_instance.offscreen() && frameRepeatsLastPresent(scene)) {
+        // Nothing was recorded, so the frame's video pins are released without
+        // a submission and the surface keeps the picture it already shows.
+        m_device->tex_cache().AbandonVideoFrameRecording();
+        m_draw_recording = false;
+        if (m_counters != nullptr) m_counters->Add(OWE_RC_PRESENTS_SKIPPED_UNCHANGED);
+        return true;
+    }
+
 #if ENABLE_RENDERDOC_API
     if (rdoc_api)
         rdoc_api->StartFrameCapture(
@@ -726,6 +832,7 @@ bool VulkanRender::Impl::drawFrame(Scene& scene) {
 #endif
 
     const bool rendered = m_instance.offscreen() ? drawFrameOffscreen() : drawFrameSwapchain();
+    *presented = rendered;
     if (rendered && m_redraw_cb) m_redraw_cb();
 
 #if ENABLE_RENDERDOC_API
@@ -743,7 +850,7 @@ VkResult VulkanRender::Impl::executePreparedPasses(RenderingResources& rr) {
     const auto passes = m_frame_passes.empty()
                             ? std::span<VulkanPass* const> { m_passes }
                             : std::span<VulkanPass* const> { m_frame_passes };
-    return ExecutePreparedPasses(*m_device, rr, passes, m_pass_scratch);
+    return ExecutePreparedPasses(*m_device, rr, passes, m_pass_scratch, m_passes);
 }
 
 bool VulkanRender::Impl::drawFrameSwapchain() {
@@ -765,11 +872,22 @@ bool VulkanRender::Impl::drawFrameSwapchain() {
     const bool bgra = format == VK_FORMAT_B8G8R8A8_UNORM || format == VK_FORMAT_B8G8R8A8_SRGB;
     const bool rgba = format == VK_FORMAT_R8G8B8A8_UNORM || format == VK_FORMAT_R8G8B8A8_SRGB;
     const size_t poster_size = size_t(image.extent.width) * image.extent.height * 4;
+    const bool present_directly =
+        m_direct_present_pass != nullptr &&
+        m_direct_present_pass->canPresentDirectly(
+            rr, { image.extent.width, image.extent.height }, format);
     const bool export_poster = m_poster_ready && m_wants_poster && (bgra || rgba) &&
-        m_device->swapchain().supportsReadback() &&
         m_device->graphics_queue().family_index == m_device->present_queue().family_index &&
-        poster_size <= 128u * 1024u * 1024u && m_wants_poster();
-    if (export_poster && ! CreateReadbackBuffer(m_device->vma_allocator(), poster_size, poster))
+        poster_size <= kPosterByteLimit && m_wants_poster();
+    // The poster is composed a second time, into an image of its own, by the
+    // very pass that composes the drawable: the drawable is never read.
+    const VkRenderPass poster_pass = ! export_poster ? VK_NULL_HANDLE
+                                     : present_directly
+                                         ? m_direct_present_pass->presentationCopySourcePass()
+                                         : m_finpass->copySourcePass();
+    if (export_poster &&
+        (! CreatePosterTarget(*m_device, format, image.extent, poster_pass, m_frame_poster_target) ||
+         ! CreateReadbackBuffer(m_device->vma_allocator(), poster_size, poster)))
         return failFrame(VK_ERROR_OUT_OF_DEVICE_MEMORY);
 
     const auto begin_result = rr.command.Begin(VkCommandBufferBeginInfo {
@@ -778,13 +896,19 @@ bool VulkanRender::Impl::drawFrameSwapchain() {
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
     });
     if (begin_result != VK_SUCCESS) return failFrame(begin_result);
+    // Imported video images never sampled before get their layout transition
+    // here, inside the frame, instead of in a submission of their own.
+    m_device->tex_cache().RecordVideoFirstUseTransitions(rr.command);
     if (! m_dyn_buf->recordUpload(rr.command)) return failFrame(VK_ERROR_UNKNOWN);
     VkResult execute_result = VK_SUCCESS;
-    if (m_direct_present_pass != nullptr &&
-        m_direct_present_pass->canPresentDirectly(
-            rr, { image.extent.width, image.extent.height }, format)) {
+    if (present_directly) {
         execute_result = m_direct_present_pass->executePresentation(*m_device, rr, image, format);
         if (execute_result == VK_SUCCESS) {
+            // The pass drew into the drawable, not into the scene's output
+            // target, so that target does not hold the pixels the reuse plan
+            // just recorded for it. A later frame that reuses it through the
+            // final blit would otherwise compose an image nobody drew.
+            m_static_cache.InvalidateAll();
             VkImageMemoryBarrier barrier {
                 .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
                 .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
@@ -804,31 +928,35 @@ bool VulkanRender::Impl::drawFrameSwapchain() {
     }
     if (execute_result != VK_SUCCESS) return failFrame(execute_result);
     if (export_poster) {
-        VkImageMemoryBarrier barrier {
+        auto& target = m_frame_poster_target;
+        const VkExtent2D extent { image.extent.width, image.extent.height };
+        const auto composed =
+            present_directly
+                ? m_direct_present_pass->recordPresentation(*m_device, rr, poster_pass,
+                                                            *target.framebuffer, extent)
+                : m_finpass->recordComposition(rr, poster_pass, *target.framebuffer, extent);
+        if (composed != VK_SUCCESS) return failFrame(composed);
+        // The render pass left the image laid out to be copied from; the copy
+        // still has to wait for its writes.
+        VkImageMemoryBarrier written {
             .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
             .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
             .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
-            .oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+            .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
             .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .image = image.handle,
+            .image = *target.image.handle,
             .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
         };
         rr.command.PipelineBarrier(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                                   VK_PIPELINE_STAGE_TRANSFER_BIT, 0, barrier);
+                                   VK_PIPELINE_STAGE_TRANSFER_BIT, 0, written);
         VkBufferImageCopy region {
             .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
             .imageExtent = image.extent,
         };
-        rr.command.CopyImageToBuffer(image.handle, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        rr.command.CopyImageToBuffer(*target.image.handle, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                      *poster.handle, spanone { region });
-        barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        barrier.dstAccessMask = 0;
-        barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-        barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-        rr.command.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                   VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, barrier);
         VkBufferMemoryBarrier host_barrier {
             .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
             .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -888,8 +1016,22 @@ bool VulkanRender::Impl::drawFrameSwapchain() {
     m_draw_recording = false;
     if (present_result != VK_SUCCESS && present_result != VK_SUBOPTIMAL_KHR)
         return failFrame(present_result);
+    if (m_video_frame_presented) {
+        for (std::size_t i = 0; i < m_present_videos.size(); ++i) {
+            if (m_present_videos[i].frame == nullptr) continue;
+            m_video_frame_presented(m_present_videos[i].generation, m_present_pts[i]);
+        }
+    }
     const auto reset_result = rr.fence_frame.Reset();
     if (reset_result != VK_SUCCESS) return failFrame(reset_result);
+    // The surface now shows what this frame drew. Only a clean acquire and
+    // present leaves a record a later frame may repeat: a suboptimal surface
+    // keeps presenting until it is rebuilt, and with scene optimisation off
+    // nothing is remembered, so turning it back on starts from a real present.
+    if (SceneOptimizationEnabled() && acquire_result == VK_SUCCESS && present_result == VK_SUCCESS)
+        m_present_gate.Record(m_present_key, m_present_videos);
+    else
+        m_present_gate.Invalidate();
     if (export_poster) {
         void* bytes = nullptr;
         const auto map_result = poster.handle.MapMemory(&bytes);
@@ -904,6 +1046,7 @@ bool VulkanRender::Impl::drawFrameSwapchain() {
         if (invalidate_result != VK_SUCCESS) return failFrame(invalidate_result);
     }
     m_frame_poster = {};
+    m_frame_poster_target = {};
     return true;
 }
 bool VulkanRender::Impl::drawFrameOffscreen() {
@@ -918,6 +1061,7 @@ bool VulkanRender::Impl::drawFrameOffscreen() {
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
     });
     if (begin_result != VK_SUCCESS) return failFrame(begin_result);
+    m_device->tex_cache().RecordVideoFirstUseTransitions(rr.command);
     if (! m_dyn_buf->recordUpload(rr.command)) return failFrame(VK_ERROR_UNKNOWN);
     const auto execute_result = executePreparedPasses(rr);
     if (execute_result != VK_SUCCESS) return failFrame(execute_result);
@@ -1064,26 +1208,33 @@ void VulkanRender::Impl::UpdateCameraFillMode(wallpaper::Scene&   scene,
                                               wallpaper::FillMode fillmode) {
     ApplyCameraFillMode(
         scene, fillmode, m_device->out_extent().width, m_device->out_extent().height);
+    // The camera moved; what the scene draws changes without any video frame
+    // or layout value this renderer compares.
+    m_present_gate.Invalidate();
 }
 
 void VulkanRender::Impl::SetWallpaperScalingMode(wallpaper::WallpaperScalingMode mode) {
     m_scaling_mode = mode;
+    m_present_gate.Invalidate();
     LOG_INFO("wallpaper scaling mode: %s", WallpaperScalingModeName(m_scaling_mode));
 }
 
 void VulkanRender::Impl::SetWallpaperScalingFactor(double factor) {
     m_scaling_factor = NormalizeScaleFactor(factor);
+    m_present_gate.Invalidate();
     LOG_INFO("wallpaper scaling factor: %.3f", m_scaling_factor);
 }
 
 void VulkanRender::Impl::SetWallpaperHorizontalFlip(bool enabled) {
     m_horizontal_flip = enabled;
+    m_present_gate.Invalidate();
     LOG_INFO("wallpaper horizontal flip: %s", m_horizontal_flip ? "enabled" : "disabled");
 }
 
 bool VulkanRender::Impl::clearLastRenderGraph() {
     if (quiesceFrame() != VK_SUCCESS) return false;
     m_direct_present_pass = nullptr;
+    m_present_gate.Invalidate();
     if (! m_device || ! m_device->handle()) return m_passes.empty();
     std::string error;
     if (! m_device->tex_cache().WaitForPendingUploads(&error)) {
@@ -1154,16 +1305,24 @@ bool VulkanRender::Impl::compileRenderGraph(Scene& scene, rg::RenderGraph& rg) {
                    });
 
     for (auto* pass : m_passes) {
-        if (auto* custom = dynamic_cast<CustomShaderPass*>(pass))
+        if (auto* custom = dynamic_cast<CustomShaderPass*>(pass)) {
             custom->desc().presentation_format = VK_FORMAT_UNDEFINED;
+            custom->desc().presents_through_final_viewport = false;
+        }
     }
     if (m_with_surface && ! m_instance.offscreen() &&
         m_device->graphics_queue().family_index == m_device->present_queue().family_index) {
         const auto format = m_device->swapchain().format();
         if (format == VK_FORMAT_R8G8B8A8_UNORM || format == VK_FORMAT_B8G8R8A8_UNORM) {
             m_direct_present_pass = FindDirectPresentationPass(scene, m_passes);
-            if (m_direct_present_pass != nullptr)
+            if (m_direct_present_pass != nullptr) {
                 m_direct_present_pass->desc().presentation_format = format;
+                // The plain-video scene is built as the final composition's
+                // own quad copying one texture (CreateVideoProjectScene), so
+                // presenting it may resample the source instead of the copy.
+                m_direct_present_pass->desc().presents_through_final_viewport =
+                    scene.single_video_source;
+            }
         }
     }
 
@@ -1202,6 +1361,7 @@ bool VulkanRender::Impl::quiesceForPassRebuild() {
 }
 
 bool VulkanRender::Impl::applySceneOptimization(Scene& scene, rg::RenderGraph& rg) {
+    m_present_gate.Invalidate();
     releaseStaticCache();
     m_static_cache.Reset();
     m_static_samples.clear();
@@ -1460,7 +1620,87 @@ void VulkanRender::Impl::planStaticSkips(Scene& scene) {
     RecordSceneOptimizationFrame(executed, skipped);
 }
 
+bool VulkanRender::Impl::frameRecordsOnlyComposition() const {
+    for (std::size_t i = 0; i < m_passes.size(); ++i) {
+        const auto* pass = m_passes[i];
+        if (pass == nullptr || pass == m_finpass.get()) continue;
+        if (i < m_static_skip.size() && m_static_skip[i] != 0) continue;
+        if (const auto* custom = dynamic_cast<const CustomShaderPass*>(pass)) {
+            const auto candidate = custom->batchCandidate();
+            // Hidden and carrying no clear: records nothing.
+            if (! candidate.visible && ! candidate.clear_only) continue;
+            // Hidden with a clear nothing can observe: the executor drops it.
+            if (! candidate.visible && candidate.clear_only) {
+                CustomShaderPass* clearing[] { const_cast<CustomShaderPass*>(custom) };
+                if (! HiddenClearIsObservable(m_passes, clearing)) continue;
+            }
+            return false;
+        }
+        // An eliminated copy produces nothing at execution time.
+        if (const auto* copy = dynamic_cast<const CopyPass*>(pass);
+            copy != nullptr && copy->desc().elision != CopyElision::None) {
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+bool VulkanRender::Impl::frameRepeatsLastPresent(const Scene& scene) {
+    // Everything the final composition reads besides the scene's own pixels.
+    const auto& rr = m_rendering_resources;
+    m_present_key.Clear();
+    const auto extent = m_device->out_extent();
+    m_present_key.Add(extent.width);
+    m_present_key.Add(extent.height);
+    m_present_key.AddPointer(m_with_surface ? *m_device->swapchain().handle() : nullptr);
+    m_present_key.Add(static_cast<uint64_t>(m_with_surface ? m_device->swapchain().format()
+                                                           : VK_FORMAT_UNDEFINED));
+    m_present_key.AddFloat(rr.wallpaper_viewport.x);
+    m_present_key.AddFloat(rr.wallpaper_viewport.y);
+    m_present_key.AddFloat(rr.wallpaper_viewport.width);
+    m_present_key.AddFloat(rr.wallpaper_viewport.height);
+    m_present_key.Add(static_cast<uint64_t>(static_cast<uint32_t>(rr.wallpaper_scissor.offset.x)));
+    m_present_key.Add(static_cast<uint64_t>(static_cast<uint32_t>(rr.wallpaper_scissor.offset.y)));
+    m_present_key.Add(rr.wallpaper_scissor.extent.width);
+    m_present_key.Add(rr.wallpaper_scissor.extent.height);
+    m_present_key.Add(rr.wallpaper_horizontal_flip ? 1u : 0u);
+    m_present_key.AddFloat(scene.clearColor[0]);
+    m_present_key.AddFloat(scene.clearColor[1]);
+    m_present_key.AddFloat(scene.clearColor[2]);
+    m_present_key.Add(scene.clearEnabled ? 1u : 0u);
+    m_present_key.AddDouble(scene.render_scale);
+    m_present_key.AddPointer(m_direct_present_pass);
+
+    m_present_videos.clear();
+    m_present_pts.clear();
+    m_device->tex_cache().ForEachCurrentVideoFrame(
+        [this](const void* texture, const void* frame, uint64_t generation, double pts) {
+            m_present_videos.push_back(PresentedVideoFrame { texture, frame, generation });
+            m_present_pts.push_back(pts);
+        });
+
+    // Render-result reuse at the scale of the surface, so it answers to the
+    // same setting as the per-target reuse it extends.
+    if (! SceneOptimizationEnabled() || ! m_present_gate.Valid()) return false;
+    // A frame with new host data to upload has something new to draw.
+    if (m_dyn_buf == nullptr || m_dyn_buf->hasPendingWrites()) return false;
+    // The Vulkan path can export a poster only from inside a presented frame,
+    // so a pending request is answered by drawing. Asked without taking it;
+    // with no way to ask, a request is always assumed possible.
+    if (m_wants_poster && (! m_poster_pending || m_poster_pending())) return false;
+    // Two proofs that the scene's own pixels are the ones already shown: the
+    // engine's plain-video scene is one video texture behind a copy, so its
+    // picture is its video frame; any other scene must have had every pass
+    // reused, leaving nothing to record but the final composition.
+    if (! scene.single_video_source && ! frameRecordsOnlyComposition()) return false;
+    return m_present_gate.Matches(m_present_key, m_present_videos);
+}
+
 bool VulkanRender::Impl::preparePasses(Scene& scene) {
+    // Re-prepared passes draw into rebuilt targets; nothing presented before
+    // this point describes what they will produce.
+    m_present_gate.Invalidate();
     glslang::InitializeProcess();
     {
         // Decodes ahead of the passes on other threads; joined when this

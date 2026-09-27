@@ -211,16 +211,32 @@ wrapper module (`core/src/owe/`) must not own scene registries or display maps.
 
 Pointer polling follows committed native scene capability, not a manifest or a
 first-frame notification. Pure video projects publish no pointer consumer;
-ordinary and not-yet-committed scenes remain conservative. A bounded, event-driven
-relay carries a retained renderer-instance identity into the core actor. Snapshot
-publication serializes consumer notifications with button-edge activation, while
-the bridge combines consumer presence with pause policy for its existing 16 ms,
-single-in-flight poller. One sample delivers enter, position and ordered button
-transitions in one actor turn. Successful identical position/enter writes are
-deduplicated; native per-frame camera/content mapping and hit dispatch still run.
-A level-only button baseline reconciles a newly committed consumer without
-inventing presses or replaying video-period taps. These are Rust/native runtime
-contracts, not persisted or uniffi snapshot fields.
+ordinary and not-yet-committed scenes remain conservative, and a paused scene
+(user, policy or its own display covered) is not a consumer. A bounded,
+event-driven relay carries a retained renderer-instance identity into the core
+actor. Snapshot publication serializes consumer notifications with button-edge
+activation, while the bridge combines consumer presence with pause policy for
+its single-in-flight poller. The poller is event-armed: the engine's global and
+local `NSEvent` monitors (buttons, moves, drags) mark it dirty, as do a new
+consumer, a resume and a reset of a runtime's pointer delivery, and it samples
+at most once per 16 ms, at once after a quiet stretch. While the app is active,
+or when a monitor could not be installed, it probes the cursor with
+`CGEventCreate` every 16 ms instead and skips the actor round trip when nothing
+changed. One sample delivers enter, position and ordered button transitions in
+one actor turn. Successful identical position/enter writes are deduplicated;
+native per-frame camera/content mapping and hit dispatch still run. A level-only
+button baseline reconciles a newly committed consumer without inventing presses
+or replaying video-period taps. These are Rust/native runtime contracts, not
+persisted or uniffi snapshot fields.
+
+Each renderer also reports whether its committed scene reads system audio (an
+audio-processing material or particle emitter, a `g_AudioSpectrum*` uniform, or
+`registerAudioBuffers`) through `owe_scene_wallpaper_set_audio_requirement_callback`.
+The report travels like pointer capability: a latest-value relay per renderer
+object into the core actor, an observer on snapshot publication, and a bridge
+relay that re-registers the handle and re-evaluates capture. The system-audio
+tap runs only for `audio_response_enabled && scene reads audio && !paused`, or
+for a subscribed web page, so plain video wallpapers never open it.
 
 ### Lock-screen extension
 

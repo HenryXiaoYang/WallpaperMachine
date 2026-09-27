@@ -32,6 +32,7 @@ fn display_at(display_id: u32, refresh_hz: u32, handle: Option<u64>) -> DisplayS
         desc,
         handle: handle.map(SceneHandle::new),
         accepts_pointer_input: false,
+        paused: false,
         window_active: true,
         assignment: None,
     }

@@ -71,8 +71,21 @@ struct CustomPassExecutionScratch {
 };
 
 bool UpdatePreparedPasses(const Device&, RenderingResources&, std::span<VulkanPass* const>);
+/// Records `passes`. `graph` is the frame's complete pass list, including
+/// clears and copies the reuse plan dropped from `passes`; it is what decides
+/// whether a hidden layer's clear can be seen by anything, so it must never be
+/// narrower than `passes`. Empty means `passes` is the whole graph.
 VkResult ExecutePreparedPasses(const Device&, RenderingResources&, std::span<VulkanPass* const>,
-                              CustomPassExecutionScratch&);
+                              CustomPassExecutionScratch&,
+                              std::span<VulkanPass* const> graph = {});
+/// Whether the clear a hidden, clear-only pass would record can affect any
+/// pixel: `clearing` are that entry's passes, `graph` the frame's pass list.
+/// A clear is unobservable only when no pass before it samples or loads the
+/// image (it would read the previous frame's clear), no visible pass after it
+/// does, no copy or final composition touches it, and it is not the scene
+/// output.
+bool HiddenClearIsObservable(std::span<VulkanPass* const> graph,
+                             std::span<CustomShaderPass* const> clearing);
 CustomShaderPass* FindDirectPresentationPass(Scene&, std::span<VulkanPass* const> graph_passes);
 
 struct CustomPassMsaaAttachmentPlan {

@@ -593,6 +593,8 @@ std::unique_ptr<rg::RenderGraph> wallpaper::sceneToRenderGraph(Scene& scene) {
 
     Set<std::string> written_targets {};
     Set<std::string> transfer_written_targets {};
+    // Targets whose latest write is a transparent clear and nothing else yet.
+    Set<std::string> transparent_cleared_targets {};
     for (const auto node_id : rgraph->topologicalOrder()) {
         if (auto* copy_pass = dynamic_cast<vulkan::CopyPass*>(rgraph->getPass(node_id));
             copy_pass != nullptr) {
@@ -600,6 +602,7 @@ std::unique_ptr<rg::RenderGraph> wallpaper::sceneToRenderGraph(Scene& scene) {
             if (!copy_dst.empty()) {
                 written_targets.insert(copy_dst);
                 transfer_written_targets.insert(copy_dst);
+                transparent_cleared_targets.erase(copy_dst);
             }
             continue;
         }
@@ -607,6 +610,10 @@ std::unique_ptr<rg::RenderGraph> wallpaper::sceneToRenderGraph(Scene& scene) {
         if (auto* clear = dynamic_cast<vulkan::PrePass*>(rgraph->getPass(node_id))) {
             written_targets.insert(clear->desc().result);
             transfer_written_targets.insert(clear->desc().result);
+            if (clear->desc().transparent)
+                transparent_cleared_targets.insert(clear->desc().result);
+            else
+                transparent_cleared_targets.erase(clear->desc().result);
             continue;
         }
         auto* custom_pass = dynamic_cast<vulkan::CustomShaderPass*>(rgraph->getPass(node_id));
@@ -623,12 +630,22 @@ std::unique_ptr<rg::RenderGraph> wallpaper::sceneToRenderGraph(Scene& scene) {
 
         const bool first_writer =
             !desc.output.empty() && written_targets.insert(desc.output).second;
+        // The first draw into a target that was just cleared to transparent
+        // may open with that same clear instead of loading it: every other
+        // target clears to transparent too, so the pixels are identical, and
+        // the per-frame check then drops the separate clear as redundant.
+        // Every later draw still loads what this one left.
+        const bool opens_cleared_target = !desc.output.empty() &&
+                                          transparent_cleared_targets.erase(desc.output) > 0 &&
+                                          desc.output != SpecTex_Default;
         if (!first_writer && !force_clear) {
-            desc.clear_on_first_use = false;
-            desc.preserve_target_contents = true;
+            // Written by a transfer before: stays single-sample, exactly as
+            // when it loaded, and so does every draw after it.
             if (transfer_written_targets.find(desc.output) != transfer_written_targets.end()) {
                 desc.sample_count = VK_SAMPLE_COUNT_1_BIT;
             }
+            desc.clear_on_first_use = opens_cleared_target;
+            desc.preserve_target_contents = !opens_cleared_target;
             continue;
         }
 

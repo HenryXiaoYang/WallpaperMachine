@@ -1,10 +1,12 @@
 mod actor;
+mod audio_requirement;
 mod config;
 mod messages;
 mod runtime;
 mod snapshot;
 mod state;
 
+pub use audio_requirement::AudioRequirementCallback;
 use std::{
     collections::HashSet,
     sync::{Arc, Mutex},
@@ -54,6 +56,10 @@ pub struct DisplaySnapshotEntry {
     pub handle: Option<SceneHandle>,
     /// Capability committed by the currently live native renderer.
     pub accepts_pointer_input: bool,
+    /// Whether the live scene on this display is paused, for any reason: the
+    /// user's choice, power policy, or this display being covered. A paused
+    /// scene does not consume pointer input. False without a live scene.
+    pub paused: bool,
     /// Whether this display currently has a wallpaper window.
     pub window_active: bool,
     /// The wallpaper assigned to this display, if any.
@@ -84,6 +90,38 @@ pub struct WallpaperEngine {
 
 pub type FirstFrameCallback = Arc<dyn Fn(SceneHandle) + Send + Sync + 'static>;
 pub type PointerConsumerCallback = Arc<dyn Fn(bool) + Send + Sync + 'static>;
+
+/// What the engine tells the pointer sampler, so it samples on input rather
+/// than on a timer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PointerActivity {
+    /// The OS reported pointer motion or a button, or a presenting scene lost
+    /// its last delivered pointer state and needs a fresh sample.
+    Input,
+    /// Whether the event monitors can currently miss motion, so the sampler
+    /// has to check the cursor itself: true while this app is active (AppKit
+    /// does not hand a global monitor events sent to this app, and a local
+    /// monitor only sees motion a window of ours asked for), or when a monitor
+    /// could not be installed.
+    MonitorGap(bool),
+}
+
+/// Receives [`PointerActivity`]. Called on the thread that noticed it, the
+/// AppKit main thread for OS input, so it must only record the signal: no
+/// allocation, no blocking, no call back into the engine.
+pub type PointerActivityCallback = Arc<dyn Fn(PointerActivity) + Send + Sync + 'static>;
+
+/// Cursor state read without the main thread, used only to tell whether the
+/// cursor changed since the last check. Not converted to AppKit coordinates
+/// and never delivered to a scene: a changed probe triggers the ordinary
+/// sample, which reads `NSEvent` on the main thread.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PointerProbe {
+    pub x: f64,
+    pub y: f64,
+    pub buttons: u32,
+}
+
 /// Receives one `engine.openUserShortcut` request: which wallpaper asked,
 /// the property it named, and the value its user chose for that property.
 pub type UserShortcutObserverCallback =
@@ -204,7 +242,11 @@ impl WallpaperEngine {
             actor_state,
             Arc::clone(&snapshots),
         )?;
-        let mouse_event_monitor = Arc::new(Self::install_mouse_event_monitor(&mouse_buttons));
+        let mouse_event_monitor = Self::install_mouse_event_monitor(&mouse_buttons, &snapshots);
+        snapshots.set_pointer_monitors_installed(
+            mouse_event_monitor.as_ref().is_some_and(crate::window::MouseEventMonitor::complete),
+        );
+        let mouse_event_monitor = Arc::new(mouse_event_monitor);
         let lifecycle = Arc::new(EngineLifecycle::new(&actor)?);
         let engine = Self {
             backend,
@@ -231,6 +273,21 @@ impl WallpaperEngine {
         self.snapshots.set_pointer_consumer_callback(callback);
     }
 
+    /// Installs the pointer activity sink and synchronously replays whether the
+    /// event monitors currently have a gap. The callback runs on the AppKit
+    /// main thread for OS input and must only record the signal.
+    pub fn set_pointer_activity_callback(&self, callback: Option<PointerActivityCallback>) {
+        self.snapshots.set_pointer_activity_callback(callback);
+    }
+
+    /// Reads the cursor without the main thread, for a sampler that has to
+    /// check for motion the event monitors cannot see. Only compared with the
+    /// previous probe; scenes still receive the `NSEvent` sample.
+    #[must_use]
+    pub fn probe_pointer(&self) -> PointerProbe {
+        crate::window::probe_pointer()
+    }
+
     /// Installs the sink for `engine.openUserShortcut` requests.
     ///
     /// Pushed rather than polled: a press is rare and must not cost an idle
@@ -239,12 +296,28 @@ impl WallpaperEngine {
         self.snapshots.set_user_shortcut_callback(callback);
     }
 
+    /// Installs the observer told whenever a live scene starts or stops
+    /// reading system audio, and replays the scenes that currently do. Runs
+    /// on the engine actor's thread under a lock: it must only hand the event
+    /// on and must not reenter the engine.
+    pub fn set_audio_requirement_callback(&self, callback: Option<AudioRequirementCallback>) {
+        self.snapshots.audio_requirement().set_callback(callback);
+    }
+
+    /// Whether the scene behind `handle` reads system audio, as its renderer
+    /// last reported. Every newly opened or rebuilt scene starts at `false`.
+    #[must_use]
+    pub fn scene_requires_audio(&self, handle: SceneHandle) -> bool {
+        self.snapshots.audio_requirement().requires_audio(handle)
+    }
+
     #[cfg(test)]
     #[allow(clippy::single_call_fn)]
     fn install_mouse_event_monitor(
         mouse_buttons: &Arc<Mutex<MouseButtonTracker>>,
+        snapshots: &Arc<EngineSnapshotPublisher>,
     ) -> Option<crate::window::MouseEventMonitor> {
-        let _ = mouse_buttons;
+        let _ = (mouse_buttons, snapshots);
         None
     }
 
@@ -252,13 +325,22 @@ impl WallpaperEngine {
     #[allow(clippy::single_call_fn)]
     fn install_mouse_event_monitor(
         mouse_buttons: &Arc<Mutex<MouseButtonTracker>>,
+        snapshots: &Arc<EngineSnapshotPublisher>,
     ) -> Option<crate::window::MouseEventMonitor> {
+        use crate::window::MouseMonitorEvent;
+
         let tracker = Arc::clone(mouse_buttons);
+        let snapshots = Arc::clone(snapshots);
         crate::window::run_on_main_thread(move || {
-            crate::window::MouseEventMonitor::new(move |state| {
-                tracker.lock().unwrap_or_else(|error| error.into_inner())
-                    .set_button(state.button, state.pressed);
-            })
+            Some(crate::window::MouseEventMonitor::new(move |event| match event {
+                MouseMonitorEvent::Button(state) => {
+                    tracker.lock().unwrap_or_else(|error| error.into_inner())
+                        .set_button(state.button, state.pressed);
+                    snapshots.signal_pointer_input();
+                }
+                MouseMonitorEvent::Motion => snapshots.signal_pointer_input(),
+                MouseMonitorEvent::AppActive(active) => snapshots.set_pointer_app_active(active),
+            }))
         })
     }
 
@@ -523,14 +605,21 @@ impl WallpaperEngine {
         self.ask_actor(messages::SetPaused { handle, paused }).await
     }
 
-    /// Live-updates the paused state for all open scenes.
+    /// Live-updates the paused state for all open scenes in one pass: each
+    /// scene is paused when `paused` is set or its display is in
+    /// `suspended_displays`, and resumed otherwise. A covered display therefore
+    /// never runs during a global resume.
     ///
     /// # Errors
     ///
     /// Returns an error if actor communication fails or the renderer rejects
     /// the update.
-    pub async fn set_all_paused(&self, paused: bool) -> Result<(), EngineError> {
-        self.ask_actor(messages::SetAllPaused { paused }).await
+    pub async fn set_all_paused(
+        &self,
+        paused: bool,
+        suspended_displays: Vec<u32>,
+    ) -> Result<(), EngineError> {
+        self.ask_actor(messages::SetAllPaused { paused, suspended_displays }).await
     }
 
     /// Turns renderer counting on or off for the whole process.
@@ -1155,6 +1244,7 @@ mod tests {
             desc,
             handle: Some(SceneHandle::new(1)),
             accepts_pointer_input: false,
+            paused: false,
             window_active: true,
             assignment: None,
         }] });
@@ -1957,6 +2047,7 @@ mod tests {
             desc: crate::DisplayDesc::new(1, 0, 0, 1920, 1080, 1.0),
             handle: Some(crate::project::SceneHandle::new(1)),
             accepts_pointer_input: true,
+            paused: false,
             window_active: true,
             assignment: Some(crate::WallpaperAssignment::Direct(
                 crate::project::SceneTemplate::builder("/tmp/project.json")
@@ -1969,6 +2060,7 @@ mod tests {
             desc: crate::DisplayDesc::new(2, 1920, 0, 1920, 1080, 1.0),
             handle: Some(crate::project::SceneHandle::new(2)),
             accepts_pointer_input: true,
+            paused: false,
             window_active: true,
             assignment: Some(crate::WallpaperAssignment::Mirror(
                 crate::DisplaySelector::Primary,
@@ -2007,6 +2099,7 @@ mod tests {
             desc: crate::DisplayDesc::new(1, 0, 0, 1920, 1080, 1.0),
             handle: Some(crate::project::SceneHandle::new(1)),
             accepts_pointer_input: true,
+            paused: false,
             window_active: true,
             assignment: Some(crate::WallpaperAssignment::Direct(
                 crate::project::SceneTemplate::builder("/tmp/project.json")
@@ -2019,6 +2112,7 @@ mod tests {
             desc: crate::DisplayDesc::new(2, 1920, 0, 2560, 1440, 1.0),
             handle: Some(crate::project::SceneHandle::new(2)),
             accepts_pointer_input: true,
+            paused: false,
             window_active: true,
             assignment: Some(crate::WallpaperAssignment::Mirror(
                 crate::DisplaySelector::Primary,
@@ -2057,6 +2151,7 @@ mod tests {
             desc: crate::DisplayDesc::new(1, 0, 0, 1920, 1080, 1.0),
             handle: Some(crate::project::SceneHandle::new(1)),
             accepts_pointer_input: true,
+            paused: false,
             window_active: true,
             assignment: Some(crate::WallpaperAssignment::Direct(
                 crate::project::SceneTemplate::builder("/tmp/project.json")
@@ -2069,6 +2164,7 @@ mod tests {
             desc: crate::DisplayDesc::new(2, 1920, 0, 1920, 1080, 1.0),
             handle: Some(crate::project::SceneHandle::new(2)),
             accepts_pointer_input: true,
+            paused: false,
             window_active: true,
             assignment: Some(crate::WallpaperAssignment::Mirror(
                 crate::DisplaySelector::Primary,
@@ -2079,6 +2175,7 @@ mod tests {
             desc: crate::DisplayDesc::new(3, 3840, 0, 1920, 1080, 1.0),
             handle: Some(crate::project::SceneHandle::new(3)),
             accepts_pointer_input: true,
+            paused: false,
             window_active: true,
             assignment: Some(crate::WallpaperAssignment::Mirror(
                 crate::DisplaySelector::LiveDisplayId(2),
@@ -2426,7 +2523,7 @@ mod tests {
         let engine = engine_with_display_records(Vec::new());
 
         engine
-            .set_all_paused(true)
+            .set_all_paused(true, Vec::new())
             .await
             .expect("empty runtime set should be a no-op");
     }
@@ -2452,7 +2549,7 @@ mod tests {
         let mut actor = EngineActor::new(OweBackend, Arc::new(|_handle| {}), state, snapshots, prepared.actor_ref().downgrade());
 
         actor
-            .set_all_paused(true)
+            .set_all_paused(true, &[])
             .expect("inactive preserved handles should be ignored");
     }
 }

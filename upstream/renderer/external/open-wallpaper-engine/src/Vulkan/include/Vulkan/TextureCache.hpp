@@ -41,11 +41,18 @@ struct VideoTextureSubmissionStats {
     std::uint64_t update_calls { 0 };
     std::uint64_t cache_hits { 0 };
     std::uint64_t new_imports { 0 };
-    std::uint64_t fence_waits { 0 };
     std::uint64_t evictions { 0 };
-    std::uint64_t import_submission_slots { 0 };
-    std::uint64_t command_buffer_allocations { 0 };
-    std::uint64_t fence_allocations { 0 };
+    /// Vulkan images created to alias an imported Metal texture. A pooled
+    /// conversion destination gets one for its lifetime, so on the NV12 path
+    /// this is bounded by `converted_destinations_created`, not by
+    /// `new_imports`.
+    std::uint64_t imported_images_created { 0 };
+    /// New imports that reused the Vulkan image of their pooled destination.
+    std::uint64_t imported_images_reused { 0 };
+    /// UNDEFINED to SHADER_READ_ONLY transitions recorded into a frame's own
+    /// command buffer for images that were never used before. There is no
+    /// submission for them outside the frame.
+    std::uint64_t first_use_transitions_recorded { 0 };
     std::uint64_t conversion_calls { 0 };
     std::uint64_t converted_destinations_created { 0 };
     std::uint64_t converted_destinations_reused { 0 };
@@ -93,7 +100,7 @@ struct VideoTextureSubmissionStats {
     /// only: a reservation is never refused for capacity.
     std::uint64_t pool_refusals { 0 };
     /// Reservations granted while more destinations were already in flight
-    /// than the structural expectation accounts for — pending import
+    /// than the structural expectation accounts for — unretired conversion
     /// submissions, plus each live video texture's imported-frame cap, plus
     /// the destination every consumer holding an `ImageSlotsRef` retains.
     /// Reported rather than refused, so this is the figure that says a scene
@@ -102,23 +109,11 @@ struct VideoTextureSubmissionStats {
     std::uint64_t pool_in_flight_cap_breaches { 0 };
 };
 
-struct VideoImportSubmissionPlan {
-    std::size_t pending_submissions { 0 };
-    std::size_t available_slots { 0 };
-    bool        must_destroy_resource { false };
-};
-
 enum class TextureUploadSynchronization
 {
     Blocking,
     Deferred,
 };
-
-inline bool VideoImportSubmissionNeedsFenceWait(const VideoImportSubmissionPlan& plan) {
-    if (plan.pending_submissions == 0) return false;
-    if (plan.must_destroy_resource) return true;
-    return plan.available_slots == 0 || plan.pending_submissions >= plan.available_slots;
-}
 
 inline video::VideoPlaybackState
 ResolveEffectiveVideoPlaybackState(const video::VideoPlaybackState& global_state,
@@ -159,6 +154,12 @@ public:
     /// resizes render targets but nothing else.
     bool ClearRenderTargets(std::string* error = nullptr);
     bool BeginVideoFrameRecording(std::string* error = nullptr);
+    /// Records, into the frame's own command buffer, the first-use layout
+    /// transition of every imported video image that has not had one yet.
+    /// The renderer calls it right after beginning that command buffer, before
+    /// anything samples. A transition counts as done once the frame is
+    /// submitted; an abandoned recording puts it back for the next frame.
+    void RecordVideoFirstUseTransitions(vvk::CommandBuffer& command);
     void PinVideoFrame(const ImageSlotsRef&);
     void MarkVideoFrameSubmitted();
     void CompleteVideoFrame();
@@ -184,6 +185,20 @@ public:
     /// when none of them can report one. The shortest is the safe answer: it
     /// is the rate at which something can still change.
     [[nodiscard]] double ShortestVideoFramePeriod() const;
+    /// Calls `visit(texture, frame, generation)` for every video texture with
+    /// the imported frame it currently shows, in a stable order. Identity only:
+    /// nothing is imported, promoted or pinned, so a caller can ask whether a
+    /// frame would show the same video pictures as the last one presented.
+    template<typename Visit>
+    void ForEachCurrentVideoFrame(Visit&& visit) const {
+        for (const auto& [key, video_tex] : m_video_tex_map) {
+            if (video_tex == nullptr) continue;
+            const auto* frame = video_tex->current_frame;
+            visit(static_cast<const void*>(video_tex.get()), static_cast<const void*>(frame),
+                  frame != nullptr ? frame->generation : uint64_t { 0 },
+                  frame != nullptr ? frame->pts_seconds : 0.0);
+        }
+    }
     /// Counters owned by the scene, shared with the frame clock and the
     /// renderer. Sources created after this call receive it too.
     void                                      SetCounters(RendererCounters* counters);
@@ -220,9 +235,13 @@ private:
     friend struct TextureCacheVideoInteropTestAccess;
     ImageSlotsRef CreateVideoTex(Image&, std::shared_ptr<video::VideoTextureSource>);
     struct ImportedVideoFrame;
+    struct VideoImportImage;
     ImageSlotsRef                     CreateTex(Image&, TextureUploadSynchronization);
     std::optional<VmaImageParameters> CreateTex(TextureKey);
     VkSampler                         GetOrCreateSampler(TextureKey, std::string* error);
+    /// Exports, once, the Metal device and the MTLCommandQueue MoltenVK runs
+    /// the graphics queue on; the latter is what NV12 conversions are
+    /// committed to so the frames that sample them are ordered after them.
     void*                             GetMetalDeviceHandle(std::string* error);
     void                              allocateCmd();
     struct TextureUploadSubmissionSlot {
@@ -233,13 +252,15 @@ private:
         uint64_t                         submitted_serial { 0 };
         std::vector<VmaBufferParameters> staging_buffers;
     };
-    struct VideoImportSubmissionSlot {
-        vvk::CommandBuffers commands;
-        vvk::CommandBuffer  command;
-        vvk::Fence          fence;
-        bool                pending { false };
-        uint64_t            submitted_serial { 0 };
-        std::shared_ptr<ImportedVideoFrame> image_owner;
+    /// The Vulkan image and view aliasing one imported Metal texture. For a
+    /// pooled conversion destination it is made once and kept as the pool's
+    /// companion of that destination, so it retires exactly when the pool
+    /// lets the destination go. Samplers are per video texture and are not
+    /// part of it.
+    struct VideoImportImage {
+        enum class Layout { Undefined, TransitionRecorded, ShaderReadOnly };
+        ExImageParameters image;
+        Layout            layout { Layout::Undefined };
     };
     TextureUploadSubmissionSlot* acquireTextureUploadSubmissionSlot(std::string* error);
     bool                         waitForTextureUploadSlot(TextureUploadSubmissionSlot& slot,
@@ -248,15 +269,17 @@ private:
     bool                         waitForPendingTextureUploads(std::string* error);
     void                         collectCompletedTextureUploads();
     void                         retireRuntimeTexture(std::string_view key);
-    VideoImportSubmissionSlot* acquireVideoImportSubmissionSlot(std::string* error);
-    bool                       waitForVideoImportSlot(VideoImportSubmissionSlot& slot,
+    std::shared_ptr<VideoImportImage> importedImageFor(void* metal_texture, uint32_t width,
+                                                      uint32_t height, bool pooled,
                                                       std::string* error);
-    bool                       waitForPendingVideoImports(std::string* error);
-    bool                       ensureVideoImportFence(VideoImportSubmissionSlot&, std::string* error);
     vvk::CommandBuffers               m_tex_cmds;
     vvk::CommandBuffer                m_tex_cmd;
-    std::vector<VideoImportSubmissionSlot> m_video_import_slots;
-    uint64_t                              m_video_import_submit_serial { 0 };
+    /// Imported images whose first-use transition no frame has recorded yet.
+    /// Weak: an image every frame has dropped needs no transition.
+    std::vector<std::weak_ptr<VideoImportImage>>   m_video_first_use_pending;
+    /// Transitions recorded into the frame being recorded, awaiting its
+    /// submission (done) or its abandonment (pending again).
+    std::vector<std::shared_ptr<VideoImportImage>> m_video_first_use_recorded;
 
     const Device&                m_device;
     /// Shared, because a cache entry is not the only holder: a pass bound to
@@ -268,8 +291,14 @@ private:
         /// buffer and the Metal texture retire together when the last holder of
         /// this lease drops it.
         std::shared_ptr<void> frame_lease;
-        ExImageParameters     image;
+        /// Declared after the lease so it is released first, as the image it
+        /// aliases the lease's texture with must not outlive that texture's
+        /// last owner here.
+        std::shared_ptr<VideoImportImage> vulkan_image;
+        /// `vulkan_image`'s handles with this video texture's sampler.
+        ImageParameters       image;
         uint64_t              generation { 0 };
+        double                pts_seconds { 0.0 };
         uint64_t              last_used { 0 };
         mutable uint64_t      last_pinned_recording { 0 };
         void*                 surface_identity { nullptr };
@@ -288,6 +317,11 @@ private:
         /// delta rather than the running total of every source.
         uint64_t                                         reported_decode_outputs { 0 };
         uint64_t                                         reported_seeks { 0 };
+        /// Set by an update that ran while nothing was counting, which does
+        /// not advance the totals above or `selection`. The next counted
+        /// update only takes them as its starting point, so work done while
+        /// counting was off is never reported as work done now.
+        bool                                             counters_stale { false };
         /// Consumers of this video texture, observed rather than assumed.
         ///
         /// Every consumer calls `UpdateVideoFrame` for its own slot once per
@@ -311,6 +345,10 @@ private:
         uint32_t                                         observed_consumers { 0 };
     };
     static constexpr std::size_t kMaxImportedVideoFramesPerVideoTex { 4 };
+    /// Conversion submissions whose frame may be dropped before the GPU ran
+    /// them. Not a gate: the pool parks such a destination until its command
+    /// buffer completes. It is the unretired-submission term of the in-flight
+    /// expectation.
     static constexpr std::size_t kMaxPendingVideoImportSubmissions { 2 };
     static constexpr std::size_t kMaxPendingTextureUploads { 8 };
     bool                CanReuseVideoFrameImport(const video::VideoTextureFrame& frame) const;
@@ -351,6 +389,8 @@ private:
     uint64_t                                    m_texture_upload_submit_serial { 0 };
     std::vector<std::shared_ptr<ImageSlots>>    m_retired_runtime_textures;
     void*                                       m_metal_device { nullptr };
+    /// Borrowed id<MTLCommandQueue> MoltenVK owns for the graphics queue.
+    void*                                       m_metal_command_queue { nullptr };
     bool                                        m_metal_device_queried { false };
 
     struct CachedSampler {

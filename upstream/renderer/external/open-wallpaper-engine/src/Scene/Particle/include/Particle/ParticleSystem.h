@@ -74,6 +74,14 @@ public:
     ~ParticleSubSystem();
 
     void Emitt();
+    /// Rebuilds this subsystem's mesh from the simulation `Emitt` already ran,
+    /// without emitting, ageing or killing anything. A frame that hid the
+    /// owner skipped that rebuild; the first frame that draws it calls this
+    /// so the geometry matches the simulation this frame left behind.
+    void RebuildMesh();
+    /// The mesh this subsystem writes, so a draw can tell a skipped rebuild
+    /// from one this frame already did.
+    const SceneMesh* Mesh() const { return m_mesh.get(); }
     void UpdateMouseControlpoints();
 
     ParticleInstance* QueryNewInstance();
@@ -116,6 +124,9 @@ private:
     ParticleSystem&            m_sys;
     std::shared_ptr<SceneMesh> m_mesh;
     std::weak_ptr<SceneNode>   m_owner_node;
+    /// Set when `Emitt` wrote this frame's geometry. A draw that finds it
+    /// clear rebuilds before uploading, without running the simulation again.
+    bool m_mesh_rebuilt { true };
     //	std::vector<std::unique_ptr<ParticleEmitter>> m_emiters;
     std::vector<ParticleEmittOp> m_emiters;
 
@@ -126,6 +137,7 @@ private:
     std::array<ParticleControlpoint, 8> m_controlpoints;
 
     ParticleRawGenSpecOp m_genSpecOp;
+    ParticleOverflowFlags m_overflow_flags {};
     u32                  m_maxcount;
     double               m_rate;
     double               m_time;
@@ -153,6 +165,9 @@ public:
     ~ParticleSystem() = default;
 
     void Emitt();
+    /// After visibility is final for the frame. A subsystem whose owner is
+    /// now drawn and whose mesh was not rebuilt by `Emitt` is rebuilt here.
+    void RebuildVisibleMeshes();
 
     /// Whether any emitter exists.
     ///

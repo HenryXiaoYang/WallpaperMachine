@@ -38,6 +38,7 @@ fn display_snapshot(display_id: u32) -> DisplaySnapshotEntry {
         desc,
         handle: None,
         accepts_pointer_input: false,
+        paused: false,
         window_active: true,
         assignment: None,
     }

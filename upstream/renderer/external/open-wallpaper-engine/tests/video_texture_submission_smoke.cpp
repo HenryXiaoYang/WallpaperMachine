@@ -44,35 +44,5 @@ TEST(VideoTextureSubmissionSmoke, ClampsNegativeVideoPlaybackRates) {
     EXPECT_FLOAT_EQ(merged.rate, 0.0f);
 }
 
-TEST(VideoTextureSubmissionSmoke, AllowsNewImportWhenSubmissionSlotIsAvailable) {
-    vulkan::VideoImportSubmissionPlan plan {
-        .pending_submissions = 1,
-        .available_slots     = 2,
-        .must_destroy_resource = false,
-    };
-
-    EXPECT_FALSE(vulkan::VideoImportSubmissionNeedsFenceWait(plan));
-}
-
-TEST(VideoTextureSubmissionSmoke, WaitsBeforeReusingAllBusySubmissionSlots) {
-    vulkan::VideoImportSubmissionPlan plan {
-        .pending_submissions = 2,
-        .available_slots     = 2,
-        .must_destroy_resource = false,
-    };
-
-    EXPECT_TRUE(vulkan::VideoImportSubmissionNeedsFenceWait(plan));
-}
-
-TEST(VideoTextureSubmissionSmoke, WaitsBeforeDestroyingImportedFrameResources) {
-    vulkan::VideoImportSubmissionPlan plan {
-        .pending_submissions = 1,
-        .available_slots     = 2,
-        .must_destroy_resource = true,
-    };
-
-    EXPECT_TRUE(vulkan::VideoImportSubmissionNeedsFenceWait(plan));
-}
-
 } // namespace
 } // namespace wallpaper

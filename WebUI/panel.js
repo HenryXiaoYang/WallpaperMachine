@@ -1319,10 +1319,23 @@ function settleLivePreview(image, loaded) {
   if (entry?.status === 'loading') entry.status = loaded ? 'ready' : 'failed';
   if (entry && !loaded) renderGrid(true);
   pumpLivePreviews();
-  if (loaded) liveSampler ??= setInterval(sampleLivePreviews, 250);
+  syncLiveSampler();
+}
+function livePreviewsNeedSampling() {
+  return state?.page === 'discover' && !document.hidden && [...live.values()].some(entry => entry.status === 'ready');
+}
+// The 250 ms luminance pass exists only while a ready animation can be seen.
+// Leaving Discover, hiding the document, or running out of ready tiles stops
+// it; coming back re-arms the same cadence.
+function syncLiveSampler() {
+  if (!livePreviewsNeedSampling()) {
+    if (liveSampler !== null) { clearInterval(liveSampler); liveSampler = null; }
+    return;
+  }
+  liveSampler ??= setInterval(sampleLivePreviews, 250);
 }
 function sampleLivePreviews() {
-  if (state?.page !== 'discover') return;
+  if (!livePreviewsNeedSampling()) { syncLiveSampler(); return; }
   for (const image of $('wallpaper-grid').querySelectorAll('img.tile-live')) {
     const tile = image.closest('.wallpaper-tile'); const entry = live.get(tile?.dataset.key);
     if (!entry || entry.status !== 'ready' || !image.complete || !image.naturalWidth) continue;
@@ -1333,6 +1346,7 @@ function sampleLivePreviews() {
   }
 }
 $('wallpaper-grid').addEventListener('scroll', () => { clearTimeout(liveScrollTimer); liveScrollTimer = setTimeout(queueLivePreviews, 120); }, { passive: true });
+document.addEventListener('visibilitychange', () => { syncLiveSampler(); if (!document.hidden) queueLivePreviews(); });
 const welcomeInert = new Set();
 function setWelcomeBackgroundInert(open) {
   for (const node of $('app').children) {

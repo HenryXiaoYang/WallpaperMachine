@@ -194,6 +194,12 @@ void FinPass::prepare(Scene& scene, const Device& device, RenderingResources& rr
 
         if (! pipeline.create(device, pass, m_desc.pipeline)) return;
     }
+    {
+        auto opt = CreateRenderPass(device.handle(), m_desc.present_format,
+                                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        if (! opt.has_value()) return;
+        m_copy_source_pass = std::move(opt.value());
+    }
     /*
     if(m_desc.present_layout == vk::ImageLayout::ePresentSrcKHR || m_desc.present_layout ==
     vk::ImageLayout::eSharedPresentKHR) m_desc.render_layout = m_desc.present_layout; else
@@ -229,24 +235,6 @@ VkResult FinPass::execute(const Device& device, RenderingResources& rr) {
     const auto result = GetOrCreateColorFramebuffer(
         device, *m_desc.pipeline.pass, m_desc.vk_present, m_framebuffers, framebuffer);
     if (result != VK_SUCCESS) return result;
-    RecordShaderReadBarrier(cmd, m_desc.vk_result, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-    {
-        VkDescriptorImageInfo desc_img {
-            .sampler     = m_desc.vk_result.sampler,
-            .imageView   = m_desc.vk_result.view,
-            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-        };
-        VkWriteDescriptorSet wset {
-            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .pNext           = nullptr,
-            .dstSet          = {},
-            .dstBinding      = 1,
-            .descriptorCount = 1,
-            .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .pImageInfo      = &desc_img,
-        };
-        cmd.PushDescriptorSetKHR(VK_PIPELINE_BIND_POINT_GRAPHICS, *m_desc.pipeline.layout, 0, wset);
-    }
 
     // do queue family transfer operation
     if (m_desc.present_queue_index != device.graphics_queue().family_index) {
@@ -268,33 +256,9 @@ VkResult FinPass::execute(const Device& device, RenderingResources& rr) {
                             VK_DEPENDENCY_BY_REGION_BIT,
                             imb);
     }
-    VkRenderPassBeginInfo pass_begin_info {
-        .sType       = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
-        .pNext       = nullptr,
-        .renderPass  = *m_desc.pipeline.pass,
-        .framebuffer = framebuffer,
-        .renderArea =
-            VkRect2D {
-                .offset = { 0, 0 },
-                .extent = { outext.width, outext.height },
-            },
-        .clearValueCount = 1,
-        .pClearValues    = &m_desc.clear_value,
-    };
-    cmd.BeginRenderPass(pass_begin_info, VK_SUBPASS_CONTENTS_INLINE);
-
-    cmd.BindPipeline(VK_PIPELINE_BIND_POINT_GRAPHICS, *m_desc.pipeline.handle);
-    const VkExtent2D extent { outext.width, outext.height };
-    auto viewport = ResolvePresentationViewport(rr, extent);
-    auto scissor = ResolvePresentationScissor(rr, extent);
-    cmd.SetViewport(0, viewport);
-    cmd.SetScissor(0, scissor);
-
-    const auto& vertex_buf =
-        rr.wallpaper_horizontal_flip ? m_desc.flipped_vertex_buf : m_desc.vertex_buf;
-    cmd.BindVertexBuffers(0, 1, std::array { rr.vertex_buf->gpuBuf() }.data(), &vertex_buf.offset);
-    cmd.Draw(4, 1, 0, 0);
-    cmd.EndRenderPass();
+    const auto composed = recordComposition(rr, *m_desc.pipeline.pass, framebuffer,
+                                            { outext.width, outext.height });
+    if (composed != VK_SUCCESS) return composed;
 
     // do queue family transfer operation
     if (m_desc.present_queue_index != device.graphics_queue().family_index) {
@@ -318,10 +282,64 @@ VkResult FinPass::execute(const Device& device, RenderingResources& rr) {
     }
     return VK_SUCCESS;
 }
+
+VkResult FinPass::recordComposition(RenderingResources& rr, VkRenderPass render_pass,
+                                    VkFramebuffer framebuffer, VkExtent2D extent) const {
+    if (! prepared() || render_pass == VK_NULL_HANDLE || framebuffer == VK_NULL_HANDLE ||
+        m_desc.vk_result.handle == VK_NULL_HANDLE || m_desc.vk_result.view == VK_NULL_HANDLE)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    auto& cmd = rr.command;
+    RecordShaderReadBarrier(cmd, m_desc.vk_result, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    {
+        VkDescriptorImageInfo desc_img {
+            .sampler     = m_desc.vk_result.sampler,
+            .imageView   = m_desc.vk_result.view,
+            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        };
+        VkWriteDescriptorSet wset {
+            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .pNext           = nullptr,
+            .dstSet          = {},
+            .dstBinding      = 1,
+            .descriptorCount = 1,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo      = &desc_img,
+        };
+        cmd.PushDescriptorSetKHR(VK_PIPELINE_BIND_POINT_GRAPHICS, *m_desc.pipeline.layout, 0, wset);
+    }
+    VkRenderPassBeginInfo pass_begin_info {
+        .sType       = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+        .pNext       = nullptr,
+        .renderPass  = render_pass,
+        .framebuffer = framebuffer,
+        .renderArea =
+            VkRect2D {
+                .offset = { 0, 0 },
+                .extent = extent,
+            },
+        .clearValueCount = 1,
+        .pClearValues    = &m_desc.clear_value,
+    };
+    cmd.BeginRenderPass(pass_begin_info, VK_SUBPASS_CONTENTS_INLINE);
+
+    cmd.BindPipeline(VK_PIPELINE_BIND_POINT_GRAPHICS, *m_desc.pipeline.handle);
+    auto viewport = ResolvePresentationViewport(rr, extent);
+    auto scissor = ResolvePresentationScissor(rr, extent);
+    cmd.SetViewport(0, viewport);
+    cmd.SetScissor(0, scissor);
+
+    const auto& vertex_buf =
+        rr.wallpaper_horizontal_flip ? m_desc.flipped_vertex_buf : m_desc.vertex_buf;
+    cmd.BindVertexBuffers(0, 1, std::array { rr.vertex_buf->gpuBuf() }.data(), &vertex_buf.offset);
+    cmd.Draw(4, 1, 0, 0);
+    cmd.EndRenderPass();
+    return VK_SUCCESS;
+}
 void FinPass::resetPreparedState(RenderingResources& rr) {
     setPrepared(false);
     clearReleaseTexs();
     m_framebuffers.clear();
+    m_copy_source_pass = {};
     ResetPipelineParameters(m_desc.pipeline);
     if (rr.vertex_buf != nullptr) {
         rr.vertex_buf->unallocateSubRef(m_desc.vertex_buf);

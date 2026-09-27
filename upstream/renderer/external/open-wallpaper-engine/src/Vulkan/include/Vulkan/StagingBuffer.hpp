@@ -41,6 +41,11 @@ public:
 
     bool recordUpload(vvk::CommandBuffer&);
     void finishUpload(bool completed) noexcept;
+    /// Whether host writes are waiting to be copied to the GPU buffer. A frame
+    /// with pending writes has new data to draw and is never a repeat.
+    [[nodiscard]] bool hasPendingWrites() const noexcept {
+        return m_full_upload_required || m_dirty_count != 0;
+    }
 
     VkBuffer gpuBuf() const;
 

@@ -139,16 +139,24 @@ void configure_desktop_poster(wallpaper::RenderInitInfo& info, void* metal_layer
         std::scoped_lock lock(mailbox->guard);
         mailbox->wake = std::move(wake);
     };
-    info.wants_poster = [mailbox] {
+    // New apply/refresh requests must export the next presented frame, even if
+    // the previous wallpaper was sampled less than two seconds ago. Only
+    // retries of a FAILED readback retain the backoff.
+    const auto due = [](const DesktopPosterMailbox& state,
+                        std::chrono::steady_clock::time_point now) {
+        if (state.requested == state.delivered) return false;
+        const bool retry =
+            ! state.handed_out.empty() && state.handed_out.back() == state.requested;
+        return ! (retry && now < state.next_attempt);
+    };
+    info.poster_pending = [mailbox, due] {
+        std::scoped_lock lock(mailbox->guard);
+        return due(*mailbox, std::chrono::steady_clock::now());
+    };
+    info.wants_poster = [mailbox, due] {
         std::scoped_lock lock(mailbox->guard);
         const auto now = std::chrono::steady_clock::now();
-        if (mailbox->requested == mailbox->delivered) return false;
-        // New apply/refresh requests must export the next presented frame,
-        // even if the previous wallpaper was sampled less than two seconds ago.
-        // Only retries of a FAILED readback retain the backoff.
-        const bool retry =
-            ! mailbox->handed_out.empty() && mailbox->handed_out.back() == mailbox->requested;
-        if (retry && now < mailbox->next_attempt) return false;
+        if (! due(*mailbox, now)) return false;
         mailbox->next_attempt = now + std::chrono::seconds(2);
         mailbox->handed_out.push_back(mailbox->requested);
         if (mailbox->handed_out.size() > DesktopPosterMailbox::kMaxOutstanding) {
@@ -312,6 +320,23 @@ struct UserShortcutCallbackRegistration {
     }
 };
 
+struct AudioRequirementCallbackRegistration {
+    owe_audio_requirement_callback callback { nullptr };
+    void* user_data { nullptr };
+    owe_audio_requirement_callback_drop drop_user_data { nullptr };
+
+    AudioRequirementCallbackRegistration(owe_audio_requirement_callback callback, void* user_data)
+        : callback(callback), user_data(user_data) {}
+
+    ~AudioRequirementCallbackRegistration() {
+        if (drop_user_data != nullptr) drop_user_data(user_data);
+    }
+
+    void operator()(bool requires_audio) const {
+        if (callback != nullptr) callback(user_data, requires_audio);
+    }
+};
+
 int finish_with_error_noexcept(const char* message) noexcept {
     try {
         return finish_with_error(message);
@@ -327,6 +352,7 @@ struct owe_scene_wallpaper {
     std::shared_ptr<FirstFrameCallbackRegistration> first_frame_callback;
     std::shared_ptr<PointerInputCallbackRegistration> pointer_input_callback;
     std::shared_ptr<UserShortcutCallbackRegistration> user_shortcut_callback;
+    std::shared_ptr<AudioRequirementCallbackRegistration> audio_requirement_callback;
 };
 
 #ifdef WESCENE_BUILD_TESTS
@@ -593,6 +619,32 @@ extern "C" int owe_scene_wallpaper_set_user_shortcut_callback(
         return 0;
     } catch (...) {
         return finish_with_error_noexcept("failed to register user-shortcut callback");
+    }
+}
+
+extern "C" int owe_scene_wallpaper_set_audio_requirement_callback(
+    owe_scene_wallpaper* scene,
+    owe_audio_requirement_callback callback,
+    void* user_data,
+    owe_audio_requirement_callback_drop drop_user_data)
+{
+    try {
+        clear_last_error();
+        if (!valid_scene(scene)) return finish_with_error("scene must not be null");
+        if (!scene->scene.inited()) return finish_with_error("scene must be initialized");
+
+        // Keep drop unarmed until the registration is installed, as the pointer
+        // callback does: a failure here must not consume user_data.
+        auto registration =
+            std::make_shared<AudioRequirementCallbackRegistration>(callback, user_data);
+        auto forwarder = std::make_shared<wallpaper::AudioRequirementCallback>(
+            [registration](bool requires_audio) { (*registration)(requires_audio); });
+        scene->scene.setPropertyObject(wallpaper::PROPERTY_AUDIO_REQUIREMENT_CALLBACK, forwarder);
+        registration->drop_user_data = drop_user_data;
+        scene->audio_requirement_callback = std::move(registration);
+        return 0;
+    } catch (...) {
+        return finish_with_error_noexcept("failed to register audio-requirement callback");
     }
 }
 

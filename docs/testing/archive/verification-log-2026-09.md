@@ -15,6 +15,50 @@ renderer behaviour and known-failing tests into
 [../renderer.md](../renderer.md), build and code-signing traps into
 [../../build.md](../../build.md).
 
+## 2026-09-27 — Renderer power batch 2 (R7, R8, R9, R10, R14, R18)
+
+- python3 scripts/check_renderer.py: exit 0; 24 test binaries exit 0; 10/10 cases pixel-equal pooled vs isolated; reload cycles 0 (artifacts/renderer/adaptive-20260927-211358).
+- playback_gpu_test 49/49; unchanged_present_test 3/3 (real CAMetalLayer swapchain, now COLOR_ATTACHMENT only; posters delivered, static poster identical with reuse on/off).
+- R8: PlainVideoPresentsThroughTheFinalViewportByteForByte (production video layer, 9 scaling layouts x RGBA/BGRA x linear/nearest) equals copy+FinPass bytes; sampler-override mutation fails 16 checks; lldb shows the unchanged_present plain video (640x360 on 1280x720) reaching CustomShaderPass::executePresentation.
+- R18: every poster (direct and FinPass, scaled and mirrored) equals the target's bytes in the same test; MoltenVK 1.4.2 MVKSwapchain.mm:510 sets framebufferOnly only without TRANSFER/SAMPLED/STORAGE usage.
+- R9/R10: HiddenClearsAreRecordedOnlyWhereSomethingReadsThem, FirstDrawAfterATransparentClearOpensWithItByteForByte, render_target_lifetime_test 4/4; GraphOrdering... now requires 0 clears for an unread hidden pass (1 before).
+- offscreen_scene_probe baseline vs new, WE_TEST_RANDOM_SEED=7, 3 frames, 10 library scenes: 8 deterministic scenes byte-identical (incl. copybackground-off groups and 24-hidden-layer scene); 2 scenes differ between two baseline runs already (no evidence).
+- R7 (subagent): 24 frames before 48 submits/48 fence waits/24 image creations/24 CPU waits, after 24/24/3/0. R14 (subagent): generated-7 108 string-keyed finds per frame before, 0 after warm-up; probe dumps identical.
+- Also: scene_schema_tests 91/91, video_texture_submission_smoke 2/2, mouse_input_test 12/12. rendergraph_smoke SEGFAULTs in Release (stale, asserts compile out; documented in renderer.md Known limitations).
+- Not run: desktop runtime, visual-on-display and power verification (not authorized). No power saving is claimed; evidence is workload only.
+
+## 2026-09-27 — Launch crash: CopyPass left prepared across render-scale rebuild
+
+- Cause: crash reports 2026-09-27 13:45-13:48 SIGSEGV in MVKCmdCopyImage::validate from CopyPass::execute after 'render scale applied: 0.750'; CopyPass::destory was a no-op, so applyRenderScale re-prepared every pass except the copy, which kept freed image handles.
+- Fix: CopyPass::destory resets prepared, release list and vk_src/vk_dst; provenance.json and docs/testing/renderer.md updated.
+- Regression: PlaybackGPU.CopyPreparesAgainAfterRenderTargetsAreDroppedAndResized failed before the fix (copy.prepared() stayed true), passes after; playback_gpu_test 41/41.
+- python3 scripts/check_renderer.py: all binaries exit 0, generated cases pixel-equal, reload cycles 0 failures.
+- python3 scripts/test.py: 644 passed, 0 failed, 11 skipped.
+- python3 scripts/build.py --configuration Release: OK; built binary's CopyPass::destory disassembly clears the prepared flag and image parameters.
+- Not run: app launch on the desktop (not authorized); the user's config (render_scale 0.75, cs2 scene 3373259209) was not exercised live.
+
+## 2026-09-27 — Release build 1.0.1 (929b3c1 + scripts/lib/xcode.py log patterns)
+
+- python3 scripts/test.py: 644 passed, 0 failed, 11 skipped of 655.
+- python3 scripts/build.py --configuration Release: OK (full build incl. renderer and bindings).
+- Bundle WebUI matches WebUI/ (diff -rq); CFBundleShortVersionString 1.0.1; codesign --verify --deep --strict OK.
+- Delivered: build/Build/Products/Release/WallpaperMachine.app. Not packaged, not launched.
+
+## 2026-09-27 — Release CI: parallel build/test jobs and build caches
+
+- Build workflow split into build + test (parallel macos-15) and publish (ubuntu, needs both); shared setup in .github/actions/prepare-build; warm-caches.yml keeps entries alive.
+- actionlint 1.7.12 on .github/workflows/*.yml: clean. Composite action YAML parsed.
+- ccache probe (throwaway, fresh CARGO_TARGET_DIR, CMAKE_*_COMPILER_LAUNCHER=ccache): cold 67 s with 105 misses; second fresh build 48 s with 104 direct hits, so the cmake crate's CMake honors the env launcher.
+- Homebrew probe: with no tap providing mwe-ffmpeg, brew list --versions and brew --prefix still resolve the keg, so a restored Cellar keg needs only its opt link; install_ffmpeg.py unchanged.
+- python3 scripts/test.py: script modules now run concurrently (phase ~9 s, bounded by test_dmg); 644 passed, 0 failed, 11 skipped.
+- Not verified: the workflows themselves. Build runs only from Version or a tag push; first real run is the next release. Check both jobs' ccache --show-stats and the three cache restores there.
+
+## 2026-09-27 — Rebase onto origin/main (macOS 15, hide-after-apply) before 1.0.1
+
+- Conflicts resolved: settings.js keeps 'Hide window after applying a wallpaper' and drops General 'Pause on battery' (now Performance battery mode); pbxproj regenerated with xcodegen; verification logs merged, oldest entries archived.
+- python3 scripts/test.py: 644 passed, 0 failed, 11 skipped of 655; Python script suites OK.
+- Not run: Release build, check_renderer.py (no renderer change in the merge), desktop checks.
+
 ## 2026-09-27 — Hide-after-apply setting; Next Wallpaper and Lock Screen menu items
 
 - Settings > General gains 'Hide window after applying a wallpaper' (default on, UserDefaults WallpaperMachine.hideAfterActivating); activate only calls NSApp.hide when it is on.

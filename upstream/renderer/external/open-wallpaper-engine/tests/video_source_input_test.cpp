@@ -11,6 +11,7 @@
 #include "Image.hpp"
 #include "Video/FfmpegVideoTextureSource.hpp"
 #include "Video/VideoTextureSource.hpp"
+#include "Scene/SceneWallpaper.hpp"
 #include "synthetic_video.hpp"
 
 #include <gtest/gtest.h>
@@ -26,10 +27,12 @@ extern "C" {
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <set>
 #include <string>
 #include <thread>
@@ -454,6 +457,48 @@ TEST_F(VideoSourceInput, DestroyingASourceMidDecodeCancelsPromptly) {
     unprimed_source.reset();
 
     EXPECT_TRUE(CacheEntriesAddedSince(cache_before).empty());
+}
+
+// A plain video wallpaper has no material, particle, uniform or script that
+// could read system audio, so it must never ask for the system-audio tap.
+TEST_F(VideoSourceInput, PlainVideoProjectNeverReportsAnAudioRequirement) {
+    ASSERT_TRUE(WriteSyntheticVideo(project_dir / "media.mp4", 2, "audio-requirement"));
+    const auto project_json = project_dir / "project.json";
+    std::ofstream(project_json) << R"({"type":"video","file":"media.mp4","title":"clip"})";
+
+    std::string error;
+    auto        scene = SceneWallpaperInputTestAccess::CreateVideoProjectScene(
+        project_json.string(), &error);
+    ASSERT_NE(scene, nullptr) << error;
+
+    std::mutex              mutex;
+    std::condition_variable changed;
+    std::vector<bool>       audio;
+    int                     commits = 0;
+    SceneWallpaper          wallpaper;
+    ASSERT_TRUE(wallpaper.init());
+    wallpaper.setPropertyObject(PROPERTY_AUDIO_REQUIREMENT_CALLBACK,
+        std::make_shared<AudioRequirementCallback>([&](bool requires_audio) {
+            std::lock_guard lock(mutex);
+            audio.push_back(requires_audio);
+            changed.notify_all();
+        }));
+    // The pointer report follows the audio report of the same commit on the
+    // same looper, so seeing it means the audio report has been handled.
+    wallpaper.setPropertyObject(PROPERTY_POINTER_INPUT_CALLBACK,
+        std::make_shared<PointerInputCallback>([&](bool) {
+            std::lock_guard lock(mutex);
+            ++commits;
+            changed.notify_all();
+        }));
+    SceneWallpaperInputTestAccess::PostScene(wallpaper, scene);
+    {
+        std::unique_lock lock(mutex);
+        ASSERT_TRUE(changed.wait_for(lock, std::chrono::seconds(5), [&] { return commits >= 2; }));
+    }
+    wallpaper.shutdown();
+    std::lock_guard lock(mutex);
+    EXPECT_EQ(audio, (std::vector<bool> { false }));
 }
 
 } // namespace

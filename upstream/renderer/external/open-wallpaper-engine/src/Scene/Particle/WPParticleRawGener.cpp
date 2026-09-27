@@ -192,7 +192,7 @@ inline float RopeStripPosition(usize m, usize n, bool smoothing) {
 
 inline void EmitRopeStrip(SceneVertexArray& sv, bool thick, std::span<const RopePoint> points,
                           float authored_length, usize& quad, usize quad_capacity,
-                          const ParticleRenderScale& render_scale) {
+                          const ParticleRenderScale& render_scale, bool& overflow_reported) {
     const usize n = points.size();
     if (n < 2) return;
     const float trail_length = EncodeRopeTrailLength(authored_length, render_scale.uv_scale);
@@ -215,8 +215,11 @@ inline void EmitRopeStrip(SceneVertexArray& sv, bool thick, std::span<const Rope
         if (tb.norm() < 1e-6f) tb = delta;
 
         if (quad >= quad_capacity) {
-            LOG_ERROR("rope geometry exceeds mesh capacity: %zu quads, capacity %zu", quad,
-                      quad_capacity);
+            if (! overflow_reported) {
+                overflow_reported = true;
+                LOG_ERROR("rope geometry exceeds mesh capacity: %zu quads, capacity %zu", quad,
+                          quad_capacity);
+            }
             return;
         }
         WriteRopeQuad(sv, quad, thick, a, b, ta, tb, trail_length,
@@ -226,7 +229,8 @@ inline void EmitRopeStrip(SceneVertexArray& sv, bool thick, std::span<const Rope
 }
 
 inline usize GenRopeData(std::span<const std::unique_ptr<ParticleInstance>> instances,
-                         WPGOption opt, SceneVertexArray& sv, ParticleRenderScale render_scale) {
+                         WPGOption opt, SceneVertexArray& sv, ParticleRenderScale render_scale,
+                         bool& overflow_reported) {
     std::vector<RopePoint> live;
     std::vector<RopePoint> rope;
     const usize            quad_capacity = sv.CapacitySize() / (sv.OneSize() * 4);
@@ -250,7 +254,8 @@ inline usize GenRopeData(std::span<const std::unique_ptr<ParticleInstance>> inst
             render_scale.uv_scrolling ? static_cast<float>(quad_capacity) + 1.0f
                                       : static_cast<float>(live.size());
         if (s == 1) {
-            EmitRopeStrip(sv, thick, live, authored_length, quad, quad_capacity, render_scale);
+            EmitRopeStrip(sv, thick, live, authored_length, quad, quad_capacity, render_scale,
+                          overflow_reported);
         } else {
             const usize n = live.size();
             rope.clear();
@@ -272,7 +277,8 @@ inline usize GenRopeData(std::span<const std::unique_ptr<ParticleInstance>> inst
             const float subdivided_length =
                 render_scale.uv_scrolling ? static_cast<float>(quad_capacity) + 1.0f
                                           : static_cast<float>(rope.size());
-            EmitRopeStrip(sv, thick, rope, subdivided_length, quad, quad_capacity, render_scale);
+            EmitRopeStrip(sv, thick, rope, subdivided_length, quad, quad_capacity, render_scale,
+                          overflow_reported);
         }
         if (quad >= quad_capacity) return quad;
     }
@@ -281,7 +287,7 @@ inline usize GenRopeData(std::span<const std::unique_ptr<ParticleInstance>> inst
 
 inline usize GenRopeTrailData(std::span<const std::unique_ptr<ParticleInstance>> instances,
                               WPGOption opt, SceneVertexArray& sv,
-                              ParticleRenderScale render_scale) {
+                              ParticleRenderScale render_scale, bool& overflow_reported) {
     std::vector<RopePoint> points;
     const usize            quad_capacity = sv.CapacitySize() / (sv.OneSize() * 4);
     usize                  quad { 0 };
@@ -316,7 +322,8 @@ inline usize GenRopeTrailData(std::span<const std::unique_ptr<ParticleInstance>>
             const float authored_length =
                 render_scale.uv_scrolling ? static_cast<float>(trails[i].Capacity())
                                           : static_cast<float>(h);
-            EmitRopeStrip(sv, thick, points, authored_length, quad, quad_capacity, render_scale);
+            EmitRopeStrip(sv, thick, points, authored_length, quad, quad_capacity, render_scale,
+                          overflow_reported);
             if (quad >= quad_capacity) return quad;
             ++i;
         }
@@ -378,7 +385,8 @@ inline void updateIndexArray(uint32_t start_quad, uint32_t count, SceneIndexArra
 
 void WPParticleRawGener::GenGLData(std::span<const std::unique_ptr<ParticleInstance>> instances,
                                    SceneMesh& mesh, ParticleRawGenSpecOp& specOp,
-                                   ParticleRenderScale render_scale) {
+                                   ParticleRenderScale render_scale,
+                                   ParticleOverflowFlags& overflow_flags) {
     auto& sv = mesh.GetVertexArray(0);
     auto& si = mesh.GetIndexArray(0);
 
@@ -392,9 +400,16 @@ void WPParticleRawGener::GenGLData(std::span<const std::unique_ptr<ParticleInsta
     if (sv.GetOption(WE_PRENDER_ROPE) && sv.OneSize() != expected_rope) {
         LOG_ERROR("rope vertex one_size %zu, expected %zu", sv.OneSize(), expected_rope);
     } else if (sv.GetOption(WE_PRENDER_ROPETRAIL)) {
-        particle_num = GenRopeTrailData(instances, opt, sv, render_scale);
+        particle_num = GenRopeTrailData(instances, opt, sv, render_scale, overflow_flags.rope_capacity);
+        if (sv.OneSize() > 0 && particle_num < sv.CapacitySize() / (sv.OneSize() * 4)) {
+            overflow_flags.rope_capacity = false;
+        }
     } else if (sv.GetOption(WE_PRENDER_ROPE)) {
-        particle_num = GenRopeData(instances, opt, sv, render_scale);
+        particle_num = GenRopeData(instances, opt, sv, render_scale, overflow_flags.rope_capacity);
+        if (sv.OneSize() > 0 &&
+            particle_num < sv.CapacitySize() / (sv.OneSize() * 4)) {
+            overflow_flags.rope_capacity = false;
+        }
     } else {
         particle_num += GenParticleData(instances, specOp, opt, sv, render_scale);
     }
@@ -409,8 +424,11 @@ void WPParticleRawGener::GenGLData(std::span<const std::unique_ptr<ParticleInsta
     const uint64_t cap    = si.QuadCapacity();
     uint64_t       quads  = particle_num;
     if (quads > cap) {
-        LOG_ERROR("particle geometry exceeds index capacity: %zu quads, capacity %zu",
-                  particle_num, static_cast<size_t>(cap));
+        if (! overflow_flags.index) {
+            overflow_flags.index = true;
+            LOG_ERROR("particle geometry exceeds index capacity: %zu quads, capacity %zu",
+                      particle_num, static_cast<size_t>(cap));
+        }
         quads = cap;
         if (! CheckedMulU64(quads, 6, draw_indices)) {
             si.SetDrawIndexCount(0);
@@ -431,5 +449,8 @@ void WPParticleRawGener::GenGLData(std::span<const std::unique_ptr<ParticleInsta
         si.SetDrawIndexCount(0);
         return;
     }
+    // Compared before clamping: a clamped count always fits, and re-arming on
+    // it would log the same overflow again every frame.
+    if (static_cast<uint64_t>(particle_num) <= cap) overflow_flags.index = false;
     si.SetDrawIndexCount(static_cast<usize>(draw_indices));
 }

@@ -1,5 +1,7 @@
 #include "CustomShaderPass.hpp"
 #include "PrePass.hpp"
+#include "CopyPass.hpp"
+#include "FinPass.hpp"
 #include "Scene/Scene.h"
 #include "Scene/SceneShader.h"
 #include "Runtime/SceneRuntimeContext.hpp"
@@ -153,6 +155,7 @@ CustomShaderPass::CustomShaderPass(const Desc& desc) {
     m_desc.material_slot   = desc.material_slot;
     m_desc.sample_count    = desc.sample_count;
     m_desc.presentation_format = desc.presentation_format;
+    m_desc.presents_through_final_viewport = desc.presents_through_final_viewport;
     m_desc.sprites_map     = desc.sprites_map;
     m_desc.video_textures  = desc.video_textures;
 };
@@ -283,16 +286,12 @@ std::optional<vvk::RenderPass> CreateRenderPass(const vvk::Device& device, VkFor
     }
 }
 
-static bool UpdateUniform(StagingBuffer* buf, const StagingBufferRef& bufref,
-                          const ShaderReflected::Block& block, std::string_view name,
-                          const wallpaper::ShaderValue& value) {
+static bool WriteUniform(StagingBuffer* buf, const StagingBufferRef& bufref,
+                         const ShaderReflected::BlockedUniform& member,
+                         const wallpaper::ShaderValue& value) {
     using namespace wallpaper;
     std::span<uint8_t> bytes { (uint8_t*)value.data(),
                                value.size() * sizeof(ShaderValue::value_type) };
-    const auto uniform = block.member_map.find(name);
-    if (uniform == block.member_map.end()) return true;
-
-    const auto& member = uniform->second;
     if (member.array_count > 0 && member.array_stride > 0 &&
         bytes.size() % member.array_count == 0) {
         const size_t element_size = bytes.size() / member.array_count;
@@ -313,6 +312,100 @@ static bool UpdateUniform(StagingBuffer* buf, const StagingBufferRef& bufref,
     }
     return buf->writeToBuf(bufref, bytes, member.offset);
 }
+
+static bool UpdateUniform(StagingBuffer* buf, const StagingBufferRef& bufref,
+                          const ShaderReflected::Block& block, std::string_view name,
+                          const wallpaper::ShaderValue& value) {
+    const auto uniform = block.member_map.find(name);
+    if (uniform == block.member_map.end()) return true;
+    return WriteUniform(buf, bufref, uniform->second, value);
+}
+
+namespace
+{
+/// Per-pass memo of reflected members, so a frame's uniform writes cost no
+/// string-keyed map walks.
+///
+/// Both tables point into the pass's own reflected block, which is immutable
+/// until the next `prepare()` builds a new `update_op` and a new memo. Values
+/// are still written every frame through the staging buffer's `memcmp` gate,
+/// so nothing cached here can hold a value back.
+struct UniformMemo {
+    /// Names the shader value updater writes. Keys are compared by content,
+    /// never by pointer, and a miss falls back to the reflected map, so an
+    /// updater that writes a name for the first time is still resolved.
+    struct Named {
+        std::string                             name;
+        const ShaderReflected::BlockedUniform* member;
+    };
+    std::vector<Named> named;
+    usize              cursor { 0 };
+
+    /// The material's constants that the block has, in map order.
+    /// `constValues` is a `std::map` that only gains keys after parsing
+    /// (`operator[]`, `emplace`, or assignment through `find`), so its nodes
+    /// and their values stay where they are; a new key changes its size and
+    /// rebuilds this table on the next frame.
+    struct Constant {
+        const ShaderReflected::BlockedUniform* member;
+        const wallpaper::ShaderValue*          value;
+    };
+    const wallpaper::SceneMaterial* constants_material { nullptr };
+    usize                           constants_count { 0 };
+    bool                            constants_valid { false };
+    std::vector<Constant>           constants;
+
+    /// Whether each texture slot names a runtime image, as of
+    /// `runtime_names_generation`, and for the name it held then.
+    struct RuntimeSlot {
+        std::string name;
+        bool        is_runtime { false };
+        bool        valid { false };
+    };
+    std::vector<RuntimeSlot> runtime_slots;
+    uint64_t                 runtime_names_generation { 0 };
+    bool                     runtime_names_valid { false };
+
+    const ShaderReflected::BlockedUniform* Resolve(const ShaderReflected::Block& block,
+                                                   std::string_view              name) {
+        // The updater writes the same names in the same order each frame, so
+        // the entry after the last hit is almost always the one.
+        const usize count = named.size();
+        for (usize step = 0; step < count; ++step) {
+            usize index = cursor + step;
+            if (index >= count) index -= count;
+            if (named[index].name == name) {
+                cursor = index + 1;
+                return named[index].member;
+            }
+        }
+        const auto                             found  = block.member_map.find(name);
+        const ShaderReflected::BlockedUniform* member =
+            found == block.member_map.end() ? nullptr : &found->second;
+        named.push_back(Named { std::string(name), member });
+        cursor = named.size();
+        return member;
+    }
+
+    const std::vector<Constant>& Constants(const ShaderReflected::Block&  block,
+                                           const wallpaper::SceneMaterial& material) {
+        const auto& values = material.customShader.constValues;
+        if (! constants_valid || constants_material != &material ||
+            constants_count != values.size()) {
+            constants.clear();
+            for (const auto& [name, value] : values) {
+                const auto found = block.member_map.find(name);
+                if (found == block.member_map.end()) continue;
+                constants.push_back(Constant { &found->second, &value });
+            }
+            constants_material = &material;
+            constants_count    = values.size();
+            constants_valid    = true;
+        }
+        return constants;
+    }
+};
+} // namespace
 
 void CustomShaderPass::prepare(Scene& scene, const Device& device, RenderingResources& rr) {
     setPrepared(false);
@@ -584,6 +677,11 @@ void CustomShaderPass::prepare(Scene& scene, const Device& device, RenderingReso
             if (! presentation_pass.has_value()) return;
             pipeline.setSampleCount(VK_SAMPLE_COUNT_1_BIT);
             if (! pipeline.create(device, *presentation_pass, m_presentation_pipeline)) return;
+            auto copy_source_pass = CreateRenderPass(
+                device.handle(), m_desc.presentation_format, VK_ATTACHMENT_LOAD_OP_CLEAR,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_SAMPLE_COUNT_1_BIT);
+            if (! copy_source_pass.has_value()) return;
+            m_presentation_copy_source_pass = std::move(*copy_source_pass);
         }
     }
 
@@ -717,11 +815,13 @@ void CustomShaderPass::prepare(Scene& scene, const Device& device, RenderingReso
     auto& sprites         = m_desc.sprites_map;
     auto& textures        = m_desc.textures;
     auto& video_textures  = m_desc.video_textures;
+    auto& video_update_failure_reported = m_desc.video_update_failure_reported;
     auto& vk_textures     = m_desc.vk_textures;
     auto& vk_texture_image_keys = m_desc.vk_texture_image_keys;
     auto  camera_override = m_desc.camera_override;
     auto  material_slot   = m_desc.material_slot;
 
+    auto memo = std::make_shared<UniformMemo>();
     m_desc.update_op = [shader_updater,
                         uniform_block,
                         buf,
@@ -733,17 +833,22 @@ void CustomShaderPass::prepare(Scene& scene, const Device& device, RenderingReso
                         &video_textures,
                         runtime_images,
                         &sprites,
+                        &video_update_failure_reported,
                         &vk_textures,
                         &vk_texture_image_keys,
                         camera_override,
                         material_slot,
+                        memo,
                         update_dyn_buf_op]() {
         bool writes_ok = true;
-        auto update_unf_op = [uniform_block, buf, bufref, &writes_ok](std::string_view name,
-                                                          const wallpaper::ShaderValue& value) {
+        memo->cursor   = 0;
+        auto update_unf_op = [uniform_block, buf, bufref, &memo, &writes_ok](
+                                 std::string_view name, const wallpaper::ShaderValue& value) {
             if (uniform_block == nullptr || buf == nullptr || bufref == nullptr || ! (*bufref))
                 return;
-            writes_ok = UpdateUniform(buf, *bufref, *uniform_block, name, value) && writes_ok;
+            const auto* member = memo->Resolve(*uniform_block, name);
+            if (member == nullptr) return;
+            writes_ok = WriteUniform(buf, *bufref, *member, value) && writes_ok;
         };
         std::string original_camera;
         bool        restore_camera = false;
@@ -761,9 +866,8 @@ void CustomShaderPass::prepare(Scene& scene, const Device& device, RenderingReso
         if (uniform_block != nullptr && node != nullptr && node->Mesh() != nullptr) {
             const auto* material = node->Mesh()->MaterialForSlot(material_slot);
             if (material == nullptr) return writes_ok;
-            const auto& const_values = material->customShader.constValues;
-            for (const auto& [name, value] : const_values) {
-                writes_ok = UpdateUniform(buf, *bufref, *uniform_block, name, value) && writes_ok;
+            for (const auto& constant : memo->Constants(*uniform_block, *material)) {
+                writes_ok = WriteUniform(buf, *bufref, *constant.member, *constant.value) && writes_ok;
             }
         }
         {
@@ -786,20 +890,52 @@ void CustomShaderPass::prepare(Scene& scene, const Device& device, RenderingReso
             }
             if (! device_ptr->tex_cache().UpdateVideoFrame(
                     textures[i], playback_state, &vk_textures[i], &error)) {
-                LOG_ERROR("failed to update video texture \"%s\": %s",
-                          textures[i].c_str(),
-                          error.c_str());
+                // A software-decode import that cannot land fails every tick.
+                // The first failure of a run is the whole story; the next
+                // success re-arms it.
+                if (i >= video_update_failure_reported.size()) {
+                    video_update_failure_reported.resize(i + 1);
+                }
+                if (! video_update_failure_reported[i]) {
+                    video_update_failure_reported[i] = true;
+                    LOG_ERROR("failed to update video texture \"%s\": %s",
+                              textures[i].c_str(),
+                              error.c_str());
+                }
             } else {
+                if (i < video_update_failure_reported.size()) {
+                    video_update_failure_reported[i] = false;
+                }
                 if (scene_ptr->runtime != nullptr) {
                     scene_ptr->runtime->SetVideoTextureDuration(
                         textures[i], device_ptr->tex_cache().GetVideoDuration(textures[i]));
                 }
             }
         }
+        if (runtime_images != nullptr) {
+            // Names only ever join the runtime source, so a slot's answer can
+            // change only when that set grows or the slot is given a new name.
+            const uint64_t names_generation = runtime_images->NamesGeneration();
+            if (memo->runtime_slots.size() != textures.size()) {
+                memo->runtime_slots.assign(textures.size(), UniformMemo::RuntimeSlot {});
+            }
+            const bool names_changed = ! memo->runtime_names_valid ||
+                                       memo->runtime_names_generation != names_generation;
+            for (usize i = 0; i < textures.size(); ++i) {
+                auto& slot = memo->runtime_slots[i];
+                if (names_changed || ! slot.valid || slot.name != textures[i]) {
+                    slot.name       = textures[i];
+                    slot.is_runtime = runtime_images->IsRuntimeImage(textures[i]);
+                    slot.valid      = true;
+                }
+            }
+            memo->runtime_names_generation = names_generation;
+            memo->runtime_names_valid      = true;
+        }
         for (usize i = 0; i < textures.size(); ++i) {
             if (i >= video_textures.size() || i >= vk_textures.size()) continue;
             if (video_textures[i] || textures[i].empty() || IsSpecTex(textures[i])) continue;
-            if (runtime_images == nullptr || ! runtime_images->IsRuntimeImage(textures[i])) {
+            if (runtime_images == nullptr || ! memo->runtime_slots[i].is_runtime) {
                 continue;
             }
 
@@ -1031,7 +1167,8 @@ void CustomShaderPass::recordTextureBarriers(const Device& device, RenderingReso
     }
 }
 
-void CustomShaderPass::recordDescriptors(RenderingResources& rr, VkPipelineLayout layout) const {
+void CustomShaderPass::recordDescriptors(RenderingResources& rr, VkPipelineLayout layout,
+                                         VkSampler sampler_override) const {
     std::array<VkDescriptorImageInfo, 2 * WE_GLTEX_NAMES.size()> images;
     std::array<VkWriteDescriptorSet, 2 * WE_GLTEX_NAMES.size() + 1> writes;
     VkDescriptorBufferInfo buffer;
@@ -1043,6 +1180,7 @@ void CustomShaderPass::recordDescriptors(RenderingResources& rr, VkPipelineLayou
         const auto& binding = m_desc.vk_texture_bindings[i];
         if (binding.image_binding < 0 || slot.slots.empty()) continue;
         const auto& image = slot.getActive();
+        const VkSampler sampler = sampler_override != VK_NULL_HANDLE ? sampler_override : image.sampler;
         const bool combined =
             binding.image_descriptor_type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         if (! combined && binding.image_descriptor_type != VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE) {
@@ -1051,7 +1189,7 @@ void CustomShaderPass::recordDescriptors(RenderingResources& rr, VkPipelineLayou
             continue;
         }
         images[image_count] = {
-            combined ? image.sampler : VK_NULL_HANDLE, image.view, image.layout
+            combined ? sampler : VK_NULL_HANDLE, image.view, image.layout
         };
         writes[write_count++] = {
             .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
@@ -1062,8 +1200,8 @@ void CustomShaderPass::recordDescriptors(RenderingResources& rr, VkPipelineLayou
             .descriptorType = binding.image_descriptor_type,
             .pImageInfo = &images[image_count++],
         };
-        if (! combined && binding.sampler_binding >= 0 && image.sampler != VK_NULL_HANDLE) {
-            images[image_count] = { image.sampler, {}, VK_IMAGE_LAYOUT_UNDEFINED };
+        if (! combined && binding.sampler_binding >= 0 && sampler != VK_NULL_HANDLE) {
+            images[image_count] = { sampler, {}, VK_IMAGE_LAYOUT_UNDEFINED };
             writes[write_count++] = {
                 .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
                 .pNext = nullptr,
@@ -1101,6 +1239,21 @@ void CustomShaderPass::recordDraw(const Device& device, RenderingResources& rr) 
 void CustomShaderPass::recordDrawWithPipeline(
     const Device& device, RenderingResources& rr, const PipelineParameters& pipeline,
     VkExtent3D outext) {
+    const VkViewport viewport {
+        .x        = 0,
+        .y        = (float)outext.height,
+        .width    = (float)outext.width,
+        .height   = -(float)outext.height,
+        .minDepth = 0.0f,
+        .maxDepth = 1.0f,
+    };
+    const VkRect2D scissor { { 0, 0 }, { outext.width, outext.height } };
+    recordDrawWithPipeline(device, rr, pipeline, viewport, scissor, VK_NULL_HANDLE);
+}
+
+void CustomShaderPass::recordDrawWithPipeline(
+    const Device& device, RenderingResources& rr, const PipelineParameters& pipeline,
+    VkViewport viewport, VkRect2D scissor, VkSampler sampler_override) {
     auto& cmd = rr.command;
     cmd.BindPipeline(VK_PIPELINE_BIND_POINT_GRAPHICS, *pipeline.handle);
     for (usize i = 0; i < m_desc.vk_textures.size(); ++i) {
@@ -1110,17 +1263,7 @@ void CustomShaderPass::recordDrawWithPipeline(
             device.tex_cache().PinVideoFrame(m_desc.vk_textures[i]);
         }
     }
-    recordDescriptors(rr, *pipeline.layout);
-    VkViewport viewport {
-        .x        = 0,
-        .y        = (float)outext.height,
-        .width    = (float)outext.width,
-        .height   = -(float)outext.height,
-        .minDepth = 0.0f,
-        .maxDepth = 1.0f,
-    };
-    VkRect2D scissor { { 0, 0 }, { outext.width, outext.height } };
-
+    recordDescriptors(rr, *pipeline.layout, sampler_override);
     cmd.SetViewport(0, viewport);
     cmd.SetScissor(0, scissor);
 
@@ -1255,22 +1398,32 @@ bool CustomShaderPass::canPresentDirectly(const RenderingResources& rr, VkExtent
         return false;
     const auto candidate = batchCandidate();
     const auto& output = m_desc.vk_output;
+    const bool through_final = m_desc.presents_through_final_viewport;
     if (! candidate.visible || candidate.clear_only || m_desc.alpha_to_coverage ||
         candidate.render.sample_count != VK_SAMPLE_COUNT_1_BIT ||
         candidate.render.msaa_image != VK_NULL_HANDLE || candidate.render.msaa_view != VK_NULL_HANDLE ||
         output.handle == VK_NULL_HANDLE || output.view == VK_NULL_HANDLE ||
-        output.extent.width != target_extent.width || output.extent.height != target_extent.height ||
         output.extent.depth != 1 || output.mipmap_level != 1)
         return false;
-    const auto viewport = ResolvePresentationViewport(rr, target_extent);
-    const auto scissor = ResolvePresentationScissor(rr, target_extent);
-    if (viewport.x != 0.0f || viewport.y != static_cast<float>(target_extent.height) ||
-        viewport.width != static_cast<float>(target_extent.width) ||
-        viewport.height != -static_cast<float>(target_extent.height) ||
-        viewport.minDepth != 0.0f || viewport.maxDepth != 1.0f ||
-        scissor.offset.x != 0 || scissor.offset.y != 0 ||
-        scissor.extent.width != target_extent.width || scissor.extent.height != target_extent.height)
-        return false;
+    if (through_final) {
+        // The final composition samples the output with the output's own
+        // sampler; the source is sampled with that same one instead.
+        if (output.sampler == VK_NULL_HANDLE) return false;
+    } else {
+        if (output.extent.width != target_extent.width ||
+            output.extent.height != target_extent.height)
+            return false;
+        const auto viewport = ResolvePresentationViewport(rr, target_extent);
+        const auto scissor = ResolvePresentationScissor(rr, target_extent);
+        if (viewport.x != 0.0f || viewport.y != static_cast<float>(target_extent.height) ||
+            viewport.width != static_cast<float>(target_extent.width) ||
+            viewport.height != -static_cast<float>(target_extent.height) ||
+            viewport.minDepth != 0.0f || viewport.maxDepth != 1.0f ||
+            scissor.offset.x != 0 || scissor.offset.y != 0 ||
+            scissor.extent.width != target_extent.width || scissor.extent.height != target_extent.height)
+            return false;
+    }
+    size_t bound = 0;
     for (size_t i = 0; i < m_desc.vk_texture_bindings.size(); ++i) {
         if (m_desc.vk_texture_bindings[i].image_binding < 0) continue;
         if (i >= m_desc.vk_textures.size() || m_desc.vk_textures[i].slots.empty()) return false;
@@ -1278,8 +1431,16 @@ bool CustomShaderPass::canPresentDirectly(const RenderingResources& rr, VkExtent
         if (image.handle == VK_NULL_HANDLE || image.view == VK_NULL_HANDLE ||
             image.handle == output.handle)
             return false;
+        ++bound;
+        // Only then is the output a texel-for-texel copy of the source, which
+        // is what makes sampling the source the same as sampling the output. A
+        // source decoded smaller than the output was resampled into it.
+        if (through_final &&
+            (image.extent.width != output.extent.width || image.extent.height != output.extent.height ||
+             image.extent.depth != 1 || image.mipmap_level != 1))
+            return false;
     }
-    return true;
+    return ! through_final || bound == 1;
 }
 
 VkResult CustomShaderPass::executePresentation(const Device& device, RenderingResources& rr,
@@ -1298,17 +1459,35 @@ VkResult CustomShaderPass::executePresentation(const Device& device, RenderingRe
     const auto result = GetOrCreateColorFramebuffer(
         device, *m_presentation_pipeline.pass, target, m_presentation_framebuffers, framebuffer);
     if (result != VK_SUCCESS) return result;
+    return recordPresentation(device, rr, *m_presentation_pipeline.pass, framebuffer, extent);
+}
+
+VkResult CustomShaderPass::recordPresentation(const Device& device, RenderingResources& rr,
+                                              VkRenderPass render_pass, VkFramebuffer framebuffer,
+                                              VkExtent2D extent) {
+    if (render_pass == VK_NULL_HANDLE || framebuffer == VK_NULL_HANDLE ||
+        ! canPresentDirectly(rr, extent, m_desc.presentation_format))
+        return VK_ERROR_INITIALIZATION_FAILED;
     recordTextureBarriers(device, rr);
     VkRenderPassBeginInfo begin {
         .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
-        .renderPass = *m_presentation_pipeline.pass,
+        .renderPass = render_pass,
         .framebuffer = framebuffer,
         .renderArea = { { 0, 0 }, extent },
         .clearValueCount = 1,
         .pClearValues = &m_desc.clear_value,
     };
     rr.command.BeginRenderPass(begin, VK_SUBPASS_CONTENTS_INLINE);
-    recordDrawWithPipeline(device, rr, m_presentation_pipeline, target.extent);
+    if (m_desc.presents_through_final_viewport) {
+        // The final composition's own viewport, scissor and sampler, so each
+        // target pixel receives the texel it would have read from the copy.
+        recordDrawWithPipeline(device, rr, m_presentation_pipeline,
+                               ResolvePresentationViewport(rr, extent),
+                               ResolvePresentationScissor(rr, extent), m_desc.vk_output.sampler);
+    } else {
+        recordDrawWithPipeline(device, rr, m_presentation_pipeline,
+                               VkExtent3D { extent.width, extent.height, 1 });
+    }
     rr.command.EndRenderPass();
     return VK_SUCCESS;
 }
@@ -1318,6 +1497,7 @@ void CustomShaderPass::destory(const Device&, RenderingResources& rr) {
     m_frame_visible = false;
     m_frame_clear_only = false;
     m_presentation_framebuffers.clear();
+    m_presentation_copy_source_pass = {};
     ResetPipelineParameters(m_presentation_pipeline);
     clearReleaseTexs();
     m_desc.update_op = {};
@@ -1364,9 +1544,74 @@ bool wallpaper::vulkan::UpdatePreparedPasses(const Device& device, RenderingReso
     return true;
 }
 
+bool wallpaper::vulkan::HiddenClearIsObservable(std::span<VulkanPass* const>        graph,
+                                                std::span<CustomShaderPass* const> clearing) {
+    if (clearing.empty() || clearing.front() == nullptr) return true;
+    const auto& first = *clearing.front();
+    // The scene output is always read after the frame -- by the final
+    // composition, by direct presentation or by whoever captures it.
+    if (first.desc().output == SpecTex_Default) return true;
+    const auto render = first.batchCandidate().render;
+    const VkImage image = render.image;
+    const VkImage msaa  = render.msaa_image;
+    if (image == VK_NULL_HANDLE) return true;
+    const auto is_image = [&](VkImage candidate) {
+        return candidate != VK_NULL_HANDLE && (candidate == image || candidate == msaa);
+    };
+    const auto clearing_pass = [&](const VulkanPass* pass) {
+        return std::find(clearing.begin(), clearing.end(), pass) != clearing.end();
+    };
+    const auto position = std::find(graph.begin(), graph.end(), clearing.front());
+    // Not in the list it is supposed to belong to: nothing can be proven.
+    if (position == graph.end()) return true;
+    const auto clear_index = static_cast<std::size_t>(position - graph.begin());
+
+    for (std::size_t k = 0; k < graph.size(); ++k) {
+        const auto* pass = graph[k];
+        if (pass == nullptr || clearing_pass(pass)) continue;
+        if (dynamic_cast<const PrePass*>(pass) != nullptr) continue; // another clear, not a read
+        if (const auto* fin = dynamic_cast<const FinPass*>(pass)) {
+            if (is_image(fin->sourceImage().handle)) return true;
+            continue;
+        }
+        if (const auto* copy = dynamic_cast<const CopyPass*>(pass)) {
+            if (is_image(copy->desc().vk_src.handle) || is_image(copy->desc().vk_dst.handle))
+                return true;
+            continue;
+        }
+        const auto* custom = dynamic_cast<const CustomShaderPass*>(pass);
+        if (custom == nullptr) return true; // a pass shape this cannot reason about
+        if (! custom->prepared()) continue;
+        const auto candidate = custom->batchCandidate();
+        // A pass before the clear reads what the previous frame's clear left,
+        // whether or not it draws this frame -- it may draw the next one. A
+        // pass after it matters only when it draws now: one that starts
+        // drawing later is covered by the frame in which it does.
+        if (k > clear_index && ! candidate.visible) continue;
+        const auto& desc = custom->desc();
+        for (std::size_t t = 0; t < desc.vk_textures.size(); ++t) {
+            if (t < desc.vk_texture_bindings.size() && desc.vk_texture_bindings[t].image_binding < 0)
+                continue;
+            // Every slot, not only the active one: the active slot of a
+            // sprite sheet or a ping-pong pair moves between frames.
+            for (const auto& slot : desc.vk_textures[t].slots)
+                if (is_image(slot.handle)) return true;
+        }
+        if (is_image(candidate.render.image) || is_image(candidate.render.msaa_image)) {
+            // Rendering over it from a clear of its own reads nothing.
+            const bool clears = candidate.clear_only ||
+                                candidate.render.load_op == VK_ATTACHMENT_LOAD_OP_CLEAR;
+            if (! clears) return true;
+        }
+    }
+    return false;
+}
+
 VkResult wallpaper::vulkan::ExecutePreparedPasses(const Device& device, RenderingResources& rr,
                                               std::span<VulkanPass* const> passes,
-                                              CustomPassExecutionScratch& scratch) {
+                                              CustomPassExecutionScratch& scratch,
+                                              std::span<VulkanPass* const> graph) {
+    if (graph.empty()) graph = passes;
     size_t i = 0;
     while (i < passes.size()) {
         auto* pass = passes[i];
@@ -1398,7 +1643,13 @@ VkResult wallpaper::vulkan::ExecutePreparedPasses(const Device& device, Renderin
         PlanCustomPassBatches(scratch.candidates, scratch.plan);
         for (const auto& entry : scratch.plan.entries) {
             if (entry.kind == CustomPassBatchKind::ClearImage) {
-                scratch.passes[entry.first]->recordClear(device, rr);
+                // A hidden layer's first-use clear that nothing will read --
+                // not later in this frame, not through the previous frame's
+                // contents -- writes pixels no one sees.
+                const auto clearing = std::span<CustomShaderPass* const>(scratch.passes)
+                                          .subspan(entry.first, entry.last - entry.first);
+                if (HiddenClearIsObservable(graph, clearing))
+                    scratch.passes[entry.first]->recordClear(device, rr);
                 continue;
             }
             for (size_t local = entry.first; local < entry.last; ++local) {

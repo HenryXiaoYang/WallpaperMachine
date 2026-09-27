@@ -9,9 +9,15 @@ Select the wallpaper, then turn on **General configuration -> Audio response**
 in the inspector. The setting is saved per wallpaper and also applies to that
 wallpaper's mirrored displays.
 
-Capture starts only while an enabled wallpaper is active, and stops when its
-final wallpaper is disabled or removed. Activation errors are reported rather
-than silently ignored.
+Capture runs only while a wallpaper with audio response on is presenting (not
+paused, covered or asleep) and actually reads the sound: an audio-processing
+material or particle emitter, a spectrum shader input, or a script that
+registers audio buffers. A subscribed web page on screen also counts. A scene
+that reads no audio, and every video wallpaper, never starts capture, even with
+the setting on; the effects that would have used it received silence anyway. A
+script that starts reading later starts capture then, after a short warm-up.
+Capture stops when the last such wallpaper stops presenting or is removed.
+Activation errors are reported rather than silently ignored.
 
 ## Permission
 

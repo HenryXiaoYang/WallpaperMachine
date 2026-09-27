@@ -121,12 +121,34 @@ impl EngineState {
                         desc,
                         handle,
                         accepts_pointer_input: record.runtime.as_ref().is_some_and(|runtime| runtime.accepts_pointer_input()),
+                        paused: record.runtime.as_ref().is_some_and(|runtime| runtime.paused()),
                         window_active: record.model.window_active,
                         assignment: record.model.assignment.clone(),
                     })
                 })
                 .collect(),
         }
+    }
+
+    /// Handles of live scenes whose renderers report that they read system
+    /// audio. A record without a runtime has no scene and never counts.
+    pub fn audio_requiring_handles(&self) -> std::collections::HashSet<SceneHandle> {
+        self.display_records
+            .iter()
+            .filter_map(|record| {
+                let runtime = record.runtime.as_ref()?;
+                runtime.requires_audio().then_some(record.handle).flatten()
+            })
+            .collect()
+    }
+
+    /// Whether a presenting scene is waiting for a pointer sample it would not
+    /// otherwise get, because the cursor has not moved since its delivery reset.
+    pub fn pointer_sample_pending(&self) -> bool {
+        self.display_records
+            .iter()
+            .filter_map(|record| record.runtime.as_ref())
+            .any(|runtime| runtime.pointer_sample_pending())
     }
 
     pub fn record_index(&self, key: &DisplayKey) -> Option<usize> {
@@ -263,13 +285,6 @@ impl EngineState {
         })?;
         self.display_records[index].runtime.as_mut().ok_or_else(|| {
             EngineError::InvalidInput(format!("scene handle {} is not active", handle.raw()))
-        })
-    }
-
-    pub fn active_runtime_handles(&self) -> impl Iterator<Item = SceneHandle> + '_ {
-        self.display_records.iter().filter_map(|record| {
-            record.runtime.as_ref()?;
-            record.handle
         })
     }
 

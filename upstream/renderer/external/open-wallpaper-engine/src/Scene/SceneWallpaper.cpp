@@ -351,6 +351,7 @@ public:
         CMD_FIRST_FRAME,
         CMD_POINTER_INPUT_CHANGED,
         CMD_USER_SHORTCUT,
+        CMD_AUDIO_REQUIREMENT_CHANGED,
         CMD_NO
     };
 
@@ -381,6 +382,7 @@ public:
                 CASE_CMD(FIRST_FRAME);
                 CASE_CMD(POINTER_INPUT_CHANGED);
                 CASE_CMD(USER_SHORTCUT);
+                CASE_CMD(AUDIO_REQUIREMENT_CHANGED);
             case CMD::CMD_NO: break;
                 // No `default`, for the same reason the render handler has
                 // none: a command that is posted and never dispatched is
@@ -394,6 +396,12 @@ public:
     void sendFirstFrameOk();
     void sendPointerInputCapability(bool accepts_pointer_input);
     void sendUserShortcut(std::string_view property_name, std::string_view property_value);
+    /// Reports scene `generation`'s audio requirement. Generations increase
+    /// with every scene commit on the render thread.
+    void sendAudioRequirement(uint64_t generation, bool requires_audio);
+    /// The listener a committed scene's runtime runs when it first marks
+    /// itself as reading audio, on whatever thread that happens. It only posts.
+    std::function<void()> audioRequirementReporter(uint64_t generation);
     bool isGenGraphviz() const { return m_gen_graphviz; }
 
 private:
@@ -411,6 +419,7 @@ private:
     MHANDLER_CMD(FIRST_FRAME);
     MHANDLER_CMD(POINTER_INPUT_CHANGED);
     MHANDLER_CMD(USER_SHORTCUT);
+    MHANDLER_CMD(AUDIO_REQUIREMENT_CHANGED);
 
 private:
     bool m_inited { false };
@@ -430,6 +439,11 @@ private:
     PointerInputCallback                 m_pointer_input_callback;
     UserShortcutCallback                 m_user_shortcut_callback;
     bool                                 m_accepts_pointer_input { true };
+    AudioRequirementCallback             m_audio_requirement_callback;
+    /// Latest committed scene generation seen here, and whether that scene
+    /// reads audio. Only the main looper touches these.
+    uint64_t                             m_audio_requirement_generation { 0 };
+    bool                                 m_requires_audio { false };
 
 private:
     std::shared_ptr<looper::Looper> m_main_loop;
@@ -895,6 +909,19 @@ private:
         publishPauseReasons();
     }
 
+    /// Runs the frame clock exactly when there is something for it to drive:
+    /// a loaded scene, rendering not blocked, and no pause asked for. Before
+    /// a scene lands, and after a load that never delivered one, there is
+    /// nothing to draw, so the clock thread does not exist. The looper keeps
+    /// running either way, so control messages and the first-frame draw that
+    /// follows a scene still arrive.
+    void syncFrameClock() {
+        if (m_clock_requested && ! m_render_blocked && m_scene != nullptr)
+            frame_timer.Run();
+        else
+            frame_timer.Stop();
+    }
+
     /// Retains a surface description and moves the host's poster wake hook onto
     /// it.
     ///
@@ -1040,11 +1067,13 @@ private:
         if (msg->findBool("value", &stop)) {
             if (renderInited()) {
                 m_render->SetVideoPlaybackPaused(stop || m_render_blocked);
+                // The first frame after a resume presents, even if it repeats
+                // the last picture: the surface may have been shown something
+                // else while this wallpaper was stopped.
+                if (! stop) m_render->InvalidatePresentedFrame();
             }
-            if (stop || m_render_blocked)
-                frame_timer.Stop();
-            else
-                frame_timer.Run();
+            m_clock_requested = ! stop;
+            syncFrameClock();
             refreshFrameDemand();
             publishPauseReasons();
         }
@@ -1145,6 +1174,14 @@ private:
                                                            std::memory_order_relaxed);
                     }
                 }
+            }
+
+            // Tick, above, is what finalizes visibility for this frame,
+            // including a script that shows a layer Emitt thought was hidden.
+            // Rebuild only the meshes that skip left stale, from the
+            // simulation Emitt already advanced; neither backend draws yet.
+            if (frame_ok && m_scene->paritileSys != nullptr) {
+                m_scene->paritileSys->RebuildVisibleMeshes();
             }
 
             bool presented = false;
@@ -1302,11 +1339,19 @@ private:
             // to a program this process is about to stop drawing with, and it
             // goes away with the scene that owned it.
             CancelSceneMetalVariants();
-            if (m_rg && ! m_render->clearLastRenderGraph()) {
+            // A graph that never reached a backend owns nothing to release;
+            // refusing the next scene over it would leave the surface holding
+            // a scene nobody can replace.
+            if (m_rg && m_render->hasBackend() && ! m_render->clearLastRenderGraph()) {
                 suspendRendering();
                 return;
             }
             m_rg.reset();
+            // The outgoing scene's own late marks must not reach the host; the
+            // generation check drops any already in flight.
+            if (m_scene != nullptr && m_scene->runtime != nullptr) {
+                m_scene->runtime->SetAudioRequirementListener({});
+            }
             const bool previous_accepts_pointer_input =
                 m_scene == nullptr || m_scene->accepts_pointer_input;
             const bool accepts_pointer_input = scene == nullptr || scene->accepts_pointer_input;
@@ -1318,8 +1363,13 @@ private:
                     m_mouse_buttons.released = 0;
                 }
             }
+            commitAudioRequirement();
             main_handler.sendPointerInputCapability(accepts_pointer_input);
             m_render_blocked = false;
+            // Before the backend is chosen: creating one re-applies the video
+            // pause from whether the clock runs.
+            syncFrameClock();
+            publishPauseReasons();
             if (m_scene != nullptr && m_scene->runtime != nullptr) {
                 m_scene->runtime->SetMediaIntegrationEnabled(m_media_integration_enabled);
                 // Before the graph is built, so a script that reveals a layer
@@ -1454,7 +1504,7 @@ private:
                 // is the whole job; the backend is created from it when the
                 // scene lands.
                 m_render_blocked = false;
-                frame_timer.Run();
+                syncFrameClock();
                 refreshFrameDemand();
                 publishPauseReasons();
                 promise->set_value(true);
@@ -1468,8 +1518,9 @@ private:
             const bool ok = surface_ok && rebuildRenderGraph();
             if (ok) {
                 m_render_blocked = false;
-                m_render->SetVideoPlaybackPaused(false);
-                frame_timer.Run();
+                // A paused wallpaper stays paused across a display change.
+                syncFrameClock();
+                m_render->SetVideoPlaybackPaused(! frame_timer.Running());
                 refreshFrameDemand();
                 publishPauseReasons();
             }
@@ -1482,6 +1533,9 @@ private:
 
 public:
     FrameTimer       frame_timer;
+    /// Whether the host wants this surface playing. The clock runs only while
+    /// this holds and a scene is loaded; see `syncFrameClock`. Render thread.
+    bool             m_clock_requested { true };
     FpsCounter       fps_counter;
     /// Handed to every scene's runtime so its text worker can ask for the frame
     /// that shows what it produced. Declared here, after `frame_timer`, so it
@@ -1545,8 +1599,28 @@ public:
         m_backend_selection = std::move(selection);
     }
 
+    /// Starts the just-committed scene's audio-requirement generation: the
+    /// host hears `false` for a scene that has not (yet) marked itself, and
+    /// then one `true` when it does -- at parse, at shader init or from a
+    /// script, whichever comes first. The listener is installed before the
+    /// flag is read so a mark racing the commit is reported by one or both.
+    /// Scenes without a runtime (plain video projects) never mark.
+    void commitAudioRequirement() {
+        const uint64_t generation = ++m_audio_requirement_generation;
+        bool           requires_audio { false };
+        if (m_scene != nullptr && m_scene->runtime != nullptr) {
+            m_scene->runtime->SetAudioRequirementListener(
+                main_handler.audioRequirementReporter(generation));
+            requires_audio = m_scene->runtime->SceneRequiresAudioResponse();
+        }
+        main_handler.sendAudioRequirement(generation, requires_audio);
+    }
+
 private:
     std::shared_ptr<Scene> m_scene { nullptr };
+    /// Bumped on every scene commit; the main looper drops audio-requirement
+    /// reports carrying an older one.
+    uint64_t               m_audio_requirement_generation { 0 };
     float                  m_speed { 1.0f };
 
     std::unique_ptr<SceneRendererHandle> m_render;
@@ -1646,6 +1720,35 @@ SceneWallpaperInputTestAccess::ConsumeMouseButtons(SceneWallpaper& wallpaper) {
     const auto snapshot =
         wallpaper.m_main_handler->renderHandler()->consumeMouseButtonSnapshot();
     return { snapshot.down, snapshot.pressed, snapshot.released };
+}
+
+std::shared_ptr<Scene>
+SceneWallpaperInputTestAccess::CreateVideoProjectScene(const std::string& project_json,
+                                                       std::string*       error) {
+    SceneSourceResolution resolution;
+    if (! ResolveSceneSourcePaths(project_json, &resolution, error)) return nullptr;
+    if (resolution.kind != SceneSourceResolutionKind::NotSceneProject ||
+        resolution.manifest.type != WallpaperProjectType::Video) {
+        SetError(error, "not a video project");
+        return nullptr;
+    }
+    return ::CreateVideoProjectScene(std::make_unique<fs::VFS>(),
+                                     std::filesystem::path(project_json),
+                                     resolution.manifest,
+                                     error);
+}
+
+std::shared_ptr<SceneNode>
+SceneWallpaperInputTestAccess::CreateVideoProjectNode(const std::string& texture,
+                                                      std::string*       error) {
+    fs::VFS vfs;
+    if (! InstallVirtualAssets(vfs)) {
+        SetError(error, "failed to install runtime virtual assets for video project");
+        return nullptr;
+    }
+    std::shared_ptr<SceneShader> shader;
+    if (! BuildVideoCopyShader(vfs, "video-project-test", &shader, error)) return nullptr;
+    return ::CreateVideoProjectNode(texture, shader);
 }
 #endif
 
@@ -1850,6 +1953,10 @@ MHANDLER_CMD_IMPL(MainHandler, APPLY_CONFIG) {
     if (! msg->findObject("config", &config) || config == nullptr) return;
 
     const bool paused      = config->paused;
+    // Before the load, not only after it: loading mounts sound layers, and a
+    // wallpaper that arrives paused must not start output for the moment
+    // between the mount and the pause below.
+    if (paused) m_sound_manager->Pause();
     const bool should_load = applyConfig(std::move(*config));
     if (should_load && m_render_handler != nullptr) CALL_MHANDLER_CMD(LOAD_SCENE, msg);
     setPaused(paused);
@@ -1981,6 +2088,12 @@ MHANDLER_CMD_IMPL(MainHandler, SET_PROPERTY) {
             if (msg->findObject("value", &cb) && cb != nullptr) {
                 m_user_shortcut_callback = std::move(*cb);
             }
+        } else if (property == PROPERTY_AUDIO_REQUIREMENT_CALLBACK) {
+            std::shared_ptr<AudioRequirementCallback> cb;
+            if (msg->findObject("value", &cb) && cb != nullptr) {
+                m_audio_requirement_callback = std::move(*cb);
+                if (m_audio_requirement_callback) m_audio_requirement_callback(m_requires_audio);
+            }
         } else if (property == PROPERTY_SPEED) {
             float speed { 1.0f };
             if (msg->findFloat("value", &speed)) {
@@ -2023,6 +2136,29 @@ MHANDLER_CMD_IMPL(MainHandler, POINTER_INPUT_CHANGED) {
         m_pointer_input_callback) {
         m_pointer_input_callback(m_accepts_pointer_input);
     }
+}
+
+MHANDLER_CMD_IMPL(MainHandler, AUDIO_REQUIREMENT_CHANGED) {
+    std::shared_ptr<uint64_t> generation;
+    bool                      requires_audio { false };
+    if (! msg->findObject("generation", &generation) || generation == nullptr ||
+        ! msg->findBool("requires_audio", &requires_audio)) {
+        return;
+    }
+    // A report from a scene that has since been replaced says nothing about
+    // the one now showing.
+    if (*generation < m_audio_requirement_generation) return;
+    // A newer generation is a new scene and starts from its own report; within
+    // one scene the requirement only ever rises. A mark posted from another
+    // thread may overtake its scene's commit message, so `true` can arrive
+    // first and the commit's `false` must not lower it.
+    const bool next = *generation > m_audio_requirement_generation
+                          ? requires_audio
+                          : (m_requires_audio || requires_audio);
+    m_audio_requirement_generation = *generation;
+    if (next == m_requires_audio) return;
+    m_requires_audio = next;
+    if (m_audio_requirement_callback) m_audio_requirement_callback(next);
 }
 
 bool MainHandler::applyConfig(SceneWallpaperConfig config) {
@@ -2090,12 +2226,9 @@ void MainHandler::loadScene() {
 
     LOG_INFO("loading scene: %s", m_source.c_str());
 
-    if (! m_sound_manager->IsInited()) {
-        m_sound_manager->Init();
-        m_sound_manager->Play();
-    } else {
-        m_sound_manager->UnMountAll();
-    }
+    // The output device starts only once a sound layer or video audio track
+    // mounts; a scene without sound never opens output IO.
+    m_sound_manager->UnMountAll();
 
     std::shared_ptr<Scene> scene { nullptr };
 
@@ -2283,6 +2416,22 @@ void MainHandler::sendPointerInputCapability(bool accepts_pointer_input) {
     msg->post();
 }
 
+void MainHandler::sendAudioRequirement(uint64_t generation, bool requires_audio) {
+    auto self = weak_from_this().lock();
+    if (self == nullptr) return;
+    auto msg = CreateMsgWithCmd(self, MainHandler::CMD::CMD_AUDIO_REQUIREMENT_CHANGED);
+    msg->setObject("generation", std::make_shared<uint64_t>(generation));
+    msg->setBool("requires_audio", requires_audio);
+    msg->post();
+}
+
+std::function<void()> MainHandler::audioRequirementReporter(uint64_t generation) {
+    return [weak = weak_from_this(), generation] {
+        auto self = std::static_pointer_cast<MainHandler>(weak.lock());
+        if (self != nullptr) self->sendAudioRequirement(generation, true);
+    };
+}
+
 void MainHandler::sendUserShortcut(std::string_view property_name,
                                    std::string_view property_value) {
     auto self = weak_from_this().lock();
@@ -2329,7 +2478,8 @@ bool MainHandler::init() {
             msg->post();
         });
         frameTimer.SetRequiredFps(30);
-        frameTimer.Run();
+        // Not started here: the render handler starts it when a scene lands,
+        // so a surface still parsing, or one whose load failed, has no clock.
     }
 
     m_inited = true;
@@ -2339,9 +2489,7 @@ bool MainHandler::init() {
 void MainHandler::shutdown() {
     if (! m_inited) return;
 
-    if (m_sound_manager->IsInited()) {
-        m_sound_manager->Pause();
-    }
+    m_sound_manager->Pause();
 
     if (m_render_handler != nullptr) {
         m_render_handler->frame_timer.Stop();
@@ -2365,4 +2513,9 @@ MainHandler::MainHandler()
     : m_sound_manager(std::make_unique<audio::SoundManager>()),
       m_main_loop(std::make_shared<looper::Looper>()),
       m_render_loop(std::make_shared<looper::Looper>()),
-      m_render_handler(std::make_shared<RenderHandler>(*this)) {}
+      m_render_handler(std::make_shared<RenderHandler>(*this)) {
+    // Playback runs until the host pauses it. Nothing starts here: the output
+    // device opens on the first mounted channel and runs only while playing
+    // and unmuted, so running is only the state a mount will see.
+    m_sound_manager->Play();
+}

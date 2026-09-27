@@ -4,7 +4,9 @@
 //! system audio capture must follow the wallpapers that are actually presenting
 //! rather than a single global pause flag.
 
-use wallpaper_core::{DisplayDesc, DisplayIdentity, DisplaySnapshotEntry};
+use std::time::{Duration, Instant};
+
+use wallpaper_core::{DisplayDesc, DisplayIdentity, DisplaySnapshotEntry, project::SceneHandle};
 
 use crate::{
     BridgePlaybackState, api::BridgeBuilder, engine::FakeEngineFacade,
@@ -19,6 +21,7 @@ fn display_snapshot(display_id: u32) -> DisplaySnapshotEntry {
         desc,
         handle: None,
         accepts_pointer_input: false,
+        paused: false,
         window_active: false,
         assignment: None,
     }
@@ -55,7 +58,45 @@ async fn two_display_bridge(engine: &FakeEngineFacade) -> crate::api::WallpaperB
             .await
             .unwrap();
     }
+    // Both scenes are live now. The fake's reconcile hands out handles by
+    // position, which is display order here: 7 -> 1, 9 -> 2.
+    engine.set_snapshot(vec![live_display(7, 1), live_display(9, 2)]);
     bridge
+}
+
+fn live_display(display_id: u32, handle: u64) -> DisplaySnapshotEntry {
+    DisplaySnapshotEntry { handle: Some(SceneHandle::new(handle)), ..display_snapshot(display_id) }
+}
+
+/// Waits for the bridge actor to act on a renderer report, which reaches it
+/// asynchronously through the engine's relay.
+async fn eventually(what: &str, mut condition: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !condition() {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+fn capture_enables(engine: &FakeEngineFacade, handle: u64) -> usize {
+    engine
+        .audio_capture_calls()
+        .iter()
+        .filter(|call| **call == (SceneHandle::new(handle), true))
+        .count()
+}
+
+fn last_capture_call(engine: &FakeEngineFacade, handle: u64) -> Option<bool> {
+    engine
+        .audio_capture_calls()
+        .iter()
+        .rev()
+        .find(|(call_handle, _)| *call_handle == SceneHandle::new(handle))
+        .map(|(_, enabled)| *enabled)
+}
+
+async fn audio_consumers(bridge: &crate::api::WallpaperBridge) -> u32 {
+    bridge.renderer_counters().await.unwrap().audio_active_consumers
 }
 
 fn paused_by_display(engine: &FakeEngineFacade) -> Vec<(u32, bool)> {
@@ -120,25 +161,27 @@ async fn resuming_one_display_does_not_resume_a_display_that_is_still_hidden() {
 }
 
 #[tokio::test]
-async fn a_global_resume_keeps_a_display_that_is_still_covered_paused() {
+async fn a_global_resume_never_restarts_a_display_that_is_still_covered() {
     let engine = FakeEngineFacade::default();
     let bridge = two_display_bridge(&engine).await;
 
     bridge
-        .set_display_presentation_suspended("9".into(), true)
+        .set_display_presentation_suspended("7".into(), true)
         .await
         .unwrap();
+    let suspended_at = engine.scene_pause_log().len();
     // Display sleep, then wake: the global transition must not restart the
-    // display that is still covered by a window.
+    // display that is still covered by a window, not even for a moment.
     bridge.set_presentation_suspended(true).await.unwrap();
     bridge.set_presentation_suspended(false).await.unwrap();
 
-    assert_eq!(
-        engine.display_paused_calls().last().copied(),
-        Some((9, true)),
-        "waking the screens re-applies the per-display suspension"
+    let after_suspend = &engine.scene_pause_log()[suspended_at..];
+    assert!(
+        !after_suspend.contains(&(7, false)),
+        "display 7 was resumed while still covered: {after_suspend:?}"
     );
-    assert_eq!(paused_by_display(&engine), vec![(7, false), (9, true)]);
+    assert!(after_suspend.contains(&(9, false)), "the visible display resumes");
+    assert_eq!(paused_by_display(&engine), vec![(7, true), (9, false)]);
 }
 
 #[tokio::test]
@@ -310,4 +353,62 @@ async fn muting_a_wallpaper_does_not_stop_its_audio_response() {
         !engine.audio_capture_suspended(),
         "silencing wallpaper playback is a different control from system audio response"
     );
+}
+
+// MARK: - R3: the tap waits for a scene that reads audio
+
+#[tokio::test]
+async fn audio_response_alone_does_not_open_the_tap_for_a_scene_that_reads_no_audio() {
+    let engine = FakeEngineFacade::default();
+    engine.scenes_start_without_audio();
+    // Audio response is on for both wallpapers by default.
+    let bridge = two_display_bridge(&engine).await;
+    bridge.set_renderer_counters_enabled(true).await.unwrap();
+    bridge.set_presentation_suspended(true).await.unwrap();
+    bridge.set_presentation_suspended(false).await.unwrap();
+
+    assert_eq!(capture_enables(&engine, 1) + capture_enables(&engine, 2), 0,
+        "no scene reads audio, so none registers as a consumer: {:?}", engine.audio_capture_calls());
+    assert!(engine.audio_capture_suspended(), "nothing to analyse, so the tap stays shut");
+    assert_eq!(audio_consumers(&bridge).await, 0);
+
+    // The scene on display 9 starts reading audio -- at load or, for a
+    // script, later. The tap opens for it, once, without a reconcile.
+    engine.report_requires_audio(SceneHandle::new(2), true);
+    eventually("the audio scene to register", || !engine.audio_capture_suspended()).await;
+    assert_eq!(capture_enables(&engine, 2), 1, "{:?}", engine.audio_capture_calls());
+    assert_eq!(capture_enables(&engine, 1), 0);
+    assert_eq!(audio_consumers(&bridge).await, 1);
+
+    // Hidden or paused, it is still not a consumer.
+    bridge.set_display_presentation_suspended("9".into(), true).await.unwrap();
+    assert!(engine.audio_capture_suspended());
+    assert_eq!(audio_consumers(&bridge).await, 0);
+    bridge.set_display_presentation_suspended("9".into(), false).await.unwrap();
+    assert!(!engine.audio_capture_suspended());
+    bridge.pause_all().await.unwrap();
+    assert!(engine.audio_capture_suspended());
+    assert_eq!(audio_consumers(&bridge).await, 0);
+}
+
+#[tokio::test]
+async fn replacing_an_audio_scene_with_one_that_reads_nothing_closes_the_tap() {
+    let engine = FakeEngineFacade::default();
+    engine.scenes_start_without_audio();
+    let bridge = two_display_bridge(&engine).await;
+    bridge.set_renderer_counters_enabled(true).await.unwrap();
+    engine.report_requires_audio(SceneHandle::new(1), true);
+    eventually("the audio scene to register", || last_capture_call(&engine, 1) == Some(true))
+        .await;
+    assert!(!engine.audio_capture_suspended());
+
+    // Another wallpaper replaces it on the same display and handle. Its
+    // renderer starts at "reads nothing", which is what it reports.
+    bridge.inject_scene_wallpaper_config_for_test("300", "Still").await;
+    bridge.set_display_config_enabled("300".into(), "7".into(), true).await.unwrap();
+    bridge.apply_wallpaper_options("300".into()).await.unwrap();
+    engine.report_requires_audio(SceneHandle::new(1), false);
+    eventually("the replaced scene to release the tap", || engine.audio_capture_suspended()).await;
+    assert_eq!(last_capture_call(&engine, 1), Some(false));
+    assert_eq!(audio_consumers(&bridge).await, 0);
 }

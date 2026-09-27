@@ -237,6 +237,16 @@ executable directly from the renderer check build directory.
 | Who owns the first frame | `MetalSceneDraw.ADrawnFrameIsReportedAsPresentedAndLeavesTheFirstFrameFlagAlone`: a backend must report presentation through `drawFrame`'s `presented` out-parameter and leave `Scene::first_frame_ok` to the frame handler. A backend that sets the flag satisfies the handler's own check before the handler runs, the host is never told the wallpaper started, and the startup deadline tears down a wallpaper that is drawing correctly. |
 | Decoded frames carry real timestamps | `video_source_input_test` and `shared_video_session_test` against media the tests encode. A frame whose timestamp is always zero looks like playback for as long as frames keep arriving and then freezes, so a video regression here reads as "the picture stopped" rather than as a decode failure; the FFmpeg header/library check in `src/Video/FfmpegAbi.hpp` exists because the layout mismatch that produced it compiles cleanly. |
 | One clock per shared decoder | `SharedVideoSessionTest.AFrameStaysValidAfterTheDecoderMovesOn` and `.PausingOneSurfaceLeavesTheOtherPlaying`: exactly one elected consumer moves a shared session's clock, so a test that advances the non-driving consumer observes nothing. Make the advancing consumer the driver rather than loosening the election. |
+| Frames that would repeat the picture | `unchanged_present_test` (Compatibility, driven through `SceneWallpaper` on a `CAMetalLayer` no window owns, against media it encodes) and `MetalSceneDraw.AFrameThatWouldRepeatThePictureTakesNoDrawableAndPresentsNothing`. A plain video presents exactly its newly selected frames: submissions track `video_frames_selected`, every other tick is `presents_skipped_unchanged`, and `video_frames_skipped` and the selected rate match the run with scene optimisation off. The distinct video generations presented, with their PTS, form the same sequence with the skip on and off (`TheSkipPresentsTheSameVideoFramesInTheSameOrder`, observed through `RenderInitInfo::video_frame_presented`), and with the skip on no generation is presented twice after the start. A held frame submits nothing until a flip, a poster request, a resume, a scaling-factor (crop), render-scale, surface-resize or fill-mode change, each of which presents the held generation exactly once and then repeats again; a static scene submits nothing once every pass is reused, and the poster it then exports is byte-identical to the baseline's. Counters are compared within one draw at the window edges, never exactly. A change the comparison cannot see must invalidate the gate; do not widen the skip by comparing fewer inputs. |
+| Direct presentation and reuse | A frame that drew straight into the drawable left the scene's output target unwritten, so the reuse record for it is dropped (`VulkanRender::drawFrameSwapchain`). Reusing it through the final blit would compose an image nobody drew. |
+| Wallpaper sound output lifecycle | `audio_tests --gtest_filter='SoundOutputLifecycle*'` on miniaudio's null backend: the output device starts only with channels mounted, playing and unmuted; muted hosts (the lock-screen extension) never start it; positions stay frozen while paused or muted. `FfmpegSoundStreamTest.ResampledLoopingPcmMatchesBaseline` pins the resampled PCM bit for bit. Not in `scripts/check_renderer.py`'s default target list. |
+| Audio capture follows what the scene reads | `SceneSchema.AudioRequirementComesOnlyFromContentThatReadsAudio` and `.AudioRequirementIsReportedOncePerSceneAndResetByReplacement` in `scene_schema_tests`, `VideoSourceInput.PlainVideoProjectNeverReportsAnAudioRequirement`, and the bridge tests `display_presentation::audio_response_alone_does_not_open_the_tap_for_a_scene_that_reads_no_audio`, `::replacing_an_audio_scene_with_one_that_reads_nothing_closes_the_tap` and `web_audio_media::a_web_listener_counts_beside_a_scene_that_reads_no_audio`. |
+| Pointer-driven clock wakes | `FrameTimerTest.ABurstOfWakeOnceAtTheCeilingDoesNotAddCallbacks` and `.AnIdleBurstOfWakeOnceProducesOneCallback` in `timer_tests`. Two hundred `WakeOnce` calls in one second at 30 fps stay inside about one callback per period (20–40), and an idle burst produces one callback. The configured ceiling still produces frames. |
+| Counter baseline | `PlaybackGPU.TurningCountersOnDoesNotReportWorkAlreadyDone`. A Compatibility video update that runs while counting is off does not read the decoder at all; the next counted update only records the decoder's totals and the frame on screen. Decode outputs, seeks, selected and skipped frames are then only what later counted updates observed, including after counting was turned off and on again. |
+| Hidden particle geometry | `ParticleSystem::RebuildVisibleMeshes` runs after `Tick` and rebuilds a hidden subsystem on the frame it becomes visible or must produce. The simulation still runs while it is hidden. `ParticleHiddenGeometry.LayerShownByTickAfterEmittDrawsWhatAlwaysGeneratingDraws` shows a layer (or its parent) in the Tick after Emitt and compares the first visible frame's mesh bytes with an always-visible run; `particle_rope_geometry_test` and `particle_mouse_controlpoint_test` cover the geometry; a fixed-seed `offscreen_scene_probe` dump of a hidden-then-shown particle scene must stay byte-identical to the build that generated every frame. |
+| Pointer sampling is event-armed | `api_smoke::mouse_polling_samples_only_when_input_arrives`, `::mouse_polling_stops_while_the_only_interactive_scene_is_suspended_on_its_display`, `::mouse_polling_in_a_monitor_gap_checks_the_cursor_without_engine_work` and `engine::snapshot::tests::a_paused_scene_is_not_a_pointer_consumer_and_its_resume_drops_paused_clicks`. A consumer with no input is never sampled; a paused scene is not a consumer. |
+| A global resume keeps covered displays paused | `display_presentation::a_global_resume_never_restarts_a_display_that_is_still_covered`: the scene pause log must never show `paused=false` for a display that is still suspended. |
+| Scene commits in headless tests | `scene_schema_tests` helpers wait for posted work with a render-looper round trip (`beginSurfaceReconfigure`) and a main-looper one (installing a pointer callback replays from the main looper) before `shutdown()`, which stops the loopers without draining them. A test that posts a scene and shuts down at once measures a race. A graph that never reached a backend is simply dropped by the next scene. |
 
 ### Where the cursor is, in scene coordinates
 
@@ -644,15 +654,64 @@ without desktop surfaces or audio devices.
   single-sample clear with bit-identical color is reached before any reader or
   non-custom pass. Visibility and actual active descriptors are reconsidered
   each frame. The standalone pass loop remains the reference path.
+  `FirstDrawAfterATransparentClearOpensWithItByteForByte`: the first draw into a
+  target cleared to transparent opens with that clear, leaves the bytes the
+  clear plus a loading draw left, and the transfer clear is dropped;
+  `RenderTargetLifetime.NestedCompositesClearBeforeChildrenWithoutErasingThem`
+  keeps every later draw loading and single-sample.
+- A hidden layer's batched first-use clear (`ClearImage`) is recorded only when
+  something can observe its target (`HiddenClearIsObservable`, over the whole
+  graph, including passes left out of the frame by reuse): a later drawing
+  reader, sampler, copy, final composition or loading draw, any earlier reader
+  (it samples the previous frame's clear), or the scene output.
+  `HiddenClearsAreRecordedOnlyWhereSomethingReadsThem` covers each reader and
+  the transition of a hidden reader to drawing; the executor and the
+  unchanged-present check apply the same rule.
 - Direct presentation requires exactly one graph shader pass writing the
   default target, a first clear, no depth/mip/MSAA or feedback, UNORM RGBA/BGRA,
   and identical graphics/present queue families. Each frame also requires the
   exact full-target viewport/scissor, matching extent, ready descriptors and no
-  flip. Other frames render the normal intermediate plus `FinPass`. Both
-  pipelines are prepared once; all paths retain frame/presentation waits.
-  Private-target tests compare complete same-format bytes over poisoned target
-  rotation, graph resize, transparency, fallback and error recovery; they never
-  transition private images to `PRESENT_SRC_KHR`.
+  flip -- except for the plain-video scene, whose one pass is by construction
+  the final composition's own quad copying one texture: it presents through the
+  final composition's viewport, scissor and sampler whenever its bound frame is
+  exactly the scene's size and the picture is not mirrored. Other frames render
+  the normal intermediate plus `FinPass`. Both pipelines are prepared once; all
+  paths retain frame/presentation waits. Private-target tests compare complete
+  same-format bytes over poisoned target rotation, graph resize, transparency,
+  fallback and error recovery; they never transition private images to
+  `PRESENT_SRC_KHR`. `PlainVideoPresentsThroughTheFinalViewportByteForByte`
+  drives the production video layer (`SceneWallpaperInputTestAccess::
+  CreateVideoProjectNode`) over fit, fill, stretch, none, user scale, 2x
+  displays, exact halving and uneven reduction, RGBA and BGRA sources sampled
+  linearly or nearest, and requires the copy path's bytes; mirrored, smaller
+  frames and other passes fall back.
+- The Compatibility swapchain is `COLOR_ATTACHMENT` only, so MoltenVK makes the
+  layer framebuffer-only. A requested poster is composed a second time by the
+  pass that composed the drawable (`FinPass::recordComposition` or
+  `CustomShaderPass::recordPresentation`) into a one-frame image of its own,
+  refused above the poster limit by its real allocation, and copied from there.
+  The same test requires every poster to equal the bytes the target received.
+- The Compatibility NV12 path makes one submission per new frame: the
+  conversion is committed, without a CPU wait, on MoltenVK's own graphics
+  `MTLCommandQueue` (exported with `vkExportMetalObjectsEXT`) and is ordered
+  ahead of the frame by commit order and hazard tracking. That relies on
+  MoltenVK's defaults (`MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=1`, no prefill)
+  and on the conversion running in the update op before `rr.command.Begin`. A
+  first-use layout transition is recorded into the frame
+  (`TextureCache::RecordVideoFirstUseTransitions`, right after `Begin`; harnesses
+  that record frames call it too). `NewVideoFramesNeitherWaitOnTheCpuNorSubmitOutsideTheFrame`
+  guards one submit per frame, no CPU wait and image creations bounded by
+  pooled destinations; `ADroppedFrameDestinationIsNotReusedBeforeItsConversionRuns`
+  guards the parking of a destination whose conversion is still in flight.
+- Per-frame uniform writes resolve reflected members through a per-pass memo
+  instead of string-keyed maps; every value is still written every frame and the
+  upload stays memcmp-gated. The memo relies on two invariants: after parsing, a
+  material's `customShader.constValues` only gains keys or is updated in place
+  (a runtime erase would have to invalidate the memo), and `RuntimeImageSource`
+  never removes a name (`NamesGeneration()` moves when one is added).
+  `MaterialConstantsAddedOrChangedAfterPrepareReachTheNextFrame`,
+  `RuntimeImagePublishedAfterPrepareReachesTheNextFrame` and
+  `RuntimeImageNamePublishedAfterPrepareReachesTheNextFrame` cover them.
 - Compiled script exports suppress only absent handlers. Initialization,
   scheduled callbacks, shared scene callbacks, live-value fallback and live
   alpha/geometry hit order remain covered by `script_runtime_compat_test` and
@@ -852,8 +911,11 @@ plus the `offscreen_scene_probe`, `scene_reload_cycle_probe` and `wpdump`
 diagnostics. `scripts/check_renderer.py` builds and runs
 `render_target_lifetime_test`, `text_object_runtime_test`,
 `shader_cache_metadata_test`, `video_decode_pump_test`,
-`video_color_conversion_test`, `video_frame_pacing_test`, `timer_tests` and
-`playback_gpu_test`; a non-zero exit from any of them fails the check. The
+`video_color_conversion_test`, `video_frame_pacing_test`, `timer_tests`,
+`playback_gpu_test` and `unchanged_present_test` (Compatibility frames that
+would repeat the picture, through a real swapchain on a `CAMetalLayer` no window
+owns; skips without a Metal device); a non-zero exit from any of them fails the
+check. The
 native Metal backend adds `metal_backend_test` (capability and graph gate, no
 device needed), `metal_scene_draw_smoke` (author shaders and same-frame
 intermediates drawn and read back, plus target reuse, dynamic-geometry upload,
@@ -892,6 +954,13 @@ SceneScript views.
   preference, where `SelectSceneBackend` returns before any capability code.
   `scene_schema_tests` is not in `scripts/check_renderer.py`; when you run it by
   hand, expect these two and do not attribute them to your change.
+- **Stale, not a Release-build test:** `rendergraph_smoke` checks with plain
+  `assert`, and some of those asserts carry the setup itself
+  (`assert(vfs.Mount(...))`). In the check directory's Release build they
+  compile out, the scene fails to parse and the binary crashes (`ctest -R
+  rendergraph_smoke` reports SEGFAULT). With asserts enabled it no longer
+  compiles (`SceneRasterExtents` has no `width`/`height`). It is not in
+  `scripts/check_renderer.py`; do not read its result as a regression signal.
 - **Stale decode cache, not a regression:** `video_source_input_test` shares
   `$TMPDIR/wallpaper-engine-video` with the app and with earlier runs.
   `ConcurrentPackagedOpensPublishExactlyOneFile` and

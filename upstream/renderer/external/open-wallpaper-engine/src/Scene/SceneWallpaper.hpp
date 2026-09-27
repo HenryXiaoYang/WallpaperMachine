@@ -23,6 +23,13 @@ using PointerInputCallback = std::function<void(bool)>;
 /// Reports one `engine.openUserShortcut` request: the property the wallpaper
 /// named, and the value its user chose for that property.
 using UserShortcutCallback = std::function<void(std::string_view, std::string_view)>;
+/// Reports whether the committed scene reads system audio (audio-processing
+/// materials or particles, `g_AudioSpectrum*` uniforms, `registerAudioBuffers`).
+/// Runs on the main looper, once on install with the current value and then
+/// only on changes: a newly committed scene starts at `false`, and its own
+/// later report raises it; a report from a scene that was since replaced is
+/// dropped. Optional: a host that never installs it keeps working unchanged.
+using AudioRequirementCallback = std::function<void(bool)>;
 
 constexpr std::string_view PROPERTY_SOURCE                    = "source";
 constexpr std::string_view PROPERTY_ASSETS                    = "assets";
@@ -49,6 +56,7 @@ constexpr std::string_view PROPERTY_FORCE_SHADER_REFRESH   = "force_shader_refre
 constexpr std::string_view PROPERTY_FIRST_FRAME_CALLBACK   = "first_frame_callback";
 constexpr std::string_view PROPERTY_POINTER_INPUT_CALLBACK = "pointer_input_callback";
 constexpr std::string_view PROPERTY_USER_SHORTCUT_CALLBACK = "user_shortcut_callback";
+constexpr std::string_view PROPERTY_AUDIO_REQUIREMENT_CALLBACK = "audio_requirement_callback";
 
 #include "Core/NoCopyMove.hpp"
 class MainHandler;
@@ -163,6 +171,7 @@ private:
 
 #ifdef WESCENE_BUILD_TESTS
 class Scene;
+class SceneNode;
 struct SceneWallpaperInputTestAccess {
     struct MouseButtonSnapshot {
         uint32_t down;
@@ -171,6 +180,14 @@ struct SceneWallpaperInputTestAccess {
     };
     static void PostScene(SceneWallpaper&, std::shared_ptr<Scene>);
     static MouseButtonSnapshot ConsumeMouseButtons(SceneWallpaper&);
+    /// The production plain-video project scene for `project_json`, built the
+    /// way `loadScene` builds it, without needing a render surface.
+    static std::shared_ptr<Scene> CreateVideoProjectScene(const std::string& project_json,
+                                                          std::string*       error);
+    /// The production plain-video layer -- its quad and its copy shader --
+    /// sampling `texture`, without a media file to probe.
+    static std::shared_ptr<SceneNode> CreateVideoProjectNode(const std::string& texture,
+                                                             std::string*       error);
 #if defined(__APPLE__)
     static SceneWallpaper& FromNative(owe_scene_wallpaper&);
 #endif

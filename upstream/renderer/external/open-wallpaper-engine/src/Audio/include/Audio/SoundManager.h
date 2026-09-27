@@ -39,15 +39,22 @@ std::unique_ptr<SoundStream> CreateSoundStream(std::shared_ptr<fs::IBinaryStream
 
 class SoundManager : NoCopy, NoMove {
 public:
-    SoundManager();
+    // Null discards output on miniaudio's null backend (headless tests).
+    enum class OutputBackend
+    {
+        System,
+        Null,
+    };
+
+    explicit SoundManager(OutputBackend backend = OutputBackend::System);
     ~SoundManager();
     void MountStream(std::unique_ptr<SoundStream>&&);
     void MountStream(std::shared_ptr<SoundStream>);
     void UnMountAll();
-    bool Init();
-    bool IsInited() const;
     void Play();
     void Pause();
+    // True while the output device is started (IO running).
+    bool OutputStarted() const;
 
     float Volume() const;
     bool  Muted() const;

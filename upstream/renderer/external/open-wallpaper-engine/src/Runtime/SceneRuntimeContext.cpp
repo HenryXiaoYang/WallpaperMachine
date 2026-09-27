@@ -19,6 +19,7 @@
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <functional>
 #include <limits>
 #include <sstream>
 #include <vector>
@@ -2066,7 +2067,11 @@ double SceneRuntimeContext::NodeVideoTextureDuration(std::string_view name) cons
 
 void SceneRuntimeContext::SetVideoTextureDuration(std::string_view texture_key, double seconds) {
     if (texture_key.empty() || ! std::isfinite(seconds) || seconds <= 0.0) return;
-    auto& playback            = m_video_texture_playback[std::string(texture_key)];
+    auto found = m_video_texture_playback.find(texture_key);
+    if (found == m_video_texture_playback.end()) {
+        found = m_video_texture_playback.emplace(std::string(texture_key), VideoTexturePlaybackBinding {}).first;
+    }
+    auto& playback            = found->second;
     playback.duration_seconds = seconds;
     playback.absolute_seconds = WrapSeconds(playback.absolute_seconds, seconds);
 }
@@ -2075,7 +2080,7 @@ video::VideoPlaybackState
 SceneRuntimeContext::ResolveVideoPlaybackState(std::string_view texture_key,
                                                double fallback_scene_elapsed_seconds) const {
     video::VideoPlaybackState state {};
-    const auto                iterator = m_video_texture_playback.find(std::string(texture_key));
+    const auto                iterator = m_video_texture_playback.find(texture_key);
     if (iterator == m_video_texture_playback.end()) {
         state.scene_elapsed_seconds = fallback_scene_elapsed_seconds;
         return state;
@@ -2518,21 +2523,37 @@ std::vector<std::pair<std::string, std::string>> SceneRuntimeContext::TakeUserSh
 }
 
 void SceneRuntimeContext::MarkSceneRequiresAudioResponse() {
-    m_scene_requires_audio_response = true;
+    // Shader init and scripts may mark repeatedly; after the first time this
+    // is a load, not a read-modify-write every thread contends on.
+    if (m_scene_requires_audio_response.load(std::memory_order_acquire)) return;
+    if (m_scene_requires_audio_response.exchange(true, std::memory_order_acq_rel)) return;
+    std::function<void()> listener;
+    {
+        std::lock_guard lock(m_audio_requirement_mutex);
+        listener = m_audio_requirement_listener;
+    }
+    if (listener) listener();
 }
 
 bool SceneRuntimeContext::SceneRequiresAudioResponse() const {
-    return m_scene_requires_audio_response;
+    return m_scene_requires_audio_response.load(std::memory_order_acquire);
+}
+
+void SceneRuntimeContext::SetAudioRequirementListener(std::function<void()> listener) {
+    std::lock_guard lock(m_audio_requirement_mutex);
+    m_audio_requirement_listener = std::move(listener);
 }
 
 void SceneRuntimeContext::SetAudioResponseEnabled(bool enabled) {
-    m_audio_response_enabled = enabled;
+    m_audio_response_enabled.store(enabled, std::memory_order_release);
 }
 
-bool SceneRuntimeContext::AudioResponseEnabled() const { return m_audio_response_enabled; }
+bool SceneRuntimeContext::AudioResponseEnabled() const {
+    return m_audio_response_enabled.load(std::memory_order_acquire);
+}
 
 bool SceneRuntimeContext::AudioResponseActive() const {
-    return m_audio_response_enabled && m_scene_requires_audio_response;
+    return AudioResponseEnabled() && SceneRequiresAudioResponse();
 }
 
 bool SceneRuntimeContext::ConsumeSceneGraphMutationFlag() {

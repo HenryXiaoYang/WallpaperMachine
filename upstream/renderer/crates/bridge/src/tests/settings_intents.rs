@@ -1993,6 +1993,7 @@ fn display_snapshot(display_id: u32) -> DisplaySnapshotEntry {
         ),
         handle: None,
         accepts_pointer_input: false,
+        paused: false,
         window_active: true,
         assignment: None,
     }
@@ -2197,6 +2198,7 @@ async fn active_display_live_scaling_update_does_not_reconcile_on_next_refresh()
         desc: initial_scene.display.clone(),
         handle: Some(SceneHandle::new(1)),
         accepts_pointer_input: true,
+        paused: false,
         window_active: true,
         assignment: Some(wallpaper_core::WallpaperAssignment::Direct(
             wallpaper_core::project::SceneTemplate::from_scene_desc(&initial_scene),
@@ -2305,6 +2307,7 @@ async fn a_reported_press_comes_back_out_of_the_bridge() {
     engine.set_snapshot(vec![DisplaySnapshotEntry {
         handle: Some(SceneHandle::new(11)),
         accepts_pointer_input: true,
+        paused: false,
         window_active: true,
         assignment: Some(WallpaperAssignment::Direct(
             SceneTemplate::builder("/workshop/content/431960/100/project.json")
@@ -2603,6 +2606,7 @@ fn identified_display(uuid: &str, display_id: u32) -> DisplaySnapshotEntry {
         desc: DisplayDesc::with_identity(display_id, identity, 0, 0, 1920, 1080, 2.0),
         handle: None,
         accepts_pointer_input: false,
+        paused: false,
         window_active: true,
         assignment: None,
     }

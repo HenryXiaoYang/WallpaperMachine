@@ -226,8 +226,8 @@ void WPShaderValueUpdater::UpdateUniforms(SceneNode* pNode, uint32_t material_sl
     const auto& info = slot_infos.at(material_slot);
 
     WPShaderValueData* nodeData = nullptr;
-    if (exists(m_nodeDataMap, pNode)) {
-        auto& slot_data = m_nodeDataMap.at(pNode);
+    if (const auto node_it = m_nodeDataMap.find(pNode); node_it != m_nodeDataMap.end()) {
+        auto& slot_data = node_it->second;
         auto        data_it   = slot_data.find(material_slot);
         if (data_it == slot_data.end()) data_it = slot_data.find(0);
         if (data_it != slot_data.end()) nodeData = &data_it->second;
@@ -255,8 +255,9 @@ void WPShaderValueUpdater::UpdateUniforms(SceneNode* pNode, uint32_t material_sl
     }
     if (hasNodeData) {
         for (const auto& el : nodeData->renderTargets) {
-            if (m_scene->renderTargets.count(el.second) == 0) continue;
-            const auto& rt = m_scene->renderTargets[el.second];
+            const auto rt_it = m_scene->renderTargets.find(el.second);
+            if (rt_it == m_scene->renderTargets.end()) continue;
+            const auto& rt = rt_it->second;
 
             const auto& unifrom_tex = info.texs[el.first];
 

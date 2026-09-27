@@ -56,6 +56,12 @@ public:
         return m_runtime_images.find(name) != m_runtime_images.end();
     }
 
+    /// Changes whenever a name joins this source; names never leave it.
+    ///
+    /// Lock-free, so a renderer can keep its per-slot `IsRuntimeImage` answers
+    /// and only ask again when this moves.
+    uint64_t NamesGeneration() const { return m_names_generation.load(std::memory_order_acquire); }
+
     /// How many times this name has been given new pixels, or zero when it
     /// never has.
     ///
@@ -144,6 +150,7 @@ public:
         image->slots.push_back(std::move(slot));
 
         std::lock_guard lock(m_mutex);
+        const auto names_before = m_runtime_images.size();
         if (name == "$mediaThumbnail") {
             const auto previous = m_runtime_images.find(name);
             const bool cleared  = width == 1 && height == 1 && rgba[3] == 0;
@@ -162,6 +169,9 @@ public:
         }
         m_versions[name]                  = version;
         m_runtime_images[std::move(name)] = std::move(image);
+        if (m_runtime_images.size() != names_before) {
+            m_names_generation.fetch_add(1, std::memory_order_release);
+        }
     }
 
     /// Publishes what `from` currently holds under `to`, without copying pixels.
@@ -177,8 +187,12 @@ public:
         std::lock_guard lock(m_mutex);
         const auto iterator = m_runtime_images.find(from);
         if (iterator == m_runtime_images.end()) return false;
+        const auto names_before = m_runtime_images.size();
         m_runtime_images[to] = iterator->second;
         m_versions[to]       = m_versions[from];
+        if (m_runtime_images.size() != names_before) {
+            m_names_generation.fetch_add(1, std::memory_order_release);
+        }
         return true;
     }
 
@@ -188,6 +202,7 @@ private:
     std::unordered_map<std::string, std::shared_ptr<Image>> m_runtime_images;
     std::unordered_map<std::string, uint64_t>               m_versions;
     std::atomic<uint64_t>                                   m_next_version { 0 };
+    std::atomic<uint64_t>                                   m_names_generation { 0 };
 };
 
 /// Publishes one now-playing cover, and reports whether anything changed.

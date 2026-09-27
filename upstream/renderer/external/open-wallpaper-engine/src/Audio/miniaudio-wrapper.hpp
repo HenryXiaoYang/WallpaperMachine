@@ -40,86 +40,50 @@ public:
 
 class Device : NoCopy {
 public:
-    Device() {}
+    // `context` lets tests run on miniaudio's null backend; nullptr keeps the
+    // default system context (Core Audio on macOS). The context must outlive
+    // the device.
+    explicit Device(ma_context* context = nullptr): m_context(context) {}
     ~Device() { UnInit(); }
-    Device(Device&& o) noexcept: m_device(std::exchange(o.m_device, ma_device())) {}
-    Device& operator=(Device&& o) noexcept {
-        m_device = std::exchange(o.m_device, ma_device());
-        return *this;
-    }
 
 public:
-    bool Init(const DeviceDesc& d) {
-        if (IsInited()) return true; // already inited
-        ma_result result;
-        auto      config = GenMaDeviceConfig(d);
-        Stop();
-        result = ma_device_init(NULL, &config, &m_device);
-        if (result == MA_SUCCESS) {
-            LOG_INFO("sound device inited");
-        }
-        if (result != MA_SUCCESS || ! IsInited()) {
-            LOG_ERROR("can't init sound device");
-            UnInit();
-            return false;
-        }
-        if (m_device.playback.format != ma_format_f32) {
-            LOG_ERROR("wrong playback format");
-            UnInit();
-            return false;
-        }
-        if (ma_device_start(&m_device) != MA_SUCCESS) {
-            LOG_ERROR("can't start sound device");
-            UnInit();
-            return false;
-        }
-        {
-            std::unique_lock<std::mutex> lock { m_mutex };
-            for (auto& el : m_channels) {
-                el.chn->PassDeviceDesc(GetDesc());
-            }
-        }
-        Start();
-        return true;
-    }
+    // Output IO runs only while it can be heard: at least one channel is
+    // mounted, playback is running and output is not muted. The device is
+    // initialized lazily by the first MountChannel and kept initialized so a
+    // resume is only ma_device_start. Start/stop happen on control threads,
+    // never inside data_callback. A stopped device on the default output
+    // stays in miniaudio's Core Audio default-device tracking list and is
+    // re-initialized on a default-device change even while stopped, so a
+    // later start plays on the new default.
+    //
+    // The callback already produced silence without draining channels while
+    // paused or muted, so stopping the device instead is output-identical.
     bool IsInited() const { return m_device.state.value != ma_device_state_uninitialized; }
-    void UnInit() {
-        if (IsInited()) {
-            LOG_INFO("uninit sound device");
-        }
-        UnmountAll();
-        ma_device_uninit(&m_device); // always do it
-    }
-    // bool IsStarted() const { return ma_device_is_started(&m_device); }
-    // bool IsStopped() const { return ma_device_get_state(&m_device) == MA_STATE_STOPPED; }
+    bool IsStarted() const { return ma_device_is_started(&m_device); }
     void Start() {
+        std::lock_guard<std::mutex> control { m_control_mutex };
         m_running.store(true, std::memory_order_relaxed);
-        /*
-        if(!IsStopped()) return;
-        LOG_INFO("state: %d", ma_device_get_state(&m_device));
-        if (ma_device_start(&m_device) != MA_SUCCESS) {
-            LOG_ERROR("can't start sound device");
-            //ma_device_uninit(&m_device);
-        }
-        */
+        UpdateOutputLocked();
     }
     void Stop() {
+        std::lock_guard<std::mutex> control { m_control_mutex };
         m_running.store(false, std::memory_order_relaxed);
-        /*
-        if(!IsStarted()) return;
-        LOG_INFO("state: %d", ma_device_get_state(&m_device));
-        if(ma_device_stop(&m_device) != MA_SUCCESS){
-            LOG_ERROR("can't stop sound device");
-        }*/
+        UpdateOutputLocked();
     }
     float Volume() const { return m_volume.load(std::memory_order_relaxed); }
     bool  Muted() const { return m_muted.load(std::memory_order_relaxed); }
-    void  SetMuted(bool v) { m_muted.store(v, std::memory_order_relaxed); }
+    void  SetMuted(bool v) {
+        std::lock_guard<std::mutex> control { m_control_mutex };
+        m_muted.store(v, std::memory_order_relaxed);
+        UpdateOutputLocked();
+    }
 
     void SetVolume(float v) {
         m_volume.store(wallpaper::audio::ClampVolume(v), std::memory_order_relaxed);
     }
     void MountChannel(std::shared_ptr<Channel> chn) {
+        std::lock_guard<std::mutex> control { m_control_mutex };
+        if (! IsInited()) InitLocked({});
         ChannelWrap chnw;
         chnw.chn = chn;
         chnw.chn->PassDeviceDesc(GetDesc());
@@ -127,17 +91,67 @@ public:
             std::unique_lock<std::mutex> lock { m_mutex };
             m_channels.push_back(chnw);
         }
+        UpdateOutputLocked();
     }
     void UnmountAll() {
-        {
-            std::unique_lock<std::mutex> lock { m_mutex };
-            m_channels.clear();
-        }
+        std::lock_guard<std::mutex> control { m_control_mutex };
+        UnmountAllLocked();
+        UpdateOutputLocked();
     }
     DeviceDesc GetDesc() const {
         return DeviceDesc { .phyChannels = m_device.playback.channels,
                             .sampleRate  = m_device.sampleRate };
     }
+
+private:
+    void InitLocked(const DeviceDesc& d) {
+        auto config = GenMaDeviceConfig(d);
+        if (ma_device_init(m_context, &config, &m_device) != MA_SUCCESS) {
+            LOG_ERROR("can't init sound device");
+            m_device = {};
+            return;
+        }
+        if (m_device.playback.format != ma_format_f32) {
+            LOG_ERROR("wrong playback format");
+            ma_device_uninit(&m_device);
+            m_device = {};
+            return;
+        }
+        LOG_INFO("sound device inited");
+    }
+    void UnInit() {
+        std::lock_guard<std::mutex> control { m_control_mutex };
+        if (IsInited()) {
+            LOG_INFO("uninit sound device");
+        }
+        UnmountAllLocked();
+        ma_device_uninit(&m_device); // always do it
+    }
+    void UnmountAllLocked() {
+        std::unique_lock<std::mutex> lock { m_mutex };
+        m_channels.clear();
+    }
+    void UpdateOutputLocked() {
+        if (! IsInited()) return;
+        bool has_channels = false;
+        {
+            std::unique_lock<std::mutex> lock { m_mutex };
+            has_channels = ! m_channels.empty();
+        }
+        const bool want = has_channels && m_running.load(std::memory_order_relaxed) &&
+                          ! m_muted.load(std::memory_order_relaxed);
+        const bool started = IsStarted();
+        if (want && ! started) {
+            if (ma_device_start(&m_device) != MA_SUCCESS) {
+                LOG_ERROR("can't start sound device");
+            }
+        } else if (! want && started) {
+            if (ma_device_stop(&m_device) != MA_SUCCESS) {
+                LOG_ERROR("can't stop sound device");
+            }
+        }
+    }
+
 
 private:
     static void data_callback(ma_device* pMaDevice, void* pOutput, const void* pInput,
@@ -203,8 +217,10 @@ private:
         bool                     end { false };
         std::shared_ptr<Channel> chn;
     };
+    ma_context*       m_context { nullptr };
     ma_device         m_device {}; // must init c struct
     std::mutex        m_mutex;     // for operating channel vector
+    std::mutex        m_control_mutex; // serializes control-thread state changes
     std::atomic<bool> m_running { false };
 
     std::atomic<float> m_volume { 1.0f };

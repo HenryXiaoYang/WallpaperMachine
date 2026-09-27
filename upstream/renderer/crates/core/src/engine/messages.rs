@@ -12,6 +12,13 @@ pub(super) struct NativePointerInputChanged {
     pub accepts_pointer_input: bool,
 }
 
+/// A renderer's report of whether its committed scene reads system audio.
+pub(super) struct NativeAudioRequirementChanged {
+    pub handle: SceneHandle,
+    pub renderer_instance: std::sync::Arc<()>,
+    pub requires_audio: bool,
+}
+
 /// One `engine.openUserShortcut` request from a wallpaper.
 ///
 /// Carries the handle so the wallpaper it came from can be identified, and the
@@ -100,6 +107,8 @@ pub struct SetPaused {
 
 pub struct SetAllPaused {
     pub paused: bool,
+    /// Displays whose scene stays paused regardless of `paused`.
+    pub suspended_displays: Vec<u32>,
 }
 
 /// Reads renderer work counters from every open scene.

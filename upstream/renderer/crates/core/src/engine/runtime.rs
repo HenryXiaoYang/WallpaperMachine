@@ -8,10 +8,12 @@ use crate::{
     display::state::DisplayKey,
     engine::{
         FirstFrameCallback, actor::EngineActor,
-        messages::{NativePointerInputChanged, NativeUserShortcutRequested},
+        messages::{NativeAudioRequirementChanged, NativePointerInputChanged, NativeUserShortcutRequested},
     },
     media::audio::AudioVolume,
-    owe::backend::{OweBackend, OweScene, PointerInputCallback, UserShortcutCallback},
+    owe::backend::{
+        AudioRequirementCallback, OweBackend, OweScene, PointerInputCallback, UserShortcutCallback,
+    },
     project::{ScalingMode, SceneDesc, SceneHandle, SerdeValudeExt},
     render::RendererSurfaceCounters,
     window::{MouseButtonEdges, NormalizedMousePosition},
@@ -53,6 +55,58 @@ impl PointerInputRelay {
 }
 
 impl Drop for PointerInputRelay {
+    fn drop(&mut self) { self.stop(); }
+}
+
+/// Carries the renderer's "this scene reads system audio" report off the
+/// native main looper, the same way as pointer capability: the looper only
+/// writes the latest value, and this task delivers it to the engine actor.
+/// The instance token ties a report to the renderer object that made it, so a
+/// late report from a renderer that was since rebuilt is ignored.
+struct AudioRequirementRelay {
+    renderer_instance: Arc<()>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl AudioRequirementRelay {
+    fn new(
+        actor: WeakActorRef<EngineActor>,
+        handle: SceneHandle,
+    ) -> Result<(Self, AudioRequirementCallback), EngineError> {
+        let runtime = tokio::runtime::Handle::try_current().map_err(|error| {
+            EngineError::Platform(format!("audio requirement relay requires actor runtime: {error}"))
+        })?;
+        let renderer_instance = Arc::new(());
+        let instance = renderer_instance.clone();
+        let (sender, mut receiver) = tokio::sync::watch::channel(None);
+        let callback: AudioRequirementCallback =
+            Arc::new(move |value| { sender.send_replace(Some(value)); });
+        let task = runtime.spawn(async move {
+            while receiver.changed().await.is_ok() {
+                let value = *receiver.borrow_and_update();
+                let Some(requires_audio) = value else { continue };
+                let Some(actor) = actor.upgrade() else { break };
+                let result = actor
+                    .tell(NativeAudioRequirementChanged {
+                        handle,
+                        renderer_instance: instance.clone(),
+                        requires_audio,
+                    })
+                    .send()
+                    .await;
+                drop(actor);
+                if result.is_err() {
+                    break;
+                }
+            }
+        });
+        Ok((Self { renderer_instance, task }, callback))
+    }
+
+    fn stop(&self) { self.task.abort(); }
+}
+
+impl Drop for AudioRequirementRelay {
     fn drop(&mut self) { self.stop(); }
 }
 
@@ -164,6 +218,10 @@ impl NativePointerInputState {
         changed
     }
 
+    fn sample_pending(&self) -> bool {
+        self.accepts_pointer_input && (self.delivery.entered.is_none() || self.button_baseline_pending)
+    }
+
     fn set_position(&mut self, x: f64, y: f64, send: impl FnOnce(f64, f64) -> Result<(), EngineError>) -> Result<(), EngineError> {
         if !x.is_finite() || !y.is_finite() {
             return Err(EngineError::InvalidInput("mouse coordinates must be finite".to_string()));
@@ -206,6 +264,11 @@ pub struct SceneRuntime {
     actor: WeakActorRef<EngineActor>,
     pointer_relay: PointerInputRelay,
     shortcut_relay: UserShortcutRelay,
+    audio_relay: AudioRequirementRelay,
+    /// Whether the renderer's committed scene reads system audio, as it last
+    /// reported. Starts `false` for every renderer object: a rebuilt renderer
+    /// has a new scene that has not said anything yet.
+    requires_audio: bool,
     pointer_input: NativePointerInputState,
     /// Runtime override applied after descriptor defaults.
     scaling_mode: ScalingMode,
@@ -318,6 +381,7 @@ impl SceneRuntime {
         let window = WallpaperWindow::builder(desc.display.clone()).open()?;
         let (pointer_relay, pointer_callback) = PointerInputRelay::new(actor.clone(), handle)?;
         let (shortcut_relay, shortcut_callback) = UserShortcutRelay::new(actor.clone(), handle)?;
+        let (audio_relay, audio_callback) = AudioRequirementRelay::new(actor.clone(), handle)?;
         let renderer = backend.open_scene(
             desc,
             window.metal_layer_ptr(),
@@ -330,6 +394,7 @@ impl SceneRuntime {
             })),
             Some(pointer_callback),
             Some(shortcut_callback),
+            Some(audio_callback),
         )?;
         let descriptor_state = SceneRuntimeState::try_from(desc)?;
         let mut runtime = Self {
@@ -341,6 +406,8 @@ impl SceneRuntime {
             pointer_input: NativePointerInputState::new(pointer_relay.renderer_instance.clone()),
             pointer_relay,
             shortcut_relay,
+            audio_relay,
+            requires_audio: false,
             actor,
             scaling_mode: state.scaling_mode,
             scaling_factor: state.scaling_factor,
@@ -439,6 +506,30 @@ impl SceneRuntime {
 
     pub fn accepts_pointer_input(&self) -> bool { self.pointer_input.accepts_pointer_input }
 
+    /// Whether the scene this renderer is showing reads system audio.
+    pub fn requires_audio(&self) -> bool { self.requires_audio }
+
+    /// Applies a renderer's audio-requirement report. Returns whether it
+    /// changed anything; a report from a renderer object this runtime no
+    /// longer holds changes nothing.
+    pub fn apply_audio_requirement(&mut self, instance: &Arc<()>, requires_audio: bool) -> bool {
+        if self.window.is_none() || !Arc::ptr_eq(&self.audio_relay.renderer_instance, instance) {
+            return false;
+        }
+        let changed = self.requires_audio != requires_audio;
+        self.requires_audio = requires_audio;
+        changed
+    }
+
+    pub fn paused(&self) -> bool { self.paused }
+
+    /// A presenting, interactive scene has lost its last delivered pointer
+    /// state (new runtime, resume, capability or layout change) and needs a
+    /// sample even though the cursor may not have moved.
+    pub fn pointer_sample_pending(&self) -> bool {
+        !self.paused && self.pointer_input.sample_pending()
+    }
+
     pub fn apply_pointer_input_capability(&mut self, instance: &Arc<()>, accepts: bool) -> bool {
         if self.window.is_none() { return false; }
         self.pointer_input.apply(instance, accepts)
@@ -482,6 +573,7 @@ impl SceneRuntime {
         // silently un-wire the buttons the user just used.
         let (shortcut_relay, shortcut_callback) =
             UserShortcutRelay::new(self.actor.clone(), self.handle)?;
+        let (audio_relay, audio_callback) = AudioRequirementRelay::new(self.actor.clone(), self.handle)?;
         let window = self.window.as_mut().ok_or_else(|| {
             EngineError::Platform("wallpaper window is already closed".to_string())
         })?;
@@ -508,6 +600,7 @@ impl SceneRuntime {
             Some(first_frame_callback),
             Some(pointer_callback),
             Some(shortcut_callback),
+            Some(audio_callback),
         ) {
             Ok(renderer) => renderer,
             Err(error) => {
@@ -528,6 +621,10 @@ impl SceneRuntime {
         self.generation = self.generation.saturating_add(1);
         let old_relay = std::mem::replace(&mut self.pointer_relay, pointer_relay);
         drop(std::mem::replace(&mut self.shortcut_relay, shortcut_relay));
+        // The new renderer's scene has not reported yet; the old one's
+        // requirement must not keep the system-audio tap open for it.
+        drop(std::mem::replace(&mut self.audio_relay, audio_relay));
+        self.requires_audio = false;
         self.pointer_input = NativePointerInputState::new(self.pointer_relay.renderer_instance.clone());
         old_relay.stop();
         self.desc = stored_desc;
@@ -714,6 +811,8 @@ impl SceneRuntime {
     pub fn close(&mut self) -> Result<(), EngineError> {
         self.pointer_relay.stop();
         self.shortcut_relay.stop();
+        self.audio_relay.stop();
+        self.requires_audio = false;
         let backend_result = self.renderer.close();
         if let Some(mut window) = self.window.take() {
             window.close();

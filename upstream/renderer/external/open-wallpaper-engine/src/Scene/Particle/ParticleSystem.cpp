@@ -346,7 +346,22 @@ void ParticleSubSystem::Emitt() {
 
     m_mesh->SetDirty();
 
-    m_sys.gener->GenGLData(m_instances, *m_mesh, m_genSpecOp, RenderScale());
+    // Geometry is only read by a pass that draws this owner. A hidden layer
+    // keeps the simulation above — birth, death, operators, trail history —
+    // and rebuilds the mesh from that state on the first frame it is shown.
+    // An owner that must produce (a layer something else samples) still
+    // generates, and a missing owner does too: there is nothing to prove it
+    // hidden.
+    const auto owner = m_owner_node.lock();
+    if (! owner || owner->EffectiveVisible() || owner->MustProduce()) {
+        m_sys.gener->GenGLData(m_instances, *m_mesh, m_genSpecOp, RenderScale(), m_overflow_flags);
+        m_mesh_rebuilt = true;
+    } else {
+        // Visibility is not final here. Tick, which runs after Emitt, can show
+        // this owner before the frame draws; the draw rebuilds from the
+        // simulation this call just advanced.
+        m_mesh_rebuilt = false;
+    }
 
     if (m_trail.enabled() && m_mesh->Material() != nullptr) {
         auto& constValues = m_mesh->Material()->customShader.constValues;
@@ -361,8 +376,27 @@ void ParticleSubSystem::Emitt() {
     }
 }
 
+void ParticleSubSystem::RebuildMesh() {
+    if (! m_mesh_rebuilt && m_sys.gener != nullptr && m_mesh != nullptr) {
+        const auto owner = m_owner_node.lock();
+        // Still hidden, and nothing samples it: the mesh is not read this
+        // frame. A missing owner is rebuilt, matching Emitt.
+        if (! owner || owner->EffectiveVisible() || owner->MustProduce()) {
+            m_sys.gener->GenGLData(m_instances, *m_mesh, m_genSpecOp, RenderScale(), m_overflow_flags);
+            m_mesh_rebuilt = true;
+        }
+    }
+    for (auto& child : m_children) child->RebuildMesh();
+}
+
 void ParticleSystem::Emitt() {
     for (auto& el : subsystems) {
         el->Emitt();
+    }
+}
+
+void ParticleSystem::RebuildVisibleMeshes() {
+    for (auto& el : subsystems) {
+        el->RebuildMesh();
     }
 }

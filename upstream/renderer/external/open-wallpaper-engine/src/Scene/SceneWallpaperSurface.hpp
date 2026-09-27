@@ -45,6 +45,18 @@ struct RenderInitInfo {
     // uses this for a native desktop poster, not for screen/window capture.
     std::function<bool()> wants_poster;
     std::function<void(std::span<const uint8_t>, uint32_t, uint32_t, bool)> poster_ready;
+    /// Whether `wants_poster` would answer yes right now, without taking the
+    /// request. A frame that would repeat the picture already on screen is
+    /// still drawn while this is true, because the Vulkan path can only export
+    /// from inside a presented frame. Left empty with `wants_poster` set, the
+    /// renderer treats a request as always possible and never skips a frame.
+    std::function<bool()> poster_pending;
+
+    /// Optional: told, after each frame the compatibility backend actually
+    /// presents, the decoded generation and PTS of every video frame it
+    /// sampled. Not called for a frame left out as a repeat. Observation only;
+    /// nothing in the renderer depends on it.
+    std::function<void(uint64_t generation, double pts_seconds)> video_frame_presented;
 
     /// Lets the host wake the render handler when a poster is requested.
     ///

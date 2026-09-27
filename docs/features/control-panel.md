@@ -224,6 +224,15 @@ disables its switch; language and appearance remain usable if renderer settings
 are unavailable. Snapshot updates preserve active drafts, selection, disclosures
 and scrolling. About's update actions precede expanded release notes.
 
+The panel's web view sets WebKit's inactive scheduling policy
+(`WKPreferences.inactiveSchedulingPolicy = .suspend`). WebKit applies it when
+it considers the view inactive; the view stays in the window tree, so the panel
+does not rely on it being suspended while hidden. A snapshot the host skipped
+while the window was hidden is delivered when the window is revealed. Discover's live-preview luminance sampler
+(`panel.js`, `sampleLivePreviews`) runs only while Discover is the visible page
+and a ready animated preview is on screen; leaving Discover, hiding the
+document, or running out of ready tiles stops it.
+
 ## Thumbnail corner marks
 
 Installed and Discover show status marks at the thumbnail's upper-left corner:

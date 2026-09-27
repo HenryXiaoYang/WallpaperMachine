@@ -41,10 +41,19 @@ public:
     bool resetSurface(const RenderInitInfo& info);
 
     /// Draws one frame. `presented`, when given, reports whether a frame
-    /// actually reached the surface, which for this backend is the same answer
-    /// as the return value: a swapchain image that cannot be acquired is a
-    /// failed frame here, not a skipped one.
+    /// actually reached the surface. A swapchain image that cannot be acquired
+    /// is a failed frame here, not a skipped one. With scene optimisation on, a
+    /// frame that would put back exactly the picture already on the surface --
+    /// a plain video whose selected frame did not change, or a scene whose
+    /// every pass was reused -- succeeds without acquiring, submitting or
+    /// presenting, and reports `presented` false.
     bool drawFrame(Scene&, bool* presented = nullptr);
+
+    /// Forgets the last presented frame, so the next frame presents whatever
+    /// it would have presented anyway. For events outside the renderer that
+    /// can change the picture without changing what a frame compares, such as
+    /// resuming a paused wallpaper.
+    void InvalidatePresentedFrame();
 
     bool clearLastRenderGraph();
     bool compileRenderGraph(Scene&, rg::RenderGraph&);

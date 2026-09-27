@@ -134,6 +134,9 @@ final class WebWallpaperHost {
     }
 
     var activeDisplayIDs: Set<UInt32> { Set(windows.keys) }
+    /// True while a loaded, unsuspended page can use pointer events. A window
+    /// that exists but is host-suspended installs no global monitor.
+    var isPointerMonitorActive: Bool { mouse.isActive }
     var isEmpty: Bool { windows.isEmpty }
 
     /// Displays whose page has actually registered an audio listener and is
@@ -270,6 +273,7 @@ final class WebWallpaperHost {
                 page.onLoaded = { [weak self] in
                     self?.replayDirectories(displayID: displayID)
                     self?.scheduleSurfaceChange()
+                    self?.refreshPointerMonitor()
                 }
                 page.onAudioDemandChanged = { [weak self, weak page] subscribed in
                     guard let self, let page else { return }
@@ -293,7 +297,7 @@ final class WebWallpaperHost {
             }
         }
         pruneAssetState()
-        mouse.setActive(!windows.isEmpty)
+        refreshPointerMonitor()
         if changed { onSurfacesChanged?() }
     }
 
@@ -344,6 +348,7 @@ final class WebWallpaperHost {
         for (displayID, window) in windows {
             window.page.setPresentationSuspended(isSuspended(displayID: displayID))
         }
+        refreshPointerMonitor()
     }
 
     /// Suspends the page on one display only. A window covering the wallpaper
@@ -355,6 +360,15 @@ final class WebWallpaperHost {
             suspendedDisplays.remove(displayID)
         }
         windows[displayID]?.page.setPresentationSuspended(isSuspended(displayID: displayID))
+        refreshPointerMonitor()
+    }
+
+    /// Hover, click and scroll reach a page only while it is loaded and in the
+    /// window tree. The first such page installs the monitor; the last one
+    /// leaving removes it, and the next resume installs it again.
+    private func refreshPointerMonitor() {
+        let live = windows.values.contains { $0.page.isLoaded && !$0.page.hostSuspended }
+        mouse.setActive(live)
     }
 
     func shutdown() {

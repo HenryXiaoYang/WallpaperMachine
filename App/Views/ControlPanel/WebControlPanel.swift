@@ -170,6 +170,10 @@ final class WebPanelController: NSObject, WKNavigationDelegate {
     configuration.websiteDataStore = .nonPersistent()
     configuration.userContentController = content
     configuration.setURLSchemeHandler(assets, forURLScheme: "mwe-ui")
+    // Same policy as a web wallpaper page: once this view is not in a visible
+    // window, WebKit suspends its timers, rAF and CSS animations. The view stays
+    // in the hierarchy; reveal still delivers the snapshot that was waiting.
+    configuration.preferences.inactiveSchedulingPolicy = .suspend
     let view = WKWebView(frame: .zero, configuration: configuration)
     view.navigationDelegate = self
     view.underPageBackgroundColor = .windowBackgroundColor
@@ -346,12 +350,14 @@ final class WebPanelController: NSObject, WKNavigationDelegate {
         if self.pageGeneration == generation { self.updateTask = nil }
       }
       while self.updatePending && !Task.isCancelled && self.pageGeneration == generation {
-        guard !self.stopped, self.isReady, let view = self.webView,
-          self.presentationAllowsUpdates()
-        else {
+        guard !self.stopped, self.isReady, let view = self.webView else {
           self.cancelDisplayOptions()
           return
         }
+        // Hidden, minimized or occluded: leave the snapshot pending. The
+        // occlusion and deminiaturize observers call back here once this task
+        // has ended, and that call delivers it along with the energy readout.
+        guard self.presentationAllowsUpdates() else { return }
         self.refreshDisplayOptions()
         self.updatePending = false
         let state = self.snapshot()

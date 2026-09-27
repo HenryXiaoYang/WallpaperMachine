@@ -29,6 +29,7 @@ fn display_snapshot(display_id: u32) -> DisplaySnapshotEntry {
         // handle. That absence is the whole point of these tests.
         handle: None,
         accepts_pointer_input: false,
+        paused: false,
         window_active: true,
         assignment: None,
     }
@@ -143,6 +144,26 @@ async fn capture_tap_follows_web_subscribers_with_no_scene_handle() {
         "losing the last consumer must close the tap"
     );
     assert_eq!(audio_consumers(&bridge).await, 0);
+}
+
+#[tokio::test]
+async fn a_web_listener_counts_beside_a_scene_that_reads_no_audio() {
+    let engine = FakeEngineFacade::default();
+    engine.scenes_start_without_audio();
+    let bridge = web_bridge(&engine).await;
+    // A scene wallpaper with audio response on, on a second display, whose
+    // content reads no audio.
+    let mut scene_display = display_snapshot(9);
+    scene_display.handle = Some(SceneHandle::new(1));
+    engine.set_snapshot(vec![display_snapshot(7), scene_display]);
+    bridge.inject_scene_wallpaper_config_for_test("400", "Scene").await;
+    bridge.set_display_config_enabled("400".into(), "9".into(), true).await.unwrap();
+    bridge.apply_wallpaper_options("400".into()).await.unwrap();
+    assert_eq!(audio_consumers(&bridge).await, 0, "neither the page nor the scene consumes yet");
+
+    bridge.set_web_audio_subscribed("300".into(), 7, true).await.unwrap();
+    assert!(tap_open(&engine), "the subscribed page alone keeps the tap open");
+    assert_eq!(audio_consumers(&bridge).await, 1, "only the page counts");
 }
 
 #[tokio::test]
@@ -360,6 +381,7 @@ async fn scene_media_events_fan_out_only_to_opted_in_handles() {
     engine.set_snapshot(vec![DisplaySnapshotEntry {
         handle: Some(SceneHandle::new(11)),
         accepts_pointer_input: true,
+        paused: false,
         window_active: true,
         assignment: Some(WallpaperAssignment::Direct(
             SceneTemplate::builder("/workshop/content/431960/100/project.json")
@@ -433,6 +455,7 @@ async fn scene_media_handles_follow_consent_so_nothing_reads_the_player_without_
     engine.set_snapshot(vec![DisplaySnapshotEntry {
         handle: Some(SceneHandle::new(11)),
         accepts_pointer_input: true,
+        paused: false,
         window_active: true,
         assignment: Some(WallpaperAssignment::Direct(
             SceneTemplate::builder("/workshop/content/431960/100/project.json")
@@ -493,6 +516,7 @@ async fn paused_and_suspended_scenes_stop_consuming_media_but_keep_their_consent
     engine.set_snapshot(vec![DisplaySnapshotEntry {
         handle: Some(SceneHandle::new(11)),
         accepts_pointer_input: true,
+        paused: false,
         window_active: true,
         assignment: Some(WallpaperAssignment::Direct(
             SceneTemplate::builder("/workshop/content/431960/100/project.json")
@@ -582,6 +606,7 @@ async fn one_suspended_display_stops_only_its_own_scene_on_every_entry_point() {
     let scene = |id: u32| DisplaySnapshotEntry {
         handle: Some(SceneHandle::new(u64::from(id))),
         accepts_pointer_input: true,
+        paused: false,
         window_active: true,
         assignment: Some(WallpaperAssignment::Direct(
             SceneTemplate::builder("/workshop/content/431960/100/project.json")

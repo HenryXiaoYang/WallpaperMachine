@@ -50,6 +50,14 @@ public:
         bool                     alpha_to_coverage { false };
         VkSampleCountFlagBits    sample_count { VK_SAMPLE_COUNT_1_BIT };
         VkFormat                 presentation_format { VK_FORMAT_UNDEFINED };
+        /// Set only for a pass that is, by how its scene is built, the final
+        /// composition's own full-target quad copying one texture into the
+        /// scene output: the plain-video scene. Presenting it may then draw
+        /// straight into the target through the final composition's viewport
+        /// and scissor, sampling that texture with the scene output's sampler
+        /// -- exactly what the final composition does with the copy -- instead
+        /// of only when output, target and viewport coincide.
+        bool                     presents_through_final_viewport { false };
         sprite_map_t             sprites_map;
 
         // -----prepared
@@ -58,6 +66,9 @@ public:
         std::vector<std::string>   vk_texture_image_keys;
         std::vector<TextureBinding> vk_texture_bindings;
         std::vector<bool>          video_textures;
+        /// One log per import-failure transition, not one per tick. Cleared
+        /// when that slot's update succeeds again.
+        std::vector<bool>          video_update_failure_reported;
         ImageParameters            vk_output;
         ImageParameters            vk_output_msaa;
         ImageParameters            vk_output_depth;
@@ -123,14 +134,29 @@ public:
                             VkFormat target_format) const;
     VkResult executePresentation(const Device&, RenderingResources&, const ImageParameters& target,
                                  VkFormat target_format);
+    /// A render pass compatible with the presentation pipeline that leaves
+    /// its target ready to be copied from, for composing a poster.
+    [[nodiscard]] VkRenderPass presentationCopySourcePass() const {
+        return *m_presentation_copy_source_pass;
+    }
+    /// What `executePresentation` records, through `render_pass` into an
+    /// `extent`-sized `framebuffer` of the presentation format.
+    VkResult recordPresentation(const Device&, RenderingResources&, VkRenderPass render_pass,
+                                VkFramebuffer framebuffer, VkExtent2D extent);
 
 private:
-    void recordDescriptors(RenderingResources&, VkPipelineLayout) const;
+    /// `sampler_override`, when set, replaces every bound texture's sampler.
+    void recordDescriptors(RenderingResources&, VkPipelineLayout,
+                           VkSampler sampler_override = VK_NULL_HANDLE) const;
     void recordDrawWithPipeline(const Device&, RenderingResources&, const PipelineParameters&,
                                 VkExtent3D);
+    void recordDrawWithPipeline(const Device&, RenderingResources&, const PipelineParameters&,
+                                VkViewport, VkRect2D scissor,
+                                VkSampler sampler_override);
 
     Desc m_desc {};
     PipelineParameters m_presentation_pipeline;
+    vvk::RenderPass m_presentation_copy_source_pass;
     std::vector<CachedColorFramebuffer> m_presentation_framebuffers;
     bool m_frame_visible { false };
     bool m_frame_clear_only { false };

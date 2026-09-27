@@ -162,7 +162,6 @@ final class LockScreenWallpaperService {
       let records = try await scenes()
       try Task.checkCancellation()
       guard generation == revision else { return }
-      try selection.checkCompatibility()
       let inputs = try records.map { record -> LockScreenPublishInput in
         guard CGDisplayIsOnline(record.displayId) != 0,
           let uuid = CGDisplayCreateUUIDFromDisplayID(record.displayId)?.takeRetainedValue()
@@ -200,7 +199,10 @@ final class LockScreenWallpaperService {
       }
       if inputs == lastInputs, isEnabled, let published {
         // Reconcile new Spaces using the same native choice identity. Ordinary
-        // snapshots must not invalidate thumbnails or reload WallpaperAgent.
+        // snapshots must not invalidate thumbnails or reload WallpaperAgent,
+        // and must not re-read the wallpaper store: compatibility was checked
+        // when this selection was published, and a changed input set checks it
+        // again below.
         try selection.synchronize(
           displays: Set(inputs.map(\.displayUUID)), revision: published.revision)
         status = String(localized: "Enabled for \(inputs.count) display(s)")
@@ -214,6 +216,7 @@ final class LockScreenWallpaperService {
         try clearManifest()
         isEnabled = false
       }
+      try selection.checkCompatibility()
       let root = documents
       let userAssets = UserAssetStorage.managedRootURL
       let staging = Task.detached(priority: .utility) {

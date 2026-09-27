@@ -48,6 +48,11 @@ pub type PointerInputCallback = Arc<dyn Fn(bool) + Send + Sync + 'static>;
 /// Receives one `engine.openUserShortcut` request: the property the wallpaper
 /// named, and the value its user chose for it.
 pub type UserShortcutCallback = Arc<dyn Fn(String, String) + Send + Sync + 'static>;
+/// Receives whether the renderer's committed scene reads system audio. Called
+/// on the native main looper: once on install, then on every change. A newly
+/// committed scene starts at `false`; a replaced scene's late report never
+/// arrives.
+pub type AudioRequirementCallback = Arc<dyn Fn(bool) + Send + Sync + 'static>;
 
 impl OweBackend {
     /// Initializes access to the statically linked backend.
@@ -88,6 +93,7 @@ impl OweBackend {
         first_frame_callback: Option<FirstFrameCallback>,
         pointer_input_callback: Option<PointerInputCallback>,
         user_shortcut_callback: Option<UserShortcutCallback>,
+        audio_requirement_callback: Option<AudioRequirementCallback>,
     ) -> Result<OweScene, EngineError> {
         let display = &desc.display;
         let load = crate::log_context::begin_load(
@@ -129,6 +135,7 @@ impl OweBackend {
         scene.set_first_frame_callback(first_frame_callback)?;
         scene.set_pointer_input_callback(pointer_input_callback)?;
         scene.set_user_shortcut_callback(user_shortcut_callback)?;
+        scene.set_audio_requirement_callback(audio_requirement_callback)?;
         scene.apply_scene_config(desc)?;
         scene.set_scaling_mode(scaling_mode)?;
         scene.set_scaling_factor(scaling_factor)?;
@@ -804,6 +811,36 @@ impl OweScene {
         result
     }
 
+    /// Installs the sink for the committed scene's audio requirement, replayed
+    /// once on install. `None` clears it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError`] if the scene is closed or OWE rejects the
+    /// registration.
+    pub fn set_audio_requirement_callback(
+        &mut self,
+        callback: Option<AudioRequirementCallback>,
+    ) -> Result<(), EngineError> {
+        let raw = self.raw_ptr()?;
+        let user_data = callback.map_or(std::ptr::null_mut(), |callback| {
+            Box::into_raw(Box::new(callback)).cast::<c_void>()
+        });
+        let result = call_status("owe_scene_wallpaper_set_audio_requirement_callback", || unsafe {
+            sys::owe_scene_wallpaper_set_audio_requirement_callback(
+                raw.as_ptr(),
+                if user_data.is_null() { None } else { Some(owe_audio_requirement_callback) },
+                user_data,
+                if user_data.is_null() { None } else { Some(owe_audio_requirement_callback_drop) },
+            )
+        });
+        if result.is_err() && !user_data.is_null() {
+            // Failed registration never consumes the caller's userdata.
+            drop(unsafe { Box::<AudioRequirementCallback>::from_raw(user_data.cast()) });
+        }
+        result
+    }
+
     pub fn set_mouse_position(&mut self, x: f64, y: f64) -> Result<(), EngineError> {
         if !x.is_finite() || !y.is_finite() {
             return Err(EngineError::InvalidInput(
@@ -1225,6 +1262,30 @@ unsafe extern "C-unwind" fn owe_user_shortcut_callback_drop(user_data: *mut c_vo
     let _ = catch_unwind(AssertUnwindSafe(|| {
         if !user_data.is_null() {
             drop(unsafe { Box::<UserShortcutCallback>::from_raw(user_data.cast()) });
+        }
+    }));
+}
+
+unsafe extern "C-unwind" fn owe_audio_requirement_callback(
+    user_data: *mut c_void,
+    requires_audio: bool,
+) {
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        if !user_data.is_null() {
+            // SAFETY: produced by `OweScene::set_audio_requirement_callback`
+            // from `Box<AudioRequirementCallback>`, owned by C++ until
+            // `owe_audio_requirement_callback_drop`.
+            let callback = unsafe { &*user_data.cast::<AudioRequirementCallback>() };
+            callback(requires_audio);
+        }
+    }));
+}
+
+unsafe extern "C-unwind" fn owe_audio_requirement_callback_drop(user_data: *mut c_void) {
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        if !user_data.is_null() {
+            // SAFETY: C++ calls this exactly once per transferred box.
+            drop(unsafe { Box::<AudioRequirementCallback>::from_raw(user_data.cast()) });
         }
     }));
 }

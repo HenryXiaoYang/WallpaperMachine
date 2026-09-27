@@ -58,14 +58,26 @@ inline u32 Emitt(std::vector<Particle>& particles, u32 num, u32 maxcount, bool s
     }
 
     if (sort) {
-        // old << new << dead
-        std::stable_sort(particles.begin(), particles.end(), [](const auto& a, const auto& b) {
-            bool l_a = ParticleModify::LifetimeOk(a);
-            bool l_b = ParticleModify::LifetimeOk(b);
-
-            return (l_a && ! l_b) ||
-                   (l_a && l_b && ! ParticleModify::IsNew(a) && ParticleModify::IsNew(b));
-        });
+        // old << new << dead, stable within each bucket. Three linear passes
+        // into scratch instead of a sort; the order is the same one
+        // stable_sort produced.
+        thread_local std::vector<Particle> scratch;
+        scratch.clear();
+        scratch.reserve(particles.size());
+        for (const auto& particle : particles) {
+            if (ParticleModify::LifetimeOk(particle) && ! ParticleModify::IsNew(particle)) {
+                scratch.push_back(particle);
+            }
+        }
+        for (const auto& particle : particles) {
+            if (ParticleModify::LifetimeOk(particle) && ParticleModify::IsNew(particle)) {
+                scratch.push_back(particle);
+            }
+        }
+        for (const auto& particle : particles) {
+            if (! ParticleModify::LifetimeOk(particle)) scratch.push_back(particle);
+        }
+        particles.swap(scratch);
     }
 
     return i + 1;

@@ -9,6 +9,7 @@
 #include <condition_variable>
 #include <cstring>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <vector>
 
@@ -33,8 +34,11 @@ public:
         const auto frames_to_copy =
             std::min<std::size_t>(frameCount, BufferedFramesLocked());
         ReadFramesLocked(static_cast<float*>(pData), frames_to_copy);
+        // Wake the decoder only once it has a full chunk of room to fill;
+        // the worker's wait predicate would reject any earlier wake.
+        const bool wake_worker = FreeFramesLocked() >= DecodeChunkFrames(m_desc);
         lock.unlock();
-        m_cv.notify_one();
+        if (wake_worker) m_cv.notify_one();
         return frameCount;
     }
 
@@ -100,17 +104,18 @@ private:
 
             if (desc.phyChannels == 0 || frames_to_decode == 0) continue;
 
-            std::vector<float> decoded(
-                static_cast<std::size_t>(frames_to_decode) * desc.phyChannels,
-                0.0f);
-            uint64_t frames_read = m_ss->NextPcmData(decoded.data(), frames_to_decode);
+            // Zero-filled like the old per-chunk vector: a short or empty
+            // read still queues silence for the unread frames.
+            m_decoded.assign(static_cast<std::size_t>(frames_to_decode) * desc.phyChannels,
+                             0.0f);
+            uint64_t frames_read = m_ss->NextPcmData(m_decoded.data(), frames_to_decode);
             if (frames_read == 0) frames_read = frames_to_decode;
             frames_read = std::min<uint64_t>(frames_read, frames_to_decode);
 
             {
                 std::lock_guard<std::mutex> lock { m_mutex };
                 if (m_stop_worker) return;
-                WriteFramesLocked(decoded.data(), static_cast<std::size_t>(frames_read));
+                WriteFramesLocked(m_decoded.data(), static_cast<std::size_t>(frames_read));
             }
             m_cv.notify_all();
         }
@@ -167,6 +172,7 @@ private:
     std::condition_variable      m_cv;
     std::thread                  m_worker;
     std::vector<float>           m_ring;
+    std::vector<float>           m_decoded; // worker-thread decode scratch
     std::size_t                  m_read_frame { 0 };
     std::size_t                  m_buffered_frames { 0 };
     bool                         m_stop_worker { false };
@@ -188,12 +194,27 @@ wallpaper::audio::CreateSoundStream(std::shared_ptr<wallpaper::fs::IBinaryStream
 
 class SoundManager::impl : NoCopy, NoMove {
 public:
-    impl(): device() {};
-    ~impl() = default;
-    miniaudio::Device device {};
+    explicit impl(OutputBackend backend) {
+        if (backend == OutputBackend::Null) {
+            const ma_backend backends[] = { ma_backend_null };
+            if (ma_context_init(backends, 1, nullptr, &context) == MA_SUCCESS) {
+                context_inited = true;
+            } else {
+                LOG_ERROR("can't init null audio context");
+            }
+        }
+        device.emplace(context_inited ? &context : nullptr);
+    }
+    ~impl() {
+        device.reset();
+        if (context_inited) ma_context_uninit(&context);
+    }
+    ma_context                       context {};
+    bool                             context_inited { false };
+    std::optional<miniaudio::Device> device;
 };
 
-SoundManager::SoundManager(): pImpl(std::make_unique<impl>()) {}
+SoundManager::SoundManager(OutputBackend backend): pImpl(std::make_unique<impl>(backend)) {}
 SoundManager::~SoundManager() {}
 
 void SoundManager::MountStream(std::unique_ptr<SoundStream>&& ss) {
@@ -201,24 +222,16 @@ void SoundManager::MountStream(std::unique_ptr<SoundStream>&& ss) {
 }
 
 void SoundManager::MountStream(std::shared_ptr<SoundStream> ss) {
-    pImpl->device.MountChannel(std::make_unique<Channel_Impl>(std::move(ss)));
+    pImpl->device->MountChannel(std::make_unique<Channel_Impl>(std::move(ss)));
 }
 
-bool SoundManager::Init() { return pImpl->device.Init({}); }
-bool SoundManager::IsInited() const { return pImpl->device.IsInited(); }
-void SoundManager::Play() { pImpl->device.Start(); }
-void SoundManager::Pause() { pImpl->device.Stop(); }
+void SoundManager::Play() { pImpl->device->Start(); }
+void SoundManager::Pause() { pImpl->device->Stop(); }
 
-void  SoundManager::UnMountAll() { pImpl->device.UnmountAll(); }
-float SoundManager::Volume() const { return pImpl->device.Volume(); }
+void  SoundManager::UnMountAll() { pImpl->device->UnmountAll(); }
+float SoundManager::Volume() const { return pImpl->device->Volume(); }
 
-bool SoundManager::Muted() const { return pImpl->device.Muted(); }
-void SoundManager::SetMuted(bool v) {
-    pImpl->device.SetMuted(v);
-    if (! pImpl->device.IsInited()) {
-        if (! Init()) {
-            LOG_ERROR("can't init sound device after mute state change");
-        }
-    }
-}
-void SoundManager::SetVolume(float v) { pImpl->device.SetVolume(v); }
+bool SoundManager::Muted() const { return pImpl->device->Muted(); }
+void SoundManager::SetMuted(bool v) { pImpl->device->SetMuted(v); }
+void SoundManager::SetVolume(float v) { pImpl->device->SetVolume(v); }
+bool SoundManager::OutputStarted() const { return pImpl->device->IsStarted(); }

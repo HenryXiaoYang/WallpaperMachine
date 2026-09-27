@@ -62,9 +62,12 @@ pub trait EngineFacade: Send + Sync + 'static {
     fn refresh_displays(&self) -> EngineFuture<()>;
     fn display_snapshot(&self) -> Vec<DisplaySnapshotEntry>;
     fn close_all_scenes(&self) -> EngineFuture<()>;
-    /// Pauses or resumes every open scene. Global conditions only: the user's
-    /// Play/Pause choice, power policy, display sleep and session lock.
-    fn set_all_paused(&self, paused: bool) -> EngineFuture<()>;
+    /// Applies a global pause target to every open scene in one pass: a scene
+    /// is paused when `paused` is set (the user's Play/Pause choice, power
+    /// policy, display sleep, session lock) or when its display is in
+    /// `suspended_displays`. A global resume therefore never restarts a
+    /// display that is still covered, not even briefly.
+    fn set_all_paused(&self, paused: bool, suspended_displays: Vec<u32>) -> EngineFuture<()>;
     /// Pauses or resumes the scene on one display. One display being hidden
     /// must not stop a visible one, so occlusion is applied here rather than
     /// through `set_all_paused`.
@@ -113,6 +116,16 @@ pub trait EngineFacade: Send + Sync + 'static {
         &self,
         callback: Option<wallpaper_core::PointerConsumerCallback>,
     );
+    /// Installs the sink the pointer sampler waits on; replays the current
+    /// monitor gap synchronously. The callback runs on the AppKit main thread
+    /// for OS input and must only record the signal.
+    fn set_pointer_activity_callback(
+        &self,
+        callback: Option<wallpaper_core::PointerActivityCallback>,
+    );
+    /// Cursor state for change detection while the event monitors have a gap.
+    /// Called on the sampler thread; must not touch the main thread.
+    fn probe_pointer(&self) -> wallpaper_core::PointerProbe;
     /// Installs the sink for `engine.openUserShortcut` requests. Pushed rather
     /// than polled: a press is rare and must not cost an idle wakeup to notice.
     ///
@@ -123,6 +136,22 @@ pub trait EngineFacade: Send + Sync + 'static {
     fn set_user_shortcut_callback(
         &self,
         callback: Option<wallpaper_core::UserShortcutObserverCallback>,
+    );
+    /// Whether the scene behind `handle` reads system audio, as its renderer
+    /// last reported: an audio-processing material or particle, an audio
+    /// spectrum uniform, or a script that asked for audio buffers. A newly
+    /// opened or rebuilt scene reads `false` until its renderer says otherwise.
+    fn scene_requires_audio(&self, handle: SceneHandle) -> bool;
+    /// Installs the observer told when a live scene starts or stops reading
+    /// system audio, replaying the scenes that currently do. Pushed, never
+    /// polled. Runs on the engine's thread under a lock, so it must only hand
+    /// the event on.
+    ///
+    /// Required, with no default: a forwarder that dropped it would keep the
+    /// system-audio tap shut for every scene that reads audio.
+    fn set_audio_requirement_callback(
+        &self,
+        callback: Option<wallpaper_core::AudioRequirementCallback>,
     );
     /// Globally suspends or resumes system-audio capture. Per-scene audio
     /// response settings are preserved across the transition.
@@ -343,9 +372,9 @@ impl EngineFacade for RealEngineFacade {
         .boxed()
     }
 
-    fn set_all_paused(&self, paused: bool) -> EngineFuture<()> {
+    fn set_all_paused(&self, paused: bool, suspended_displays: Vec<u32>) -> EngineFuture<()> {
         let engine = self.engine.clone();
-        async move { engine.set_all_paused(paused).await }.boxed()
+        async move { engine.set_all_paused(paused, suspended_displays).await }.boxed()
     }
 
     fn set_display_paused(&self, display_id: u32, paused: bool) -> EngineFuture<()> {
@@ -612,11 +641,33 @@ impl EngineFacade for RealEngineFacade {
         self.engine.set_pointer_consumer_callback(callback);
     }
 
+    fn set_pointer_activity_callback(
+        &self,
+        callback: Option<wallpaper_core::PointerActivityCallback>,
+    ) {
+        self.engine.set_pointer_activity_callback(callback);
+    }
+
+    fn probe_pointer(&self) -> wallpaper_core::PointerProbe {
+        self.engine.probe_pointer()
+    }
+
     fn set_user_shortcut_callback(
         &self,
         callback: Option<wallpaper_core::UserShortcutObserverCallback>,
     ) {
         self.engine.set_user_shortcut_callback(callback);
+    }
+
+    fn scene_requires_audio(&self, handle: SceneHandle) -> bool {
+        self.engine.scene_requires_audio(handle)
+    }
+
+    fn set_audio_requirement_callback(
+        &self,
+        callback: Option<wallpaper_core::AudioRequirementCallback>,
+    ) {
+        self.engine.set_audio_requirement_callback(callback);
     }
 }
 
@@ -745,11 +796,17 @@ pub struct FakeEngineFacade {
     /// point of installing it.
     user_shortcut:
         Arc<std::sync::Mutex<Option<wallpaper_core::UserShortcutObserverCallback>>>,
+    /// What the fake renderers report about reading system audio.
+    audio_requirement: Arc<std::sync::Mutex<FakeAudioRequirement>>,
     snapshot_after_refresh: Arc<ArcSwap<Option<Vec<DisplaySnapshotEntry>>>>,
     refresh_failure: Arc<ArcSwap<Option<String>>>,
     paused_calls: Arc<ArcSwap<Vec<bool>>>,
     pause_failure: Arc<ArcSwap<Option<String>>>,
     display_paused_calls: Arc<ArcSwap<Vec<(u32, bool)>>>,
+    /// Every pause value applied to a rendered scene, by its display, in the
+    /// order the fake applied them. A global resume that briefly restarts a
+    /// still-hidden display shows up here as a `false` for that display.
+    scene_pause_log: Arc<ArcSwap<Vec<(u32, bool)>>>,
     display_pause_failure: Arc<ArcSwap<Option<String>>>,
     suspend_failure: Arc<ArcSwap<Option<String>>>,
     disable_capture_failure: Arc<ArcSwap<Option<String>>>,
@@ -780,6 +837,10 @@ pub struct FakeEngineFacade {
     audio_spectrum: Arc<ArcSwap<Option<AudioSpectrum128>>>,
     mouse_poll_calls: Arc<ArcSwap<Vec<()>>>,
     mouse_poll_block: Arc<SegQueue<ReconcileBlockGate>>,
+    mouse_polls_seen: Arc<std::sync::atomic::AtomicUsize>,
+    pointer_activity: Arc<std::sync::Mutex<PointerActivityObserver>>,
+    pointer_probe: Arc<ArcSwap<wallpaper_core::PointerProbe>>,
+    pointer_probe_count: Arc<std::sync::atomic::AtomicUsize>,
     mouse_input: Arc<ArcSwap<(f64, f64)>>,
     mouse_samples: Arc<ArcSwap<Vec<(f64, f64)>>>,
     mouse_position_calls: Arc<ArcSwap<Vec<(SceneHandle, f64, f64)>>>,
@@ -796,6 +857,37 @@ pub struct FakeEngineFacade {
     /// renderer; this only lets a bridge test drive the reporting path.
     surface_counters: Arc<ArcSwap<Vec<RendererSurfaceCounters>>>,
     shared_counters: Arc<ArcSwap<Vec<u64>>>,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct PointerActivityObserver {
+    callback: Option<wallpaper_core::PointerActivityCallback>,
+    monitor_gap: bool,
+}
+
+/// The fake renderers' audio reports. Unless a test says otherwise, every
+/// scene reads audio, which is what the audio-response tests are about; a test
+/// of the requirement itself starts from the real engine's `false`.
+#[cfg(test)]
+#[derive(Default)]
+struct FakeAudioRequirement {
+    scenes_start_without_audio: bool,
+    reported: std::collections::HashMap<SceneHandle, bool>,
+    callback: Option<wallpaper_core::AudioRequirementCallback>,
+}
+
+#[cfg(test)]
+impl FakeAudioRequirement {
+    fn requires_audio(&self, handle: SceneHandle) -> bool {
+        self.reported.get(&handle).copied().unwrap_or(!self.scenes_start_without_audio)
+    }
+}
+
+/// The engine's rule: a presenting, interactive scene.
+#[cfg(test)]
+fn is_pointer_consumer(display: &DisplaySnapshotEntry) -> bool {
+    display.handle.is_some() && display.accepts_pointer_input && !display.paused
 }
 
 #[cfg(test)]
@@ -876,6 +968,28 @@ impl FakeEngineFacade {
         true
     }
 
+    /// Makes an unreported scene read `false`, as a real renderer does until
+    /// its scene reports that it reads audio.
+    pub fn scenes_start_without_audio(&self) {
+        self.audio_requirement
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .scenes_start_without_audio = true;
+    }
+
+    /// Reports a scene's audio requirement the way the engine does when its
+    /// renderer reports: the observer hears it only when it changed.
+    pub fn report_requires_audio(&self, handle: SceneHandle, requires_audio: bool) {
+        let mut state = self.audio_requirement.lock().unwrap_or_else(|error| error.into_inner());
+        let changed = state.requires_audio(handle) != requires_audio;
+        let _ = state.reported.insert(handle, requires_audio);
+        if changed {
+            if let Some(callback) = &state.callback {
+                callback(handle, requires_audio);
+            }
+        }
+    }
+
     pub fn media_calls(&self) -> Vec<(SceneHandle, bool, wallpaper_core::media::MediaPollResult)> {
         load_log(&self.media_calls)
     }
@@ -900,9 +1014,13 @@ impl FakeEngineFacade {
 
     fn publish_snapshot(&self, update: impl FnOnce(&[DisplaySnapshotEntry]) -> Vec<DisplaySnapshotEntry>) {
         let mut observer = self.pointer_consumer.lock().unwrap_or_else(|error| error.into_inner());
-        let snapshot = Arc::new(update(self.snapshot.load().as_ref()));
-        let has_consumers = snapshot.iter().any(|display| {
-            display.handle.is_some() && display.accepts_pointer_input
+        let previous = self.snapshot.load_full();
+        let snapshot = Arc::new(update(previous.as_ref()));
+        let has_consumers = snapshot.iter().any(is_pointer_consumer);
+        // The engine asks for a sample when a presenting scene is new or
+        // resumed, since its pointer delivery starts empty.
+        let consumer_joined = snapshot.iter().filter(|display| is_pointer_consumer(display)).any(|display| {
+            !previous.iter().any(|old| is_pointer_consumer(old) && old.handle == display.handle)
         });
         self.snapshot.store(snapshot);
         if observer.has_consumers != has_consumers {
@@ -911,6 +1029,57 @@ impl FakeEngineFacade {
                 callback(has_consumers);
             }
         }
+        drop(observer);
+        if consumer_joined {
+            self.report_pointer_activity(wallpaper_core::PointerActivity::Input);
+        }
+    }
+
+    /// Reports pointer input the way the engine's OS event monitor does.
+    pub fn simulate_pointer_input(&self) {
+        self.report_pointer_activity(wallpaper_core::PointerActivity::Input);
+    }
+
+    /// Opens or closes the event-monitor gap, as app activation would.
+    pub fn set_pointer_monitor_gap(&self, gap: bool) {
+        let mut observer = self.pointer_activity.lock().unwrap_or_else(|error| error.into_inner());
+        observer.monitor_gap = gap;
+        if let Some(callback) = &observer.callback {
+            callback(wallpaper_core::PointerActivity::MonitorGap(gap));
+        }
+    }
+
+    fn report_pointer_activity(&self, activity: wallpaper_core::PointerActivity) {
+        let observer = self.pointer_activity.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(callback) = &observer.callback {
+            callback(activity);
+        }
+    }
+
+    /// What the next cursor probe reads.
+    pub fn set_pointer_probe(&self, probe: wallpaper_core::PointerProbe) {
+        self.pointer_probe.store(Arc::new(probe));
+    }
+
+    #[must_use]
+    pub fn pointer_probe_count(&self) -> usize {
+        self.pointer_probe_count.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Mirrors the engine: a scene's pause state is published with the
+    /// snapshot, which is what stops or starts pointer sampling for it.
+    fn publish_display_pause(&self, paused_for: impl Fn(u32) -> Option<bool>) {
+        self.publish_snapshot(|current| {
+            let mut next = current.to_vec();
+            for display in &mut next {
+                if display.handle.is_some() {
+                    if let Some(paused) = paused_for(display.desc.display_id) {
+                        display.paused = paused;
+                    }
+                }
+            }
+            next
+        });
     }
 
     pub fn set_snapshot_after_refresh(&self, snapshot: Vec<DisplaySnapshotEntry>) {
@@ -925,6 +1094,11 @@ impl FakeEngineFacade {
     #[must_use]
     pub fn display_paused_calls(&self) -> Vec<(u32, bool)> {
         load_log(&self.display_paused_calls)
+    }
+
+    #[must_use]
+    pub fn scene_pause_log(&self) -> Vec<(u32, bool)> {
+        load_log(&self.scene_pause_log)
     }
 
     pub fn set_renderer_counters(
@@ -1048,6 +1222,26 @@ impl FakeEngineFacade {
     #[must_use]
     pub fn mouse_poll_calls(&self) -> Vec<()> {
         load_log(&self.mouse_poll_calls)
+    }
+
+    /// Waits for an engine poll the caller has not seen yet. A sample armed by
+    /// an event may run before a test could install a block, so this counts
+    /// polls instead of intercepting the next one.
+    #[must_use]
+    pub fn wait_for_unseen_mouse_poll(&self, timeout: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        let seen = self.mouse_polls_seen.load(std::sync::atomic::Ordering::Acquire);
+        loop {
+            let count = self.mouse_poll_calls.load().len();
+            if count > seen {
+                self.mouse_polls_seen.store(count, std::sync::atomic::Ordering::Release);
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
 
     pub fn set_mouse_input(&self, x: f64, y: f64) {
@@ -1295,20 +1489,25 @@ impl EngineFacade for FakeEngineFacade {
         .boxed()
     }
 
-    fn set_all_paused(&self, paused: bool) -> EngineFuture<()> {
+    fn set_all_paused(&self, paused: bool, suspended_displays: Vec<u32>) -> EngineFuture<()> {
         let fake = self.clone();
         async move {
             push_log(&fake.paused_calls, paused);
             if let Some(message) = fake.pause_failure.swap(Arc::new(None)).as_ref() {
                 return Err(EngineError::Platform(message.clone()));
             }
+            let target = |display_id: u32| paused || suspended_displays.contains(&display_id);
             fake.rendered_scenes.rcu(|scenes| {
                 let mut scenes = scenes.as_ref().clone();
                 for scene in &mut scenes {
-                    scene.paused = paused;
+                    scene.paused = target(scene.display.display_id);
                 }
                 scenes
             });
+            for scene in fake.rendered_scenes().iter() {
+                push_log(&fake.scene_pause_log, (scene.display.display_id, scene.paused));
+            }
+            fake.publish_display_pause(|display_id| Some(target(display_id)));
             Ok(())
         }
         .boxed()
@@ -1330,6 +1529,10 @@ impl EngineFacade for FakeEngineFacade {
                 }
                 scenes
             });
+            if fake.rendered_scenes().iter().any(|scene| scene.display.display_id == display_id) {
+                push_log(&fake.scene_pause_log, (display_id, paused));
+            }
+            fake.publish_display_pause(|id| (id == display_id).then_some(paused));
             Ok(())
         }
         .boxed()
@@ -1688,11 +1891,49 @@ impl EngineFacade for FakeEngineFacade {
         }
     }
 
+    fn set_pointer_activity_callback(
+        &self,
+        callback: Option<wallpaper_core::PointerActivityCallback>,
+    ) {
+        let mut observer = self.pointer_activity.lock().unwrap_or_else(|error| error.into_inner());
+        observer.callback = callback;
+        if let Some(callback) = &observer.callback {
+            callback(wallpaper_core::PointerActivity::MonitorGap(observer.monitor_gap));
+        }
+    }
+
+    fn probe_pointer(&self) -> wallpaper_core::PointerProbe {
+        self.pointer_probe_count.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        **self.pointer_probe.load()
+    }
+
     fn set_user_shortcut_callback(
         &self,
         callback: Option<wallpaper_core::UserShortcutObserverCallback>,
     ) {
         let mut sink = self.user_shortcut.lock().unwrap_or_else(|error| error.into_inner());
         *sink = callback;
+    }
+
+    fn scene_requires_audio(&self, handle: SceneHandle) -> bool {
+        self.audio_requirement
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .requires_audio(handle)
+    }
+
+    fn set_audio_requirement_callback(
+        &self,
+        callback: Option<wallpaper_core::AudioRequirementCallback>,
+    ) {
+        let mut state = self.audio_requirement.lock().unwrap_or_else(|error| error.into_inner());
+        state.callback = callback;
+        if let Some(callback) = &state.callback {
+            for (handle, requires_audio) in &state.reported {
+                if *requires_audio {
+                    callback(*handle, true);
+                }
+            }
+        }
     }
 }

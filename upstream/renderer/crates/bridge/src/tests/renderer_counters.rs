@@ -24,6 +24,7 @@ fn display_snapshot(display_id: u32) -> DisplaySnapshotEntry {
         desc,
         handle: None,
         accepts_pointer_input: false,
+        paused: false,
         window_active: false,
         assignment: None,
     }
@@ -48,6 +49,12 @@ async fn two_display_bridge(engine: &FakeEngineFacade) -> crate::api::WallpaperB
             .await
             .unwrap();
     }
+    // Both scenes are live now; the fake's reconcile hands out handles by
+    // position, which is display order here.
+    engine.set_snapshot(vec![
+        DisplaySnapshotEntry { handle: Some(SceneHandle::new(1)), ..display_snapshot(7) },
+        DisplaySnapshotEntry { handle: Some(SceneHandle::new(2)), ..display_snapshot(9) },
+    ]);
     bridge
 }
 

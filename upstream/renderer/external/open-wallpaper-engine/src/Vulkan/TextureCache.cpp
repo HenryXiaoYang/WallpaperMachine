@@ -91,7 +91,13 @@ bool SetError(std::string* error, std::string message) {
     return false;
 }
 
-void* ExportMetalDeviceHandle(const Device& device, std::string* error) {
+/// Exports the Metal device behind `device` and the MTLCommandQueue MoltenVK
+/// runs its graphics queue on. MoltenVK hands out the very queue every
+/// submission to that VkQueue is committed to (`MVKQueue::getMTLCommandQueue`),
+/// so Metal work committed there before a `vkQueueSubmit` executes ahead of
+/// the frame that submission records. Both handles are borrowed and live as
+/// long as the device.
+void* ExportMetalHandles(const Device& device, void** command_queue, std::string* error) {
     auto export_metal_objects = reinterpret_cast<PFN_vkExportMetalObjectsEXT>(
         device.handle().Dispatch().vkGetDeviceProcAddr(*device.handle(),
                                                        "vkExportMetalObjectsEXT"));
@@ -100,9 +106,14 @@ void* ExportMetalDeviceHandle(const Device& device, std::string* error) {
         return nullptr;
     }
 
+    VkExportMetalCommandQueueInfoEXT queue_info {
+        .sType = VK_STRUCTURE_TYPE_EXPORT_METAL_COMMAND_QUEUE_INFO_EXT,
+        .pNext = nullptr,
+        .queue = *device.graphics_queue().handle,
+    };
     VkExportMetalDeviceInfoEXT device_info {
         .sType = VK_STRUCTURE_TYPE_EXPORT_METAL_DEVICE_INFO_EXT,
-        .pNext = nullptr,
+        .pNext = &queue_info,
     };
     VkExportMetalObjectsInfoEXT export_info {
         .sType = VK_STRUCTURE_TYPE_EXPORT_METAL_OBJECTS_INFO_EXT,
@@ -113,7 +124,12 @@ void* ExportMetalDeviceHandle(const Device& device, std::string* error) {
         SetError(error, "vkExportMetalObjectsEXT returned a null Metal device");
         return nullptr;
     }
+    if (queue_info.mtlCommandQueue == nullptr) {
+        SetError(error, "vkExportMetalObjectsEXT returned a null Metal command queue");
+        return nullptr;
+    }
 
+    *command_queue = queue_info.mtlCommandQueue;
     return device_info.mtlDevice;
 }
 
@@ -216,10 +232,12 @@ std::optional<vvk::DeviceMemory> AllocateMemory(const vvk::Device& device, vvk::
     return std::nullopt;
 }
 
+/// A Vulkan image and view aliasing `metal_texture`, in UNDEFINED layout. The
+/// caller records its first-use transition into a frame and supplies the
+/// sampler, which belongs to the video texture rather than to the image.
 std::optional<ExImageParameters>
-CreateImportedMetalTextureImage(const Device& device, void* metal_texture, TextureSample sample,
-                                VkSampler sampler, uint32_t width, uint32_t height,
-                                std::string* error) {
+CreateImportedMetalTextureImage(const Device& device, void* metal_texture, uint32_t width,
+                                uint32_t height, std::string* error) {
     if (metal_texture == nullptr) {
         SetError(error, "cannot import a null Metal texture");
         return std::nullopt;
@@ -281,27 +299,6 @@ CreateImportedMetalTextureImage(const Device& device, void* metal_texture, Textu
             return std::nullopt;
         }
     }
-
-    TextureKey tex_key {
-        .width        = static_cast<i32>(width),
-        .height       = static_cast<i32>(height),
-        .usage        = TexUsage::COLOR,
-        .format       = TextureFormat::RGBA8,
-        .sample       = sample,
-        .mipmap_level = 1,
-    };
-    if (sampler != VK_NULL_HANDLE) {
-        image.external_sampler = sampler;
-    } else {
-        if (const VkResult result =
-                device.handle().CreateSampler(GenSamplerInfo(tex_key), image.sampler);
-            result != VK_SUCCESS) {
-            LOG_ERROR("imported video sampler creation failed: %d", result);
-            SetError(error, "failed to create Vulkan sampler for imported video frame");
-            return std::nullopt;
-        }
-    }
-
     return image;
 }
 
@@ -1079,101 +1076,64 @@ void TextureCache::retireRuntimeTexture(std::string_view key) {
 
 void TextureCache::CollectCompletedUploads() { collectCompletedTextureUploads(); }
 
-TextureCache::VideoImportSubmissionSlot*
-TextureCache::acquireVideoImportSubmissionSlot(std::string* error) {
-    for (auto& slot : m_video_import_slots) {
-        if (slot.pending && slot.fence.GetStatus() == VK_SUCCESS) {
-            if (! waitForVideoImportSlot(slot, error)) return nullptr;
+std::shared_ptr<TextureCache::VideoImportImage>
+TextureCache::importedImageFor(void* metal_texture, uint32_t width, uint32_t height, bool pooled,
+                               std::string* error) {
+    // A pooled destination keeps the image made for it the first time, for as
+    // long as the pool keeps the destination: same texture, same extent, same
+    // device, so the alias is the same one. The pool drops it with the
+    // destination, which is what stops a recycled address meeting a stale one.
+    pooled = pooled && m_video_destination_pool;
+    if (pooled) {
+        if (auto companion = m_video_destination_pool->DestinationCompanion(metal_texture)) {
+            ++m_video_submission_stats.imported_images_reused;
+            return std::static_pointer_cast<VideoImportImage>(std::move(companion));
         }
-        if (!slot.pending) return ensureVideoImportFence(slot, error) ? &slot : nullptr;
     }
-
-    VideoImportSubmissionPlan plan {
-        .pending_submissions = m_video_import_slots.size(),
-        .available_slots     = kMaxPendingVideoImportSubmissions,
-        .must_destroy_resource = false,
-    };
-    if (VideoImportSubmissionNeedsFenceWait(plan)) {
-        auto oldest = std::min_element(m_video_import_slots.begin(),
-                                       m_video_import_slots.end(),
-                                       [](const VideoImportSubmissionSlot& lhs,
-                                          const VideoImportSubmissionSlot& rhs) {
-                                           return lhs.submitted_serial < rhs.submitted_serial;
-                                       });
-        if (oldest == m_video_import_slots.end()) {
-            SetError(error, "video import submission slot accounting is invalid");
-            return nullptr;
-        }
-        if (! waitForVideoImportSlot(*oldest, error)) return nullptr;
-        return ensureVideoImportFence(*oldest, error) ? &*oldest : nullptr;
-    }
-
-    VideoImportSubmissionSlot slot;
-    const auto&               pool = m_device.cmd_pool();
-    if (const VkResult result = pool.Allocate(1, VK_COMMAND_BUFFER_LEVEL_PRIMARY, slot.commands);
-        result != VK_SUCCESS) {
-        LOG_ERROR("video frame import command allocation failed: %d", result);
-        SetError(error, "failed to allocate video frame import command buffer");
-        return nullptr;
-    }
-    slot.command = vvk::CommandBuffer(slot.commands[0], m_device.handle().Dispatch());
-    ++m_video_submission_stats.command_buffer_allocations;
-
-    if (!ensureVideoImportFence(slot, error)) return nullptr;
-
-    m_video_import_slots.emplace_back(std::move(slot));
-    m_video_submission_stats.import_submission_slots = m_video_import_slots.size();
-    return &m_video_import_slots.back();
+    auto image = CreateImportedMetalTextureImage(m_device, metal_texture, width, height, error);
+    if (! image) return nullptr;
+    auto imported = std::make_shared<VideoImportImage>();
+    imported->image = std::move(*image);
+    ++m_video_submission_stats.imported_images_created;
+    m_video_first_use_pending.push_back(imported);
+    if (pooled) m_video_destination_pool->SetDestinationCompanion(metal_texture, imported);
+    return imported;
 }
 
-bool TextureCache::ensureVideoImportFence(VideoImportSubmissionSlot& slot, std::string* error) {
-    if (!slot.command) {
-        if (slot.pending) return SetError(error, "pending video import has no command buffer");
-        if (m_device.cmd_pool().Allocate(1, VK_COMMAND_BUFFER_LEVEL_PRIMARY, slot.commands) != VK_SUCCESS) {
-            return SetError(error, "failed to recreate video frame import command buffer");
-        }
-        slot.command = vvk::CommandBuffer(slot.commands[0], m_device.handle().Dispatch());
-        ++m_video_submission_stats.command_buffer_allocations;
+void TextureCache::RecordVideoFirstUseTransitions(vvk::CommandBuffer& command) {
+    if (m_device_lost || m_video_frame_state != VideoFrameState::Recording) {
+        LOG_ERROR("cannot record video first-use transitions outside frame recording");
+        return;
     }
-    if (slot.fence) return true;
-    if (slot.pending) return SetError(error, "pending video import has no fence");
-    const VkFenceCreateInfo info {
-        .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
-        .pNext = nullptr,
-        .flags = 0,
-    };
-    if (m_device.handle().CreateFence(info, slot.fence) != VK_SUCCESS) {
-        return SetError(error, "failed to create Vulkan fence for video frame import");
+    for (const auto& pending : m_video_first_use_pending) {
+        auto imported = pending.lock();
+        if (! imported || imported->layout != VideoImportImage::Layout::Undefined) continue;
+        const VkImageMemoryBarrier barrier {
+            .sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .pNext               = nullptr,
+            .srcAccessMask       = 0,
+            .dstAccessMask       = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT,
+            .oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED,
+            .newLayout           = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image               = *imported->image.handle,
+            .subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
+        };
+        command.PipelineBarrier(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
+                                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                0,
+                                barrier);
+        imported->layout = VideoImportImage::Layout::TransitionRecorded;
+        ++m_video_submission_stats.first_use_transitions_recorded;
+        // The command buffer now names the image, so the frame keeps it alive
+        // until the frame's fence has signalled.
+        m_video_frame_pins.push_back(imported);
+        m_video_first_use_recorded.push_back(std::move(imported));
     }
-    ++m_video_submission_stats.fence_allocations;
-    return true;
-}
-
-bool TextureCache::waitForVideoImportSlot(VideoImportSubmissionSlot& slot, std::string* error) {
-    if (! slot.pending) return true;
-    ++m_video_submission_stats.fence_waits;
-
-    if (const VkResult result = slot.fence.Wait(); result != VK_SUCCESS) {
-        LOG_ERROR("video frame import wait failed: %d", result);
-        return SetError(error, "failed waiting for pending video frame import");
-    }
-    slot.pending = false;
-    slot.submitted_serial = 0;
-    slot.image_owner.reset();
-    if (const VkResult result = slot.fence.Reset(); result != VK_SUCCESS) {
-        slot.fence = {};
-        LOG_ERROR("video frame import fence reset failed: %d", result);
-        return SetError(error, "failed resetting video frame import fence");
-    }
-
-    return true;
-}
-
-bool TextureCache::waitForPendingVideoImports(std::string* error) {
-    for (auto& slot : m_video_import_slots) {
-        if (! waitForVideoImportSlot(slot, error)) return false;
-    }
-    return true;
+    m_video_first_use_pending.clear();
 }
 
 VkSampler TextureCache::GetOrCreateSampler(TextureKey tex_key, std::string* error) {
@@ -1202,7 +1162,7 @@ void* TextureCache::GetMetalDeviceHandle(std::string* error) {
         SetError(error, "cached Metal device handle is not available");
         return nullptr;
     }
-    m_metal_device         = ExportMetalDeviceHandle(m_device, error);
+    m_metal_device         = ExportMetalHandles(m_device, &m_metal_command_queue, error);
     m_metal_device_queried = true;
     return m_metal_device;
 }
@@ -1271,12 +1231,8 @@ TextureCache::~TextureCache() {
         std::terminate();
     }
     InvalidateVideoDestinationPool();
-    for (auto& slot : m_video_import_slots) {
-        slot.command = {};
-        slot.commands = {};
-        slot.pending = false;
-        slot.image_owner.reset();
-    }
+    m_video_first_use_recorded.clear();
+    m_video_first_use_pending.clear();
     for (auto& slot : m_texture_upload_slots) {
         slot.command = {};
         slot.commands = {};
@@ -1327,7 +1283,6 @@ double TextureCache::ShortestVideoFramePeriod() const {
 
 VideoTextureSubmissionStats TextureCache::VideoSubmissionStats() const {
     auto stats                    = m_video_submission_stats;
-    stats.import_submission_slots = m_video_import_slots.size();
     if (m_video_destination_pool) {
         const auto pool = m_video_destination_pool->Stats();
         stats.pool_cached_texture_count = pool.cached_texture_count;
@@ -1481,6 +1436,12 @@ void TextureCache::MarkVideoFrameSubmitted() {
         LOG_ERROR("cannot submit video frame outside frame recording");
         return;
     }
+    // Submitted means ordered ahead of every later use on this queue, so the
+    // transitions this frame recorded are done as far as later frames go.
+    for (const auto& imported : m_video_first_use_recorded) {
+        imported->layout = VideoImportImage::Layout::ShaderReadOnly;
+    }
+    m_video_first_use_recorded.clear();
     m_video_frame_state = VideoFrameState::Submitted;
 }
 
@@ -1498,6 +1459,13 @@ void TextureCache::AbandonVideoFrameRecording() {
         LOG_ERROR("cannot abandon video frame outside unsubmitted recording");
         return;
     }
+    // The discarded command buffer took its transitions with it; the next
+    // frame records them again.
+    for (auto& imported : m_video_first_use_recorded) {
+        imported->layout = VideoImportImage::Layout::Undefined;
+        m_video_first_use_pending.push_back(imported);
+    }
+    m_video_first_use_recorded.clear();
     m_video_frame_pins.clear();
     m_video_frame_state = VideoFrameState::Idle;
 }
@@ -1509,7 +1477,7 @@ void TextureCache::InvalidateVideoDestinationPool() {
 
 bool TextureCache::WaitForPendingUploads(std::string* error) {
     if (m_device_lost) return SetError(error, "cannot wait for uploads after device loss");
-    return waitForPendingTextureUploads(error) && waitForPendingVideoImports(error);
+    return waitForPendingTextureUploads(error);
 }
 
 void TextureCache::DiscardAfterDeviceLoss() noexcept {
@@ -1519,19 +1487,14 @@ void TextureCache::DiscardAfterDeviceLoss() noexcept {
     // referenced owners, and never recycle their converted Metal destinations.
     m_tex_cmd = {};
     m_tex_cmds = {};
-    for (auto& slot : m_video_import_slots) {
-        slot.command = {};
-        slot.commands = {};
-        slot.pending = false;
-        slot.image_owner.reset();
-    }
+    m_video_first_use_recorded.clear();
+    m_video_first_use_pending.clear();
     for (auto& slot : m_texture_upload_slots) {
         slot.command = {};
         slot.commands = {};
         slot.pending = false;
         slot.staging_buffers.clear();
     }
-    m_video_import_slots.clear();
     m_texture_upload_slots.clear();
     m_video_frame_pins.clear();
     m_video_frame_state = VideoFrameState::Idle;
@@ -1617,33 +1580,51 @@ bool TextureCache::UpdateVideoFrame(std::string_view                 key,
                         std::string("video frame is not ready for texture: ") + std::string(key));
     }
 
-    if (m_counters != nullptr) {
+    if (m_counters != nullptr && RendererCounters::Enabled()) {
         // Source work: what the decoder instance produced, independently of
         // whether this consumer used it. Reported with the instance's own
         // identity so a roll-up can de-duplicate one decoder across consumers
         // without ever merging two decoders that read the same file.
         const auto stats = video_tex.source->sourceStats();
-        if (stats.decoded_frames > video_tex.reported_decode_outputs) {
-            m_counters->Add(OWE_RC_VIDEO_DECODE_OUTPUTS,
-                            stats.decoded_frames - video_tex.reported_decode_outputs);
+        if (video_tex.counters_stale) {
+            // Updates ran while nothing was counting. This one only records
+            // where the decoder and this consumer are now; reporting the gap
+            // would attribute everything since then to this frame.
             video_tex.reported_decode_outputs = stats.decoded_frames;
+            video_tex.reported_seeks          = stats.seek_requests;
+            video_tex.selection.Reset();
+            (void)video_tex.selection.Observe(frame.generation);
+            video_tex.counters_stale = false;
+            publishVideoSourceIdentity();
+        } else {
+            if (stats.decoded_frames > video_tex.reported_decode_outputs) {
+                m_counters->Add(OWE_RC_VIDEO_DECODE_OUTPUTS,
+                                stats.decoded_frames - video_tex.reported_decode_outputs);
+                video_tex.reported_decode_outputs = stats.decoded_frames;
+            }
+            if (stats.seek_requests > video_tex.reported_seeks) {
+                m_counters->Add(OWE_RC_VIDEO_SEEKS,
+                                stats.seek_requests - video_tex.reported_seeks);
+                video_tex.reported_seeks = stats.seek_requests;
+            }
+            publishVideoSourceIdentity();
+            // Consumer work: which of those frames this update actually put on
+            // screen, and how many it stepped over.
+            const auto selection = video_tex.selection.Observe(frame.generation);
+            if (selection.selected) {
+                m_counters->Add(OWE_RC_VIDEO_FRAMES_SELECTED);
+                m_counters->Set(OWE_RC_VIDEO_SELECTED_GENERATION, frame.generation);
+            }
+            if (selection.reused) m_counters->Add(OWE_RC_VIDEO_FRAMES_REUSED);
+            if (selection.skipped > 0) {
+                m_counters->Add(OWE_RC_VIDEO_FRAMES_SKIPPED, selection.skipped);
+            }
         }
-        if (stats.seek_requests > video_tex.reported_seeks) {
-            m_counters->Add(OWE_RC_VIDEO_SEEKS, stats.seek_requests - video_tex.reported_seeks);
-            video_tex.reported_seeks = stats.seek_requests;
-        }
-        publishVideoSourceIdentity();
-        // Consumer work: which of those frames this update actually put on
-        // screen, and how many it stepped over.
-        const auto selection = video_tex.selection.Observe(frame.generation);
-        if (selection.selected) {
-            m_counters->Add(OWE_RC_VIDEO_FRAMES_SELECTED);
-            m_counters->Set(OWE_RC_VIDEO_SELECTED_GENERATION, frame.generation);
-        }
-        if (selection.reused) m_counters->Add(OWE_RC_VIDEO_FRAMES_REUSED);
-        if (selection.skipped > 0) {
-            m_counters->Add(OWE_RC_VIDEO_FRAMES_SKIPPED, selection.skipped);
-        }
+    } else {
+        // Counters off: the decoder's mutex and the identity walk are not
+        // taken at all, the same way the conversion-pool gauges below are not
+        // read. What this update skipped is re-based on the next counted one.
+        video_tex.counters_stale = true;
     }
 
     void* surface_identity = frame.io_surface != nullptr ? frame.io_surface : frame.pixel_buffer;
@@ -1651,16 +1632,11 @@ bool TextureCache::UpdateVideoFrame(std::string_view                 key,
     if (imported_frame) {
         ++m_video_submission_stats.cache_hits;
         imported_frame->generation = frame.generation;
+        imported_frame->pts_seconds = frame.pts_seconds;
         imported_frame->last_used = ++video_tex.frame_use_serial;
         video_tex.current_frame = imported_frame.get();
     } else {
         if (!EnsureVideoFrameCacheRoom(video_tex, error)) return false;
-        // Retire only completed imports; the other slot owners remain independent of
-        // draw pins, including when a recording is abandoned without submission.
-        for (auto& slot : m_video_import_slots) {
-            if (slot.pending && slot.fence.GetStatus() == VK_SUCCESS &&
-                !waitForVideoImportSlot(slot, error)) return false;
-        }
         void* metal_device = GetMetalDeviceHandle(error);
         if (metal_device == nullptr) return false;
         const bool converted = frame.pixel_format == 0x34323076u || frame.pixel_format == 0x34323066u;
@@ -1738,11 +1714,15 @@ bool TextureCache::UpdateVideoFrame(std::string_view                 key,
         if (converted) ++m_video_submission_stats.conversion_calls;
         // The lease keeps the Core Video wrapper and pixel buffer alive for as
         // long as this imported frame can be sampled; the texture below is
-        // borrowed from it.
+        // borrowed from it. The conversion goes onto the graphics queue's own
+        // Metal queue and is not waited for: the frame that samples it is
+        // submitted to the same queue afterwards, and Metal orders the two
+        // through the tracked destination.
         bool  destination_allocation_failed = false;
         void* created = nullptr;
-        void* lease = video::CreateAppleVideoFrameLease(
-            frame, metal_device, borrowed, error, &destination_allocation_failed, &created);
+        void* lease = video::CreateAppleVideoFrameLease(frame, metal_device, borrowed, error,
+                                                        &destination_allocation_failed, &created,
+                                                        m_metal_command_queue);
         if (borrowed != nullptr) {
             if (lease != nullptr) {
                 // The lease took an independent retain. The loan stays open
@@ -1775,10 +1755,11 @@ bool TextureCache::UpdateVideoFrame(std::string_view                 key,
             converted ? m_video_destination_pool : nullptr;
         candidate->frame_lease = std::shared_ptr<void>(lease, [pool](void* handle) {
             // Give a poolable conversion destination back before the lease
-            // releases everything else it owns, each exactly once.
+            // releases everything else it owns, each exactly once. The pool
+            // holds it back until the conversion has completed on the GPU.
             if (auto owner = pool.lock()) {
                 if (void* recyclable = video::TakeAppleVideoFrameLeaseDestination(handle)) {
-                    owner->Recycle(recyclable);
+                    owner->Recycle(recyclable, video::AppleVideoFrameLeaseConversion(handle));
                 }
             }
             video::ReleaseAppleVideoFrameLease(handle);
@@ -1800,33 +1781,19 @@ bool TextureCache::UpdateVideoFrame(std::string_view                 key,
         };
         const VkSampler sampler = GetOrCreateSampler(sampler_key, error);
         if (sampler == VK_NULL_HANDLE) return false;
-        auto imported_image = CreateImportedMetalTextureImage(
-            m_device, metal_texture, video_tex.sample, sampler, frame.width, frame.height, error);
-        if (!imported_image) return false;
-        candidate->image = std::move(*imported_image);
+        auto vulkan_image =
+            importedImageFor(metal_texture, frame.width, frame.height, converted, error);
+        if (!vulkan_image) return false;
+        candidate->image = ImageParameters(vulkan_image->image);
+        candidate->image.sampler = sampler;
+        candidate->vulkan_image = std::move(vulkan_image);
         candidate->generation = frame.generation;
+        candidate->pts_seconds = frame.pts_seconds;
         candidate->surface_identity = surface_identity;
         candidate->pixel_format = frame.pixel_format;
-        auto* slot = acquireVideoImportSubmissionSlot(error);
-        if (slot == nullptr) return false;
-        // Make all potentially allocating owners before submitting work.
-        video_tex.imported_frames.reserve(kMaxImportedVideoFramesPerVideoTex);
-        const VkResult result = TransImgLayout(m_device.graphics_queue().handle, slot->command,
-                                               candidate->image, candidate->image.layout, *slot->fence);
-        if (result != VK_SUCCESS) {
-            // Submit never succeeded. Free the unsubmitted command if Reset cannot
-            // make it reusable, before dropping the image it may reference.
-            if (slot->command.Reset() != VK_SUCCESS) {
-                slot->command = {};
-                slot->commands = {};
-            }
-            slot->fence = {};
-            LOG_ERROR("video frame import transition failed: %d", result);
-            return SetError(error, "failed to transition imported video frame image layout");
-        }
-        slot->pending = true;
-        slot->submitted_serial = ++m_video_import_submit_serial;
-        slot->image_owner = candidate;
+        // The image's first-use transition, if it still needs one, is recorded
+        // into the next frame's command buffer by RecordVideoFirstUseTransitions:
+        // nothing is submitted here.
         candidate->last_used = ++video_tex.frame_use_serial;
         video_tex.current_frame = candidate.get();
         video_tex.imported_frames.emplace_back(candidate);

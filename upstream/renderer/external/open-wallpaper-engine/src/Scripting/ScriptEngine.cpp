@@ -389,40 +389,40 @@ JSValue RuntimeScalarValueToJS(JSContext* context, const RuntimeScalarValue& val
     return JS_UNDEFINED;
 }
 
-DynamicValueUniquePtr JsToDynamicValue(JSContext* context, JSValue value,
-                                       DynamicValue::UnderlyingType hint) {
-    auto result = std::make_unique<DynamicValue>();
+bool FillDynamicValueFromJS(JSContext* context, JSValue value, DynamicValue::UnderlyingType hint,
+                            DynamicValue& result) {
+    result.update();
 
-    if (JS_IsException(value)) return result;
+    if (JS_IsException(value)) return true;
 
     const int tag = JS_VALUE_GET_TAG(value);
     if (tag == JS_TAG_INT) {
         int32_t int_value = 0;
         JS_ToInt32(context, &int_value, value);
         if (hint == DynamicValue::Float) {
-            result->update(static_cast<float>(int_value));
+            result.update(static_cast<float>(int_value));
         } else {
-            result->update(static_cast<int>(int_value));
+            result.update(static_cast<int>(int_value));
         }
-        return result;
+        return true;
     }
     if (tag == JS_TAG_BOOL) {
-        result->update(static_cast<bool>(JS_ToBool(context, value)));
-        return result;
+        result.update(static_cast<bool>(JS_ToBool(context, value)));
+        return true;
     }
     if (JS_TAG_IS_FLOAT64(tag)) {
         double float_value = 0.0;
         JS_ToFloat64(context, &float_value, value);
-        result->update(static_cast<float>(float_value));
-        return result;
+        result.update(static_cast<float>(float_value));
+        return true;
     }
     if (tag == JS_TAG_STRING) {
         const char* string_value = JS_ToCString(context, value);
         if (string_value != nullptr) {
-            result->update(std::string(string_value));
+            result.update(std::string(string_value));
             JS_FreeCString(context, string_value);
         }
-        return result;
+        return true;
     }
     if (tag == JS_TAG_OBJECT) {
         const auto read_float = [&](const char* property_name) {
@@ -447,36 +447,43 @@ DynamicValueUniquePtr JsToDynamicValue(JSContext* context, JSValue value,
 
         switch (hint) {
         case DynamicValue::Vec2:
-            result->update(Eigen::Vector2f(read_float("x"), read_float("y")));
+            result.update(Eigen::Vector2f(read_float("x"), read_float("y")));
             break;
         case DynamicValue::Vec3:
-            result->update(Eigen::Vector3f(read_float("x"), read_float("y"), read_float("z")));
+            result.update(Eigen::Vector3f(read_float("x"), read_float("y"), read_float("z")));
             break;
         case DynamicValue::Vec4:
-            result->update(Eigen::Vector4f(
+            result.update(Eigen::Vector4f(
                 read_float("x"), read_float("y"), read_float("z"), read_float("w")));
             break;
         case DynamicValue::IVec2:
-            result->update(Eigen::Vector2i(read_int("x"), read_int("y")));
+            result.update(Eigen::Vector2i(read_int("x"), read_int("y")));
             break;
         case DynamicValue::IVec3:
-            result->update(Eigen::Vector3i(read_int("x"), read_int("y"), read_int("z")));
+            result.update(Eigen::Vector3i(read_int("x"), read_int("y"), read_int("z")));
             break;
         case DynamicValue::IVec4:
-            result->update(
+            result.update(
                 Eigen::Vector4i(read_int("x"), read_int("y"), read_int("z"), read_int("w")));
             break;
         default:
-            result->update(Eigen::Vector3f(read_float("x"), read_float("y"), read_float("z")));
+            result.update(Eigen::Vector3f(read_float("x"), read_float("y"), read_float("z")));
             break;
         }
-        return result;
+        return true;
     }
 
     double float_value = 0.0;
     if (JS_ToFloat64(context, &float_value, value) == 0) {
-        result->update(static_cast<float>(float_value));
+        result.update(static_cast<float>(float_value));
     }
+    return true;
+}
+
+DynamicValueUniquePtr JsToDynamicValue(JSContext* context, JSValue value,
+                                       DynamicValue::UnderlyingType hint) {
+    auto result = std::make_unique<DynamicValue>();
+    FillDynamicValueFromJS(context, value, hint, *result);
     return result;
 }
 
@@ -3174,35 +3181,22 @@ DynamicValueUniquePtr PropertyScriptProgram::Evaluate(const ScriptHostContext& h
         CallStoredExport(context_handle, m_exports_object_name.c_str(), "update", 1, argv);
     JS_FreeValue(context_handle, current_value_js);
 
-    if (JS_IsException(result)) {
+    auto published = std::make_unique<DynamicValue>();
+    if (JS_IsException(result) || JS_IsUndefined(result) ||
+        (current_value.getType() == DynamicValue::Boolean &&
+         JS_VALUE_GET_TAG(result) == JS_TAG_OBJECT)) {
         JS_FreeValue(context_handle, result);
-        auto fallback = std::make_unique<DynamicValue>();
-        fallback->update(current_value);
-        return fallback;
+        published->update(current_value);
+        return published;
     }
 
-    if (JS_IsUndefined(result)) {
-        JS_FreeValue(context_handle, result);
-        auto fallback = std::make_unique<DynamicValue>();
-        fallback->update(current_value);
-        return fallback;
-    }
-
-    if (current_value.getType() == DynamicValue::Boolean &&
-        JS_VALUE_GET_TAG(result) == JS_TAG_OBJECT) {
-        JS_FreeValue(context_handle, result);
-        auto fallback = std::make_unique<DynamicValue>();
-        fallback->update(current_value);
-        return fallback;
-    }
-
-    auto dynamic_result = JsToDynamicValue(context_handle, result, current_value.getType());
-    if (dynamic_result != nullptr && m_semantic == PropertyScriptValueSemantic::AnglesDegrees &&
-        dynamic_result->getType() == DynamicValue::Vec3) {
-        dynamic_result->update(DegreesToRadians(dynamic_result->getVec3()));
+    FillDynamicValueFromJS(context_handle, result, current_value.getType(), *published);
+    if (m_semantic == PropertyScriptValueSemantic::AnglesDegrees &&
+        published->getType() == DynamicValue::Vec3) {
+        published->update(DegreesToRadians(published->getVec3()));
     }
     JS_FreeValue(context_handle, result);
-    return dynamic_result;
+    return published;
 }
 
 void PropertyScriptProgram::DispatchCursorClick(const ScriptHostContext& host_context) {

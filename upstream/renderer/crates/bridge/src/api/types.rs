@@ -528,8 +528,9 @@ pub struct BridgeDisplayMutationBundle {
 
 /// Renderer work counters for one wallpaper surface.
 ///
-/// The fields are split on purpose. `timer_wakeups` through `simulation_ticks`
-/// are work this surface alone performs and must stop when nobody can see it.
+/// The fields are split on purpose. `timer_wakeups` through
+/// `presents_skipped_unchanged` are work this surface alone performs and must
+/// stop when nobody can see it.
 /// The `video_*` fields describe the decoded source, which may legitimately keep
 /// running while one of its consumers is hidden as long as another consumer
 /// still presents it.
@@ -569,6 +570,10 @@ pub struct BridgeRendererSurfaceCounters {
     /// The submitted frame's fence signalled. Not a display presentation.
     pub gpu_completions: u64,
     pub simulation_ticks: u64,
+    /// Frames that ran (the scene ticked) but were not drawn or presented,
+    /// because they would have put exactly the pixels already on the surface
+    /// back. Neither a dropped draw nor a present request.
+    pub presents_skipped_unchanged: u64,
     pub tick_interval_micros: u64,
     /// 0 when the content cannot prove how often it changes.
     pub content_period_micros: u64,

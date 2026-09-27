@@ -74,7 +74,8 @@ void GenRope(std::vector<std::unique_ptr<ParticleInstance>>& instances, SceneMes
     WPParticleRawGener     gener;
     ParticleRawGenSpecOp   spec = [](const Particle&, const ParticleRawGenSpec&) {
     };
-    gener.GenGLData(instances, mesh, spec, scale);
+    ParticleOverflowFlags flags;
+    gener.GenGLData(instances, mesh, spec, scale, flags);
 }
 
 const float* QuadVertex(const SceneVertexArray& vertices, std::size_t quad, std::size_t vert) {
@@ -126,7 +127,7 @@ struct SlotSnap {
 class CapturingParticleRawGener final : public IParticleRawGener {
 public:
     void GenGLData(std::span<const std::unique_ptr<ParticleInstance>> instances, SceneMesh&,
-                   ParticleRawGenSpecOp&, ParticleRenderScale) override {
+                   ParticleRawGenSpecOp&, ParticleRenderScale, ParticleOverflowFlags&) override {
         slots.clear();
         for (const auto& instance : instances) {
             if (! instance) continue;
@@ -827,6 +828,104 @@ TEST(ParticleRopeUv, RuntimeScaleChangeRewritesLengthWithoutNewParticles) {
     GenRope(instances, mesh, scale);
     EXPECT_FLOAT_EQ(QuadVertex(mesh.GetVertexArray(0), 0, 0)[7], 2.0f);
     ASSERT_EQ(instances[0]->Particles().size(), 3u);
+}
+
+// Forwards to the production generator and counts the calls, so a test can see
+// both whether a frame generated geometry and what that geometry was.
+class CountingParticleRawGener final : public IParticleRawGener {
+public:
+    void GenGLData(std::span<const std::unique_ptr<ParticleInstance>> instances, SceneMesh& mesh,
+                   ParticleRawGenSpecOp& spec, ParticleRenderScale scale,
+                   ParticleOverflowFlags& flags) override {
+        ++calls;
+        inner.GenGLData(instances, mesh, spec, scale, flags);
+    }
+
+    WPParticleRawGener inner;
+    uint32_t           calls { 0 };
+};
+
+struct RevealRun {
+    Scene                      scene;
+    ParticleSystem             system { scene };
+    std::shared_ptr<SceneMesh> mesh { std::make_shared<SceneMesh>(MeshUpdate::PerFrame) };
+    std::shared_ptr<SceneNode> parent { std::make_shared<SceneNode>() };
+    std::shared_ptr<SceneNode> owner { std::make_shared<SceneNode>() };
+    CountingParticleRawGener*  gener { new CountingParticleRawGener() };
+
+    RevealRun() {
+        scene.frameTime = 0.125;
+        system.gener.reset(gener);
+        AddRopeParticleMesh(*mesh, kMeshCapacity, false, true);
+        parent->AppendChild(owner);
+        auto subsystem = MakeTestSubsystem(system, mesh);
+        subsystem->SetTrail({ .samples = 4, .period = 0.25 });
+        subsystem->SetOwnerNode(owner);
+        // A particle is born on each of the first four frames, each moving at
+        // its own speed, so the simulation state differs frame to frame.
+        subsystem->AddEmitter([](std::vector<Particle>& particles, std::vector<ParticleInitOp>&,
+                                 uint32_t, double, std::span<const ParticleControlpoint>) {
+            if (particles.size() >= 4) return;
+            const double i = double(particles.size());
+            Particle     particle;
+            ParticleModify::MoveTo(particle, i, 2.0 * i, 0.0);
+            ParticleModify::InitVelocity(particle, 8.0 + i, 4.0 - i, 0.0);
+            ParticleModify::InitLifetime(particle, 10.0f);
+            particles.emplace_back(particle);
+        });
+        system.subsystems.push_back(std::move(subsystem));
+    }
+
+    // SceneWallpaper's frame order: Emitt, then the runtime Tick (scripts and
+    // timelines, which may change visibility), then RebuildVisibleMeshes.
+    template<typename Tick>
+    void Frame(Tick&& tick) {
+        system.Emitt();
+        tick();
+        system.RebuildVisibleMeshes();
+    }
+
+    std::vector<float> Vertices() const {
+        const auto& vertices = mesh->GetVertexArray(0);
+        return { vertices.Data(), vertices.Data() + vertices.CapacitySize() };
+    }
+};
+
+// R16: a layer a script or timeline shows mid-run -- after Emitt already ran
+// for the frame with it hidden -- draws on that first visible frame exactly
+// the geometry an always-generating run has from the same simulation.
+TEST(ParticleHiddenGeometry, LayerShownByTickAfterEmittDrawsWhatAlwaysGeneratingDraws) {
+    for (const bool hide_parent : { false, true }) {
+        SCOPED_TRACE(hide_parent ? "parent group hidden" : "layer hidden");
+        RevealRun reference;
+        RevealRun revealed;
+        auto&     hidden_node = hide_parent ? revealed.parent : revealed.owner;
+        hidden_node->SetVisible(false);
+
+        const auto nothing = [] {};
+        for (int frame = 0; frame < 5; ++frame) {
+            reference.Frame(nothing);
+            revealed.Frame(nothing);
+        }
+        EXPECT_EQ(revealed.gener->calls, 0u) << "a hidden layer generates no geometry";
+        EXPECT_EQ(reference.gener->calls, 5u);
+
+        // Frame 6: Emitt sees the layer hidden; the Tick that follows shows it.
+        reference.Frame(nothing);
+        revealed.Frame([&] { hidden_node->SetVisible(true); });
+        EXPECT_EQ(revealed.gener->calls, 1u) << "the first visible frame regenerates once";
+        EXPECT_EQ(revealed.mesh->GetIndexArray(0).RenderDataCount(),
+                  reference.mesh->GetIndexArray(0).RenderDataCount());
+        ASSERT_GT(reference.mesh->GetIndexArray(0).RenderDataCount(), 0u);
+        EXPECT_EQ(revealed.Vertices(), reference.Vertices())
+            << "the revealed mesh comes from the current simulation, trail history included";
+
+        // Later visible frames stay identical and are generated once each.
+        reference.Frame(nothing);
+        revealed.Frame(nothing);
+        EXPECT_EQ(revealed.gener->calls, 2u);
+        EXPECT_EQ(revealed.Vertices(), reference.Vertices());
+    }
 }
 
 } // namespace

@@ -229,6 +229,12 @@ impl<E: EngineFacade> BridgeBuilder<E> {
                 control.set_has_consumers(has_consumers);
             }
         })));
+        let weak_polling = Arc::downgrade(&mouse_polling);
+        engine.set_pointer_activity_callback(Some(Arc::new(move |activity| {
+            if let Some(control) = weak_polling.upgrade() {
+                control.record_activity(activity);
+            }
+        })));
         let actor = BridgeActorHandle::spawn(
             state,
             engine.clone(),
@@ -241,8 +247,11 @@ impl<E: EngineFacade> BridgeBuilder<E> {
             actor: actor.clone(),
         };
         engine.set_first_frame_callback(first_frame_notifier.callback());
+        // A scene that reads no audio must not keep the system-audio tap open,
+        // and one that starts reading later must open it without a reconcile.
+        engine.set_audio_requirement_callback(actor.audio_requirement_relay());
         let mouse_poller = if self.mouse_polling_enabled {
-            Some(MousePoller::spawn(actor.clone(), mouse_polling))
+            Some(MousePoller::spawn(actor.clone(), mouse_polling, engine.clone()))
         } else {
             None
         };
@@ -286,6 +295,8 @@ struct MousePoller {
 struct MousePollingState {
     policy_enabled: bool,
     has_consumers: bool,
+    /// The event monitors can miss motion, so the poller checks the cursor.
+    monitor_gap: bool,
     stopped: bool,
 }
 
@@ -295,9 +306,25 @@ impl MousePollingState {
     }
 }
 
+/// Why the poller woke.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MouseWake {
+    /// Input arrived or the last sample was invalidated: sample regardless.
+    pub(crate) input: bool,
+    /// The monitors have a gap: compare a cursor probe before sampling.
+    pub(crate) monitor_gap: bool,
+}
+
+/// Gates the pointer poller. Sampling is armed by input rather than a timer:
+/// the poller sleeps until a consumer is eligible and something marked the
+/// pointer dirty (an OS event, a new or resumed consumer, a policy re-enable,
+/// or a delivery reset in the engine).
 pub(crate) struct MousePollingControl {
     state: Mutex<MousePollingState>,
     changed: Condvar,
+    /// Set from the AppKit main thread on every monitored event, so it lives
+    /// outside the mutex: only the false -> true edge takes the lock.
+    dirty: std::sync::atomic::AtomicBool,
 }
 
 impl MousePollingControl {
@@ -306,9 +333,11 @@ impl MousePollingControl {
             state: Mutex::new(MousePollingState {
                 policy_enabled: false,
                 has_consumers: false,
+                monitor_gap: false,
                 stopped: false,
             }),
             changed: Condvar::new(),
+            dirty: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -332,26 +361,62 @@ impl MousePollingControl {
             .unwrap_or_else(|error| self.recover_poison(error.into_inner()))
     }
 
+    /// A re-enabled policy owes the consumers their current pointer state.
     pub(crate) fn set_policy_enabled(&self, enabled: bool) {
         let mut state = self.lock();
         if state.stopped {
             return;
         }
         let was_eligible = state.eligible();
+        if enabled && !state.policy_enabled {
+            self.dirty.store(true, std::sync::atomic::Ordering::Release);
+        }
         state.policy_enabled = enabled;
         if state.eligible() != was_eligible {
             self.changed.notify_all();
         }
     }
 
+    /// A consumer that appears (new, or resumed) is sampled at once, so it gets
+    /// the current position and button baseline without waiting for input.
     pub(crate) fn set_has_consumers(&self, has_consumers: bool) {
         let mut state = self.lock();
         if state.stopped {
             return;
         }
         let was_eligible = state.eligible();
+        if has_consumers && !state.has_consumers {
+            self.dirty.store(true, std::sync::atomic::Ordering::Release);
+        }
         state.has_consumers = has_consumers;
         if state.eligible() != was_eligible {
+            self.changed.notify_all();
+        }
+    }
+
+    pub(crate) fn record_activity(&self, activity: wallpaper_core::PointerActivity) {
+        match activity {
+            wallpaper_core::PointerActivity::Input => self.mark_dirty(),
+            wallpaper_core::PointerActivity::MonitorGap(gap) => self.set_monitor_gap(gap),
+        }
+    }
+
+    /// Runs on the AppKit main thread for every monitored event: no allocation,
+    /// and the lock is taken only on the clean -> dirty edge, so a burst of
+    /// motion between two samples costs one lock and one wakeup.
+    fn mark_dirty(&self) {
+        if !self.dirty.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            // Taking the lock orders this with a waiter between its dirty check
+            // and its wait, so the notification cannot be lost.
+            let _state = self.lock();
+            self.changed.notify_all();
+        }
+    }
+
+    fn set_monitor_gap(&self, gap: bool) {
+        let mut state = self.lock();
+        if state.monitor_gap != gap {
+            state.monitor_gap = gap;
             self.changed.notify_all();
         }
     }
@@ -365,17 +430,30 @@ impl MousePollingControl {
         self.changed.notify_all();
     }
 
-    pub(crate) fn wait_until_enabled(&self) -> bool {
+    /// Waits until a consumer is eligible and either the pointer is dirty or
+    /// the monitors have a gap. Clears dirty when it reports input. `None`
+    /// once stopped.
+    pub(crate) fn wait_for_sample(&self) -> Option<MouseWake> {
         let mut state = self.lock();
-        while !state.eligible() && !state.stopped {
+        loop {
+            if state.stopped {
+                return None;
+            }
+            if state.eligible() {
+                let input = self.dirty.swap(false, std::sync::atomic::Ordering::AcqRel);
+                if input || state.monitor_gap {
+                    return Some(MouseWake { input, monitor_gap: state.monitor_gap });
+                }
+            }
             state = self
                 .changed
                 .wait(state)
                 .unwrap_or_else(|error| self.recover_poison(error.into_inner()));
         }
-        !state.stopped
     }
 
+    /// The minimum spacing between samples; returns early when the poller
+    /// stops being eligible.
     pub(crate) fn wait_interval(&self, interval: std::time::Duration) -> bool {
         let deadline = std::time::Instant::now() + interval;
         let mut state = self.lock();
@@ -417,19 +495,36 @@ impl FirstFrameNotifier {
 }
 
 impl MousePoller {
+    /// Minimum spacing between samples. Input that arrives inside it is
+    /// coalesced into one sample at its end; input after a quiet period is
+    /// sampled at once.
     const INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
 
     #[allow(clippy::single_call_fn)]
-    fn spawn(actor: BridgeActorHandle<ArcEngineFacade>, control: Arc<MousePollingControl>) -> Self {
+    fn spawn(
+        actor: BridgeActorHandle<ArcEngineFacade>,
+        control: Arc<MousePollingControl>,
+        engine: ArcEngineFacade,
+    ) -> Self {
         let worker_control = Arc::clone(&control);
         let worker = std::thread::Builder::new()
             .name("wallpaper-bridge-mouse-poller".to_string())
             .spawn(move || {
-                while worker_control.wait_until_enabled() {
-                    let poll_result: Result<(), BridgeError> =
-                        actor.blocking_ask(PollMousePosition);
-                    if let Err(error) = poll_result {
-                        log::debug!("mouse poll skipped: {error}");
+                let mut last_probe = None;
+                while let Some(wake) = worker_control.wait_for_sample() {
+                    // Inside a monitor gap, check the cursor on this thread and
+                    // skip both actor hops and the main-thread read when
+                    // nothing changed. Pending edges and delivery resets
+                    // arrive as input, so they always sample.
+                    let probe = wake.monitor_gap.then(|| engine.probe_pointer());
+                    let moved = probe != last_probe;
+                    last_probe = probe;
+                    if wake.input || moved {
+                        let poll_result: Result<(), BridgeError> =
+                            actor.blocking_ask(PollMousePosition);
+                        if let Err(error) = poll_result {
+                            log::debug!("mouse poll skipped: {error}");
+                        }
                     }
                     if !worker_control.wait_interval(Self::INTERVAL) {
                         break;
@@ -514,8 +609,9 @@ impl EngineFacade for ArcEngineFacade {
     fn set_all_paused(
         &self,
         paused: bool,
+        suspended_displays: Vec<u32>,
     ) -> Pin<Box<dyn Future<Output = Result<(), wallpaper_core::EngineError>> + Send>> {
-        self.0.set_all_paused(paused)
+        self.0.set_all_paused(paused, suspended_displays)
     }
 
     fn set_display_paused(
@@ -767,11 +863,33 @@ impl EngineFacade for ArcEngineFacade {
         self.0.set_pointer_consumer_callback(callback);
     }
 
+    fn set_pointer_activity_callback(
+        &self,
+        callback: Option<wallpaper_core::PointerActivityCallback>,
+    ) {
+        self.0.set_pointer_activity_callback(callback);
+    }
+
+    fn probe_pointer(&self) -> wallpaper_core::PointerProbe {
+        self.0.probe_pointer()
+    }
+
     fn set_user_shortcut_callback(
         &self,
         callback: Option<wallpaper_core::UserShortcutObserverCallback>,
     ) {
         self.0.set_user_shortcut_callback(callback);
+    }
+
+    fn scene_requires_audio(&self, handle: SceneHandle) -> bool {
+        self.0.scene_requires_audio(handle)
+    }
+
+    fn set_audio_requirement_callback(
+        &self,
+        callback: Option<wallpaper_core::AudioRequirementCallback>,
+    ) {
+        self.0.set_audio_requirement_callback(callback);
     }
 }
 
@@ -2230,7 +2348,7 @@ mod mouse_polling_tests {
         control.set_has_consumers(true);
         control.set_policy_enabled(true);
         assert!(!control.is_enabled());
-        assert!(!control.wait_until_enabled());
+        assert!(control.wait_for_sample().is_none());
         assert!(!control.wait_interval(Duration::from_millis(16)));
     }
 
@@ -2245,7 +2363,7 @@ mod mouse_polling_tests {
             let worker_started = started.clone();
             let worker = std::thread::spawn(move || {
                 worker_started.wait();
-                send.send(worker_control.wait_until_enabled()).unwrap();
+                send.send(worker_control.wait_for_sample().is_some()).unwrap();
             });
             started.wait();
             if activate {
@@ -2274,7 +2392,7 @@ mod mouse_polling_tests {
         assert!(!control.is_enabled());
         control.set_has_consumers(true);
         control.set_policy_enabled(true);
-        assert!(!control.wait_until_enabled());
+        assert!(control.wait_for_sample().is_none());
         assert!(!control.wait_interval(Duration::from_millis(16)));
     }
 }

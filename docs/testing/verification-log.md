@@ -25,6 +25,26 @@ move the oldest entries verbatim into
 (or a new dated archive file) first, and promote anything durable before it
 goes. Trimming is allowed; editing an entry's recorded result is not.
 
+## 2026-09-28 — Rebase of the power change set onto origin/main f383bbd
+
+Conflicts only in verification logs (entries unioned verbatim, oldest six archived) and provenance.json (sceneEngine.equalQualityPerformanceChanges keeps upstream's 2026-09-24 note followed by ours; upstream deferredSurfaceLifetimeChanges kept). Upstream 36359b3 SceneWallpaperBindings.mm and 2d1322a panel.js/WebControlPanel.swift touch disjoint hunks; no bridge API change upstream.
+
+- `python3 scripts/build.py --renderer-only` — exit 0; regenerated App/Bridge/Generated unchanged
+- `cargo test --release -p wallpaper-bridge --lib` (build.py cargo environment) — 349 passed; `-p wallpaper-core --lib` — 220 passed
+- `python3 scripts/check_renderer.py` — exit 0; 10/10 generated cases pixel-equal pooled vs isolated, 0 diagnostics, reload cycles 0 (artifacts/renderer/adaptive-20260928-001427)
+- `python3 scripts/test.py` — 650 passed, 0 failed, 11 skipped of 661; Python script suites OK
+- Not run: desktop, visual or power verification; no Release build.
+
+## 2026-09-28 — Power set pre-commit finish: R25 revert, R3/R16/R1-R4 evidence
+
+R25 PowerWatcher restored to its original 5 s run_in_mode loop and its drop test and notes removed. New: ParticleHiddenGeometry.LayerShownByTickAfterEmittDrawsWhatAlwaysGeneratingDraws (fails with RebuildMesh stubbed out, passes as shipped); UnchangedPresent.TheSkipPresentsTheSameVideoFramesInTheSameOrder (75 distinct generations/PTS identical with the skip on and off) and OutputChangesOnAHeldVideoFramePresentOnceEach (crop, render scale, resize, fill mode), via the new observation-only RenderInitInfo::video_frame_presented. R3 late-flag bridge test already existed.
+
+- `python3 scripts/build.py --renderer-only` — exit 0
+- `python3 scripts/test.py --only RuntimeDiagnosticsReportTests --only ControlPanelDiscoverTests --only WebWallpaperRecoveryTests --only LockScreenWallpaperServiceTests` — 39 passed, 0 failed
+- `cargo test --release -p wallpaper-bridge --lib` — 349 passed; `-p wallpaper-core --lib` — 220 passed (first run failed in CMake configure after the environment change, as documented; unchanged retry passed)
+- `python3 scripts/check_renderer.py` — all cases pixels_equal, 0 diagnostics, reload cycles 0
+- By hand: audio_tests 45, scene_schema_tests 91, mouse_input_test 12, playback_gpu_test 50, unchanged_present_test 5, particle_rope_geometry_test 27, particle_mouse_controlpoint_test 39 passed; script_runtime_compat_test 78 passed, 1 failed (HostVectorUpdatesDoNotCallMutableGlobalVectorConstructors, also fails alone and at HEAD)
+
 ## 2026-09-27 — Installed: hold-and-drag multi-select with in-context tip
 
 - python3 scripts/test.py --only ControlPanelLibraryTests: 9 passed (new testHoldAndDragSelectsARunOfTilesWithoutWindow: stray drag ignored, hold checks, range sweep + sweep-back, ending click swallowed, sweep from checked tile clears, dragSelectLearned stored in defaults + snapshot).
@@ -74,34 +94,26 @@ goes. Trimming is allowed; editing an entry's recorded result is not.
 - python3 scripts/test.py: 645 passed, 0 failed, 11 skipped.
 - Not exercised: the NSAlert prompt, status-menu item and 6-hour schedule in the running app (no desktop run authorized); no Release build.
 
-## 2026-09-27 — Launch crash: CopyPass left prepared across render-scale rebuild
+## 2026-09-27 — Renderer and app power work: batch 1, sibling renderer items, app side, Rust gate
 
-- Cause: crash reports 2026-09-27 13:45-13:48 SIGSEGV in MVKCmdCopyImage::validate from CopyPass::execute after 'render scale applied: 0.750'; CopyPass::destory was a no-op, so applyRenderScale re-prepared every pass except the copy, which kept freed image handles.
-- Fix: CopyPass::destory resets prepared, release list and vk_src/vk_dst; provenance.json and docs/testing/renderer.md updated.
-- Regression: PlaybackGPU.CopyPreparesAgainAfterRenderTargetsAreDroppedAndResized failed before the fix (copy.prepared() stayed true), passes after; playback_gpu_test 41/41.
-- python3 scripts/check_renderer.py: all binaries exit 0, generated cases pixel-equal, reload cycles 0 failures.
-- python3 scripts/test.py: 644 passed, 0 failed, 11 skipped.
-- python3 scripts/build.py --configuration Release: OK; built binary's CopyPass::destory disassembly clears the prepared flag and image parameters.
-- Not run: app launch on the desktop (not authorized); the user's config (render_scale 0.75, cs2 scene 3373259209) was not exercised live.
+- Batch 1: R1+R4 with Scene render optimisation on, a frame that would repeat the picture on the surface is not drawn, submitted or presented; unchanged_present_test 3/3 (plain video submissions track video_frames_selected, other ticks count presents_skipped_unchanged; a static scene submits 0 once every pass is reused, and its poster matches the reuse-off baseline).
+- Batch 1: R2 sound output starts only while mounted, playing and unmuted; R3 system-audio tap only for scenes that read audio (or a subscribed web page); R5/R6 pointer sampling is event-armed and a paused scene is not a consumer.
+- Batch 1: R21 sound worker wakes and per-chunk allocations reduced; R23 global resume never un-pauses a still-covered display; R24 no frame clock without a loaded scene.
+- Other worker's renderer items: R12 decode-thread notify gating + AVDISCARD_ALL on unused streams; R13 ThreadTimer::WakeOnce latch at the ceiling; R17 audio demuxer AVDISCARD + reused convert buffer; R27 software-decode import failure logged once per failure run; R28 transparent map find, three-bucket rope sort, per-subsystem overflow log latches.
+- Other worker's R16: hidden particle layers skip geometry and RebuildVisibleMeshes runs after Tick, before drawFrame; particle dumps (spritetrail/ropetrail/rope, shown and hidden) byte-identical to HEAD. R25: power watcher stops through a signalled run-loop source.
+- App side: panel WKWebView uses inactiveSchedulingPolicy .suspend and keeps a pending snapshot for reveal; Discover luminance sampler runs only while visible; web-wallpaper pointer monitor only while a page is live; lock-screen unchanged path skips the compatibility check.
+- Cargo, default target dir: cargo test --release -p wallpaper-core --lib 220 passed; cargo test --release -p wallpaper-bridge 351 passed (lib incl. api_smoke, playback, display_presentation, power_settings), 0 failed in either.
+- Not changed: R11 (frame-clock drift), R19, R20, N1-N6.
+- No desktop, visual or power verification; no Release build. Evidence is workload only; no energy saving is claimed.
 
-## 2026-09-27 — Release build 1.0.1 (929b3c1 + scripts/lib/xcode.py log patterns)
+## 2026-09-27 — Renderer power: R15/R22 revert, R26/R28 fixes, final gate
 
-- python3 scripts/test.py: 644 passed, 0 failed, 11 skipped of 655.
-- python3 scripts/build.py --configuration Release: OK (full build incl. renderer and bindings).
-- Bundle WebUI matches WebUI/ (diff -rq); CFBundleShortVersionString 1.0.1; codesign --verify --deep --strict OK.
-- Delivered: build/Build/Products/Release/WallpaperMachine.app. Not packaged, not launched.
-
-## 2026-09-27 — Release CI: parallel build/test jobs and build caches
-
-- Build workflow split into build + test (parallel macos-15) and publish (ubuntu, needs both); shared setup in .github/actions/prepare-build; warm-caches.yml keeps entries alive.
-- actionlint 1.7.12 on .github/workflows/*.yml: clean. Composite action YAML parsed.
-- ccache probe (throwaway, fresh CARGO_TARGET_DIR, CMAKE_*_COMPILER_LAUNCHER=ccache): cold 67 s with 105 misses; second fresh build 48 s with 104 direct hits, so the cmake crate's CMake honors the env launcher.
-- Homebrew probe: with no tap providing mwe-ffmpeg, brew list --versions and brew --prefix still resolve the keg, so a restored Cellar keg needs only its opt link; install_ffmpeg.py unchanged.
-- python3 scripts/test.py: script modules now run concurrently (phase ~9 s, bounded by test_dmg); 644 passed, 0 failed, 11 skipped.
-- Not verified: the workflows themselves. Build runs only from Version or a tag push; first real run is the next release. Check both jobs' ccache --show-stats and the three cache restores there.
-
-## 2026-09-27 — Rebase onto origin/main (macOS 15, hide-after-apply) before 1.0.1
-
-- Conflicts resolved: settings.js keeps 'Hide window after applying a wallpaper' and drops General 'Pause on battery' (now Performance battery mode); pbxproj regenerated with xcodegen; verification logs merged, oldest entries archived.
-- python3 scripts/test.py: 644 passed, 0 failed, 11 skipped of 655; Python script suites OK.
-- Not run: Release build, check_renderer.py (no renderer change in the merge), desktop checks.
+- R22 reverted to HEAD (generation-keyed audio array rewrite, recorded before the script runs); R15 script-property skip reverted (primitive-only skip is not less work); R15 FillDynamicValueFromJS kept (allocation-neutral refactor). resolve_auto_setting broadening, fprintf and 'false &&' removed; three tests with non-HEAD expectations removed.
+- R26: rebaseline after any uncounted update and seed the selection tracker; TurningCountersOnDoesNotReportWorkAlreadyDone extended to off-then-on (mutation without the stale mark fails: 40 decodes, 8 skipped reported). Unneeded MetalVideoTextures baseline change reverted.
+- R28: index overflow latch re-arms only when the unclamped count fits (the landed clamped comparison re-armed every frame).
+- Targeted: playback_gpu_test 50/50, audio_tests 45/45, particle_rope_geometry_test 26/26, particle_mouse_controlpoint_test 39/39, scene_schema_tests 91/91, timer_tests 29/29, video_source_input_test 12/12, metal_video_texture_test 14/14; script_runtime_compat_test 78/79 (known HEAD failure HostVectorUpdatesDoNotCallMutableGlobalVectorConstructors).
+- python3 scripts/check_renderer.py: exit 0, 24 binaries exit 0, 10/10 cases pixel-equal, reload cycles 0 (artifacts/renderer/adaptive-20260927-232229).
+- python3 scripts/test.py first run: 644 passed, 1 failed, 11 skipped. ControlPanelDiscoverTests...AnimatedPreviewOnlyWhileItIsBrightWithoutWindow failed deterministically: the app-side panel sampler now runs only while !document.hidden and a windowless WKWebView reports hidden.
+- Test now asserts no sampling while hidden, then simulates visibility (hidden getter + visibilitychange) before the brightness checks; removing the hidden gate fails the new assertion.
+- python3 scripts/test.py rerun: 645 passed, 0 failed, 11 skipped of 656 (9 NativeVideoPlayerMediaTests + 2 WorkshopTests live, opt-in); Python script tests 187 OK. Cargo tests not run this pass.
+- Not run: desktop runtime, visual and power verification.

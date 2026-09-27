@@ -110,7 +110,8 @@ add_executable(
     audio/ffmpeg_sound_stream_test.cpp
     fs/limited_binary_stream_test.cpp
     audio/sample_math_test.cpp
-    audio/sound_layer_control_test.cpp)
+    audio/sound_layer_control_test.cpp
+    audio/sound_output_lifecycle_test.cpp)
 target_link_libraries(audio_tests PRIVATE ${PROJECT_NAME} wpAudio wpFs GTest::gtest_main)
 target_include_directories(audio_tests PRIVATE .)
 target_compile_features(audio_tests PRIVATE cxx_std_20)
@@ -442,6 +443,26 @@ gtest_discover_tests(
     PROPERTIES TIMEOUT 120
     DISCOVERY_TIMEOUT 60
 )
+
+# A frame that would repeat the picture already on the surface is not drawn,
+# submitted or presented. Driven through the whole scene wallpaper on a Metal
+# layer no window owns, against media the test encodes.
+if(APPLE)
+    add_executable(unchanged_present_test unchanged_present_test.mm)
+    target_link_libraries(unchanged_present_test PRIVATE ${PROJECT_NAME}
+        wpScene wpVulkan wpVulkanRender wpRGraph
+        PkgConfig::TEST_AVFORMAT PkgConfig::TEST_AVCODEC PkgConfig::TEST_AVUTIL GTest::gtest_main)
+    target_include_directories(unchanged_present_test PRIVATE
+        . ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/src/Scene/include
+        ${CMAKE_SOURCE_DIR}/src/Scene/VulkanRender/include)
+    wescene_prefer_ffmpeg_headers(unchanged_present_test "TEST_")
+    target_compile_features(unchanged_present_test PRIVATE cxx_std_20)
+    set_target_properties(unchanged_present_test PROPERTIES
+        OBJCXX_STANDARD 20 OBJCXX_STANDARD_REQUIRED YES)
+    target_compile_options(unchanged_present_test PRIVATE
+        $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
+    gtest_discover_tests(unchanged_present_test PROPERTIES TIMEOUT 120 DISCOVERY_TIMEOUT 60)
+endif()
 
 # Render-target sizing only: no device, no surface, no GPU.
 add_executable(render_scale_test render_scale_test.cpp)

@@ -142,6 +142,7 @@ final class RuntimeDiagnosticsSession {
                     + "present_requests=\(surface.presentRequests) "
                     + "gpu_completions=\(surface.gpuCompletions) "
                     + "simulation_ticks=\(surface.simulationTicks) "
+                    + "presents_skipped_unchanged=\(surface.presentsSkippedUnchanged) "
                     + "tick_interval_us=\(surface.tickIntervalMicros) "
                     + "content_period_us=\(surface.contentPeriodMicros) "
                     + "frames_selected=\(surface.videoFramesSelected) "

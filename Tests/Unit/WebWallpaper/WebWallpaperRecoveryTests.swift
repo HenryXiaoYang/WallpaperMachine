@@ -79,6 +79,38 @@ final class WebWallpaperRecoveryTests: XCTestCase {
     host.shutdown()
   }
 
+  func testPointerMonitorFollowsALivePageNotMerelyAnOpenWindow() async throws {
+    let wallpaper = descriptor(entryFile: "index.html")
+    let host = WebWallpaperHost(
+      fetch: { [wallpaper] },
+      screens: { [(id: UInt32(7), frame: NSRect(x: 0, y: 0, width: 320, height: 200))] })
+    host.apply([wallpaper])
+    XCTAssertFalse(
+      host.isPointerMonitorActive,
+      "a window whose page has not loaded yet installs no pointer monitor")
+
+    let deadline = Date().addingTimeInterval(10)
+    while Date() < deadline, !host.isPointerMonitorActive {
+      try await Task.sleep(for: .milliseconds(50))
+    }
+    XCTAssertTrue(host.isPointerMonitorActive, "a loaded page installs the pointer monitor")
+
+    host.setPresentationSuspended(true)
+    XCTAssertFalse(
+      host.isPointerMonitorActive,
+      "a host-suspended page must not keep the global pointer monitor")
+    host.setPresentationSuspended(false)
+    XCTAssertTrue(
+      host.isPointerMonitorActive, "the first resume reinstalls the pointer monitor")
+
+    host.setPresentationSuspended(true, forDisplay: 7)
+    XCTAssertFalse(host.isPointerMonitorActive)
+    host.setPresentationSuspended(false, forDisplay: 7)
+    XCTAssertTrue(host.isPointerMonitorActive)
+    host.shutdown()
+    XCTAssertFalse(host.isPointerMonitorActive)
+  }
+
   func testChangingTheEntryFileReplacesThePage() {
     let counters = RuntimeCounters()
     counters.startSession(duration: .seconds(60))

@@ -233,11 +233,81 @@ render scale, animation speed or audio-response subscription:
   processed at the original cadence.
 - Repeated system-media artwork skips redundant input conversion while still
   consuming every media-state message; see [media integration](media-integration.md).
+- On Compatibility, a hidden layer's first-use clear is left out when nothing
+  can see its target: no pass samples, copies, composes or draws over it later
+  in the frame, and no pass before it could read the previous frame's clear.
+  Anything that reads the target keeps the clear, and the frame in which a
+  reader starts drawing clears it first.
+- On Compatibility, the first draw into a composite that was just cleared to
+  transparent (a group layer without copy-background) opens with that same
+  clear, so the separate clear is dropped as redundant and the target is not
+  cleared and then loaded. Later draws still load; the pass keeps the
+  single-sample path it had.
+- On Compatibility, a plain video wallpaper draws its decoded frame straight
+  onto the display through the final composition's own viewport, scissor and
+  sampler whenever the decoded frame is exactly the scene's size and the
+  picture is not mirrored, instead of copying it into a video-sized image and
+  resampling that. The bytes on the display are the same; a mirrored picture, a
+  frame decoded at another size or any other scene keeps the copy.
+- On Compatibility, each new video frame's colour conversion is queued ahead of
+  the frame on the renderer's own GPU queue instead of being waited for on the
+  CPU and submitted separately: one submission per new frame, and the images
+  that wrap pooled conversion targets are made once and reused.
+- Per-frame shader values are matched to their uniform slots through a per-pass
+  table built once, instead of string-keyed lookups on every write. Every value
+  is still written every frame.
+- The Compatibility drawable is only ever rendered to, so macOS can treat it as
+  framebuffer-only; a requested poster is drawn again into an image of its own
+  (see [Scene renderer](#scene-renderer)).
+- A hidden particle layer keeps its simulation and rebuilds its mesh on the
+  first frame it is shown again, or while something samples it. The geometry is
+  not generated for a frame that cannot read it.
+- A video demuxer discards packets of streams it does not decode, and the
+  wallpaper audio demuxer discards the video bitstream. The decoded picture,
+  the PCM and the loop seam are unchanged.
 
 Fewer allocations, queue moves or conversions are workload evidence, not a
 measurement of watts. Draw-call CPU timing excludes simulation and is not
 displayed FPS; a power claim still requires the matched conditions described in
 [power benchmarking](../testing/power-benchmark.md).
+
+## Background work only while it has a consumer
+
+These change no setting, frame rate, render scale or sound; they stop work that
+nothing could see or hear.
+
+- **Wallpaper sound output.** The Core Audio output a scene's sound layers or a
+  video's own audio track play through starts only while something is mounted,
+  the wallpaper is playing and it is not muted. A paused, muted or silent
+  wallpaper, a wallpaper that arrives paused, and the lock-screen extension
+  (always muted) start no output, so Core Audio runs no output cycle for them
+  and holds no idle-sleep assertion on their behalf. The output was silence in
+  every one of those states already, with sound positions frozen. Resuming or
+  unmuting costs one device start.
+- **System audio capture.** Runs only for a presenting wallpaper that actually
+  reads the sound; see [audio response](audio-response.md). This only changes
+  scenes that read no audio; a wallpaper that reads audio still runs the tap,
+  and no drop in coreaudiod cost is claimed for it.
+- **Pointer sampling.** Scenes receive the cursor from a sampler that runs when
+  macOS reports pointer motion or a button, when an interactive scene appears or
+  resumes, or when its pointer delivery is reset, at most once per 16 ms, with
+  a move after a quiet stretch delivered at once. It no longer wakes 62.5 times
+  a second with the pointer still, and a scene that is paused or covered is not
+  a consumer, so a covered interactive scene does not keep it running. While
+  this app is frontmost, where macOS routes pointer events past the monitors,
+  the sampler checks the cursor every 16 ms and does engine work only when it
+  moved. No new permission is needed.
+- **Frame clock.** A wallpaper's frame clock starts when its scene is loaded,
+  not when the renderer is created, so a surface still parsing or whose load
+  failed has no clock thread. A global resume applies each display's own pause
+  in one step, so a display that is still covered is never briefly resumed.
+- A pointer sample that cannot move the next tick does not wake the frame
+  clock, and a burst of samples while the clock is idle coalesces into one
+  frame. The configured frame rate stays the ceiling.
+- The video decode thread is woken when a frame is actually ready, not on every
+  tick that has nothing new.
+- Per-tick video counter bookkeeping runs only while renderer counters are on.
+  With them off the counters stay zero and that bookkeeping does not run.
 
 ## Video backend
 
@@ -291,8 +361,9 @@ The only control here that ships on. It reuses the result of scene subgraphs
 whose inputs have not changed and removes render passes proven redundant, inside
 the scene renderer's own render graph. It is not a quality tier: the same pixels
 are produced, and resolution, frame rate and animation speed are untouched. It
-reaches legacy scene wallpapers only — video, native video and web wallpapers do
-not go through that graph.
+reaches wallpapers the scene engine draws: scenes on either renderer, and video
+wallpapers on Compatibility, which the engine draws as a one-texture scene.
+Native video and web wallpapers do not go through it.
 
 It is on the **Settings -> Performance** page so it can be turned off and on
 for an A/B comparison without an environment variable.
@@ -310,6 +381,32 @@ sampling and signature walk that decide what to reuse are skipped outright:
 their only reachable answer is "draw everything", and paying to reach it every
 frame was pure overhead. The budget itself is unchanged; a target that cannot
 be pinned still redraws.
+
+### Frames that would repeat the picture
+
+With scene render optimisation on, a frame that would put back exactly the
+picture already on screen is not drawn, submitted or presented, and the surface
+keeps showing the last frame. Two cases qualify:
+
+- a Compatibility video wallpaper whose playback clock selected the same
+  decoded frame as the last present, which is most ticks of a 24 or 30 fps clip
+  under a 60 or 120 fps limit;
+- a scene, on either renderer, whose every pass was reused from the previous
+  frame, leaving only the final composition to redo.
+
+The frame clock still ticks at the configured rate, and the scene still runs its
+scripts, timeline, sound and events on every tick; only drawing an identical
+picture is left out. A newly decoded video frame is presented on the tick that
+selects it, exactly as before, so this is neither content pacing nor updating
+only when the scene changes, and no drawable is held to keep the picture. A
+resize, fill, scaling or flip change, a render-scale or scene-optimisation
+change, a rebuilt graph or surface, a resumed wallpaper, a failed frame or a
+poster request makes the next frame present. The renderer counters report these
+frames as `presents_skipped_unchanged`, apart from dropped draws and present
+requests.
+
+Native Metal takes a drawable only after the scene's passes are encoded, so a
+frame that repeats the picture takes none.
 
 ### Update only when the scene changes
 
@@ -435,10 +532,11 @@ yet), the backend actually in use, or Compatibility with the reason native was
 not used. It never shows the preference in place of the outcome. The
 lock-screen extension always uses the compatibility backend.
 
-Desktop posters work on both backends and need no setting: the native backend
-re-draws its final composition — fit, zoom and flip included — into a texture
-of its own only when a poster is requested, including while the scene is idle
-or paused. **Scene optimisation** applies to both renderers, and a change to it
+Desktop posters work on both backends and need no setting: each re-draws its
+final composition — fit, zoom and flip included — into an image of its own only
+when a poster is requested, including while the scene is idle or paused. The
+Compatibility drawable is therefore only ever rendered to, never read back.
+**Scene optimisation** applies to both renderers, and a change to it
 now reaches a running scene on that scene's next frame in either direction: the
 copy plan, the targets it governs and the reuse table are rebuilt over the graph
 that is already compiled, without reparsing the project, reopening a video or
@@ -563,3 +661,9 @@ battery share and `BatteryCapacity` parsing; `WallpaperEnergyRatingsTests`
 covers when an interval is credited to a wallpaper, how measurements combine
 or replace one another, and persistence; `WebPanelEnergyUsageTests` covers
 that the readout samples only while Settings is visible.
+The renderer-side behaviour above (frames that repeat the picture, sound output
+and audio capture only while needed, event-armed pointer sampling, the frame
+clock starting with a scene) is covered by the regression areas in
+[renderer verification](../testing/renderer.md#regression-areas-that-must-stay-covered).
+Those tests prove the work stopped; they are not power measurements, which
+still need the matched conditions in [power benchmarking](../testing/power-benchmark.md).

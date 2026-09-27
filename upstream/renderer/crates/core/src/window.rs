@@ -278,59 +278,164 @@ impl MouseButtonTracker {
     }
 }
 
+/// What the pointer monitors report. Delivered on the AppKit main thread.
+#[cfg(not(test))]
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum MouseMonitorEvent {
+    /// A button went down or up in another application. Recorded as an edge so
+    /// a click shorter than the sampling spacing is not lost.
+    Button(MouseButtonState),
+    /// Motion or a drag anywhere a monitor sees it, or a button in this app's
+    /// own windows (read as a level by the next sample, as before).
+    Motion,
+    /// This application became active or inactive. While it is active AppKit
+    /// sends pointer events to it, which the global monitor never sees.
+    AppActive(bool),
+}
+
 #[cfg(not(test))]
 pub(crate) struct MouseEventMonitor {
-    monitor: SendPtr,
+    global: Option<SendPtr>,
+    local: Option<SendPtr>,
+    activation_observers: [SendPtr; 2],
     #[allow(dead_code)]
-    block: block2::RcBlock<dyn Fn(std::ptr::NonNull<NSEvent>)>,
+    global_block: block2::RcBlock<dyn Fn(std::ptr::NonNull<NSEvent>)>,
+    #[allow(dead_code)]
+    local_block: block2::RcBlock<dyn Fn(std::ptr::NonNull<NSEvent>) -> *mut NSEvent>,
+    #[allow(dead_code)]
+    activation_blocks: [block2::RcBlock<dyn Fn(std::ptr::NonNull<objc2_foundation::NSNotification>)>; 2],
 }
 
 #[cfg(test)]
 pub(crate) struct MouseEventMonitor;
 
+#[cfg(test)]
+impl MouseEventMonitor {
+    pub(crate) fn complete(&self) -> bool { false }
+}
+
 #[cfg(not(test))]
 impl MouseEventMonitor {
+    /// Installs the global and local pointer monitors and the activation
+    /// observers, then reports the current activation state. Main thread only.
     #[allow(clippy::single_call_fn)]
-    pub(crate) fn new<F>(handler: F) -> Option<Self>
+    pub(crate) fn new<F>(handler: F) -> Self
     where
-        F: Fn(MouseButtonState) + 'static,
+        F: Fn(MouseMonitorEvent) + 'static,
     {
-        let block = block2::RcBlock::new(move |event: std::ptr::NonNull<NSEvent>| {
+        let handler = std::rc::Rc::new(handler);
+
+        let global_handler = std::rc::Rc::clone(&handler);
+        let global_block = block2::RcBlock::new(move |event: std::ptr::NonNull<NSEvent>| {
             // SAFETY: AppKit invokes the monitor block with a valid NSEvent for
             // the event mask supplied when registering the monitor.
             let event = unsafe { event.as_ref() };
-            let Some(state) = mouse_button_state_from_event(event) else {
-                return;
-            };
-            handler(state);
+            global_handler(mouse_button_state_from_event(event)
+                .map_or(MouseMonitorEvent::Motion, MouseMonitorEvent::Button));
         });
+        let global = NSEvent::addGlobalMonitorForEventsMatchingMask_handler(
+            pointer_event_mask(),
+            &global_block,
+        )
+        .map(forget_token);
 
-        let retained_monitor = NSEvent::addGlobalMonitorForEventsMatchingMask_handler(
-            mouse_button_event_mask(),
-            &block,
-        )?;
-        let monitor = SendPtr(Retained::as_ptr(&retained_monitor).cast_mut().cast());
-        std::mem::forget(retained_monitor);
+        let local_handler = std::rc::Rc::clone(&handler);
+        let local_block = block2::RcBlock::new(move |event: std::ptr::NonNull<NSEvent>| {
+            local_handler(MouseMonitorEvent::Motion);
+            // Observe only: the event continues to its window unchanged.
+            event.as_ptr()
+        });
+        // SAFETY: The block returns the event it was given, which is what a
+        // local monitor must do to let the event through.
+        let local = unsafe {
+            NSEvent::addLocalMonitorForEventsMatchingMask_handler(pointer_event_mask(), &local_block)
+        }
+        .map(forget_token);
 
-        Some(Self { monitor, block })
+        let center = objc2_foundation::NSNotificationCenter::defaultCenter();
+        let activation_blocks = [true, false].map(|active| {
+            let handler = std::rc::Rc::clone(&handler);
+            block2::RcBlock::new(move |_notification: std::ptr::NonNull<objc2_foundation::NSNotification>| {
+                handler(MouseMonitorEvent::AppActive(active));
+            })
+        });
+        // SAFETY: The names are AppKit's constant notification names; a nil
+        // queue delivers on the posting thread, which for these is main.
+        let activation_observers = unsafe {
+            [
+                objc2_app_kit::NSApplicationDidBecomeActiveNotification,
+                objc2_app_kit::NSApplicationDidResignActiveNotification,
+            ]
+        }
+        .into_iter()
+        .zip(&activation_blocks)
+        .map(|(name, block)| {
+            // SAFETY: See above; the block is retained by this monitor for as
+            // long as the observer is registered.
+            let token = unsafe {
+                center.addObserverForName_object_queue_usingBlock(Some(name), None, None, block)
+            };
+            forget_token(token)
+        })
+        .collect::<Vec<_>>();
+        let activation_observers = [activation_observers[0], activation_observers[1]];
+
+        // Observers first, then the current state: both run on the main thread,
+        // so no activation change can fall between them.
+        handler(MouseMonitorEvent::AppActive(
+            objc2_app_kit::NSRunningApplication::currentApplication().isActive(),
+        ));
+        if global.is_none() || local.is_none() {
+            log::warn!(
+                "pointer event monitor unavailable (global: {}, local: {}); pointer sampling \
+                 falls back to checking the cursor",
+                global.is_some(),
+                local.is_some()
+            );
+        }
+
+        Self { global, local, activation_observers, global_block, local_block, activation_blocks }
     }
+
+    /// Both monitors installed, so outside the active-app gap every pointer
+    /// change reaches the handler.
+    pub(crate) fn complete(&self) -> bool {
+        self.global.is_some() && self.local.is_some()
+    }
+}
+
+#[cfg(not(test))]
+fn forget_token<T: ?Sized + Message>(token: Retained<T>) -> SendPtr {
+    let pointer = SendPtr(Retained::as_ptr(&token).cast_mut().cast());
+    std::mem::forget(token);
+    pointer
 }
 
 #[cfg(not(test))]
 impl Drop for MouseEventMonitor {
     fn drop(&mut self) {
-        let monitor = self.monitor.0 as usize;
+        let monitors: Vec<usize> =
+            [self.global, self.local].into_iter().flatten().map(|token| token.0 as usize).collect();
+        let observers = self.activation_observers.map(|token| token.0 as usize);
         run_on_main_thread(move || unsafe {
-            let object = Retained::from_raw((monitor as *mut std::ffi::c_void).cast::<AnyObject>())
-                .expect("mouse event monitor token should not be null");
-            NSEvent::removeMonitor(&object);
+            let token = |raw: usize| {
+                Retained::from_raw((raw as *mut std::ffi::c_void).cast::<AnyObject>())
+                    .expect("pointer monitor token should not be null")
+            };
+            for monitor in monitors {
+                NSEvent::removeMonitor(&token(monitor));
+            }
+            let center = objc2_foundation::NSNotificationCenter::defaultCenter();
+            for observer in observers {
+                center.removeObserver(&token(observer));
+            }
         });
     }
 }
 
-// SAFETY: The monitor token is retained and only removed on the AppKit main
-// thread in Drop. The retained block must stay alive for AppKit callbacks, but
-// it is not invoked by Rust after construction.
+// SAFETY: The monitor and observer tokens are retained and only removed on the
+// AppKit main thread in Drop. The retained blocks must stay alive for AppKit
+// callbacks, but they are not invoked by Rust after construction.
 #[cfg(not(test))]
 unsafe impl Send for MouseEventMonitor {}
 // SAFETY: The wrapper stores Objective-C tokens opaquely and all Objective-C
@@ -341,13 +446,38 @@ unsafe impl Sync for MouseEventMonitor {}
 #[cfg(not(test))]
 #[must_use]
 #[allow(clippy::single_call_fn)]
-fn mouse_button_event_mask() -> NSEventMask {
+fn pointer_event_mask() -> NSEventMask {
     NSEventMask::LeftMouseDown
         | NSEventMask::LeftMouseUp
         | NSEventMask::RightMouseDown
         | NSEventMask::RightMouseUp
         | NSEventMask::OtherMouseDown
         | NSEventMask::OtherMouseUp
+        | NSEventMask::MouseMoved
+        | NSEventMask::LeftMouseDragged
+        | NSEventMask::RightMouseDragged
+        | NSEventMask::OtherMouseDragged
+}
+
+/// Reads the cursor location and the three primary buttons without the main
+/// thread. Used only as a change detector; the sample scenes receive still
+/// comes from `NSEvent` on the main thread, so no coordinate conversion is
+/// needed here. An unreadable location compares unequal, which samples.
+pub(crate) fn probe_pointer() -> crate::engine::PointerProbe {
+    use objc2_core_graphics::{CGEvent, CGEventSource, CGEventSourceStateID, CGMouseButton};
+
+    let (x, y) = CGEvent::new(None).map_or((f64::NAN, f64::NAN), |event| {
+        let location = CGEvent::location(Some(&event));
+        (location.x, location.y)
+    });
+    let buttons = [CGMouseButton::Left, CGMouseButton::Right, CGMouseButton::Center]
+        .into_iter()
+        .enumerate()
+        .filter(|&(_, button)| {
+            CGEventSource::button_state(CGEventSourceStateID::CombinedSessionState, button)
+        })
+        .fold(0u32, |mask, (bit, _)| mask | (1 << bit));
+    crate::engine::PointerProbe { x, y, buttons }
 }
 
 #[cfg(not(test))]

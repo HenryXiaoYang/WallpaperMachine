@@ -830,5 +830,88 @@ TEST(FrameTimerTest, ARequestSuppressedByAContinuousDrawSurvivesGoingIdle)
     EXPECT_LT(waited.count(), 800) << "the owed frame did not arrive at the ceiling";
 }
 
+/// Pointer movement asks for a frame on every sample. At the ceiling those
+/// asks are absorbed by the tick that is already scheduled, so a burst of them
+/// produces about one callback per period, not one per ask.
+TEST(FrameTimerTest, ABurstOfWakeOnceAtTheCeilingDoesNotAddCallbacks)
+{
+    std::mutex              mutex;
+    std::condition_variable condition;
+    int                     draws { 0 };
+
+    FrameTimer timer([&]() {
+        {
+            std::scoped_lock lock(mutex);
+            ++draws;
+        }
+        condition.notify_all();
+        timer.FrameEnd();
+    });
+    timer.SetRequiredFps(30);
+    timer.Run();
+    WaitFor(mutex, condition, [&]() { return draws > 0; }, 500ms);
+    int baseline = 0;
+    {
+        std::scoped_lock lock(mutex);
+        baseline = draws;
+    }
+
+    const auto started = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - started < 1s) {
+        timer.RequestFrame();
+        std::this_thread::sleep_for(5ms);
+    }
+    timer.Stop();
+
+    int observed = 0;
+    {
+        std::scoped_lock lock(mutex);
+        observed = draws - baseline;
+    }
+    // 1 s at 30 fps is about 30 callbacks. 200 asks must not become 200 callbacks.
+    EXPECT_GE(observed, 20) << "the ceiling stopped producing frames";
+    EXPECT_LE(observed, 40) << "200 WakeOnce calls produced " << observed
+                            << " callbacks in 1s at 30 fps";
+}
+
+/// An idle clock has no cadence. A burst of requests coalesces into the one
+/// frame the ceiling allows, and then the clock goes back to sleep.
+TEST(FrameTimerTest, AnIdleBurstOfWakeOnceProducesOneCallback)
+{
+    std::mutex              mutex;
+    std::condition_variable condition;
+    int                     draws { 0 };
+
+    FrameTimer timer([&]() {
+        {
+            std::scoped_lock lock(mutex);
+            ++draws;
+        }
+        condition.notify_all();
+        timer.FrameEnd();
+    });
+    timer.SetRequiredFps(60);
+    timer.Run();
+    WaitFor(mutex, condition, [&]() { return draws > 0; }, 500ms);
+    timer.SetFrameDemand({ .kind = FrameTimer::FrameDemand::Kind::Idle });
+    std::this_thread::sleep_for(50ms);
+    int quiescent = 0;
+    {
+        std::scoped_lock lock(mutex);
+        quiescent = draws;
+    }
+
+    for (int index = 0; index < 200; ++index) timer.RequestFrame();
+    const auto waited = WaitFor(
+        mutex, condition, [&]() { return draws > quiescent; }, 500ms);
+    std::this_thread::sleep_for(200ms);
+    timer.Stop();
+
+    std::scoped_lock lock(mutex);
+    EXPECT_LT(waited.count(), 400) << "the idle burst never produced its frame";
+    EXPECT_EQ(draws, quiescent + 1)
+        << "an idle burst produced " << (draws - quiescent) << " frames";
+}
+
 } // namespace
 } // namespace wallpaper

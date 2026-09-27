@@ -27,6 +27,7 @@ fn display_with_scene(display_id: u32, handle: u64) -> DisplaySnapshotEntry {
         desc,
         handle: Some(SceneHandle::new(handle)),
         accepts_pointer_input: false,
+        paused: false,
         window_active: true,
         assignment: None,
     }

@@ -48,6 +48,16 @@ public:
     void prepare(Scene&, const Device&, RenderingResources&) override;
     VkResult execute(const Device&, RenderingResources&) override;
     void destory(const Device&, RenderingResources&) override;
+    /// The scene output image this pass samples when it composes the frame.
+    [[nodiscard]] const ImageParameters& sourceImage() const { return m_desc.vk_result; }
+    /// A render pass compatible with this pass's pipeline that leaves its
+    /// target ready to be copied from, for composing a poster.
+    [[nodiscard]] VkRenderPass copySourcePass() const { return *m_copy_source_pass; }
+    /// The composition `execute` records -- same source, vertices, viewport
+    /// and scissor -- through `render_pass` into an `extent`-sized
+    /// `framebuffer` of the present format.
+    VkResult recordComposition(RenderingResources&, VkRenderPass render_pass,
+                               VkFramebuffer framebuffer, VkExtent2D extent) const;
 
 #ifdef WESCENE_BUILD_TESTS
     PipelineParameters& pipelineForTests() { return m_desc.pipeline; }
@@ -59,6 +69,7 @@ private:
 
     Desc                                m_desc {};
     std::vector<CachedColorFramebuffer> m_framebuffers;
+    vvk::RenderPass                     m_copy_source_pass;
 };
 
 } // namespace vulkan

@@ -23,7 +23,8 @@ use wallpaper_core::{
 use crate::{
     actor::{
         messages::{
-            self, ApplyWallpaperOptions, Bootstrap, CancelWallpaperOptions, ClearShaderCache,
+            self, ApplyWallpaperOptions, AudioRequirementChanged, Bootstrap, CancelWallpaperOptions,
+            ClearShaderCache,
             CommitApplyAfterReconcile, CommitDisplayAfterReconcile, CompleteAudioResponse,
             CompleteRestoreAfterReconcile, EditProperty, EjectWallpaperFromDisplay,
             GetAllSnapshots, GetAppSnapshot, GetLibrarySnapshot, GetLockScreenScenes,
@@ -204,6 +205,87 @@ impl<E: EngineFacade> BridgeActorHandle<E> {
             .ask(message)
             .blocking_send()
             .map_err(map_send_error)
+    }
+}
+
+impl<E: EngineFacade + Clone> BridgeActorHandle<E> {
+    /// The sink for the engine's audio-requirement changes. The engine calls
+    /// it under a lock on its actor thread, so it only records the handle and
+    /// wakes one task on this actor's runtime, which asks the actor to re-sync
+    /// capture. Coalescing: a burst of reports is one delivery, and the
+    /// pending set is bounded by the number of live scenes. Nothing polls.
+    pub(crate) fn audio_requirement_relay(&self) -> Option<wallpaper_core::AudioRequirementCallback> {
+        let runtime = self.runtime.as_ref()?;
+        let pending = Arc::new(std::sync::Mutex::new(HashSet::<SceneHandle>::new()));
+        let notify = Arc::new(tokio::sync::Notify::new());
+        // Weak, so the relay never keeps the actor (or its runtime) alive.
+        let actor = self.actor.downgrade();
+        let task_pending = Arc::clone(&pending);
+        let task_notify = Arc::clone(&notify);
+        let _task = runtime.spawn(async move {
+            loop {
+                task_notify.notified().await;
+                let handles: Vec<SceneHandle> = std::mem::take(
+                    &mut *task_pending.lock().unwrap_or_else(|error| error.into_inner()),
+                )
+                .into_iter()
+                .collect();
+                if handles.is_empty() {
+                    continue;
+                }
+                let Some(actor) = actor.upgrade() else { break };
+                if let Err(error) = actor.ask(AudioRequirementChanged { handles }).await {
+                    log::warn!("could not re-sync system audio capture: {error}");
+                }
+            }
+        });
+        Some(Arc::new(move |handle, _requires_audio| {
+            let _ = pending
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(handle);
+            notify.notify_one();
+        }))
+    }
+}
+
+/// Whether the scene shown on `scene`'s display reads system audio, as its
+/// renderer reports. A display without a live renderer has nothing to read.
+fn scene_reads_audio<E: EngineFacade>(
+    engine: &E,
+    displays: &[DisplaySnapshotEntry],
+    scene: &SceneDesc,
+) -> bool {
+    displays
+        .iter()
+        .find(|display| display.desc.display_id == scene.display.display_id)
+        .and_then(|display| display.handle)
+        .is_some_and(|handle| engine.scene_requires_audio(handle))
+}
+
+/// Registers one scene as a system-audio consumer: the user's audio-response
+/// setting AND the renderer's report that the loaded scene reads audio. Pause
+/// is not part of this: it is the global `set_audio_capture_suspended` gate,
+/// which every pause and resume path already re-evaluates, whereas a paused
+/// registration would have to be re-made on every resume.
+///
+/// The renderer reports on its own thread, and the actor re-registers the
+/// scene when it does, possibly before this call lands with an older value.
+/// Re-reading after each registration keeps a stale value from winning; it
+/// settles because a scene's requirement only changes on its renderer's report.
+async fn register_audio_capture<E: EngineFacade>(
+    engine: &E,
+    handle: SceneHandle,
+    response_enabled: bool,
+) -> Result<(), wallpaper_core::EngineError> {
+    let mut enabled = response_enabled && engine.scene_requires_audio(handle);
+    loop {
+        engine.set_audio_capture_enabled(handle, enabled).await?;
+        let current = response_enabled && engine.scene_requires_audio(handle);
+        if current == enabled {
+            return Ok(());
+        }
+        enabled = current;
     }
 }
 
@@ -1247,16 +1329,18 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
             return self.playback_paused();
         };
 
-        !scenes
-            .iter()
-            .any(|scene| scene.audio_response_enabled && !scene.paused)
-            && web_audio_consumers(&inputs, &self.state.web_audio_subscribers) == 0
+        !scenes.iter().any(|scene| {
+            scene.audio_response_enabled
+                && !scene.paused
+                && scene_reads_audio(&self.engine, &displays, scene)
+        }) && web_audio_consumers(&inputs, &self.state.web_audio_subscribers) == 0
     }
 
-    /// Wallpapers that both enable audio response and are not paused for their
-    /// own display, counting subscribed web pages alongside scenes. This is the
-    /// same rule the capture tap follows, reported as a number so a diagnostic
-    /// session can see why the tap is open or closed.
+    /// Wallpapers that enable audio response, whose scene reads audio and that
+    /// are not paused for their own display, counting subscribed web pages
+    /// alongside scenes. This is the same rule the capture tap follows,
+    /// reported as a number so a diagnostic session can see why the tap is
+    /// open or closed.
     fn audio_consumer_count(&self) -> u32 {
         let displays = self.engine.display_snapshot();
         let inputs = self.activation_inputs(&displays, self.playback_paused());
@@ -1265,7 +1349,11 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
         };
         let scene_consumers = scenes
             .iter()
-            .filter(|scene| scene.audio_response_enabled && !scene.paused)
+            .filter(|scene| {
+                scene.audio_response_enabled
+                    && !scene.paused
+                    && scene_reads_audio(&self.engine, &displays, scene)
+            })
             .count();
 
         u32::try_from(scene_consumers)
@@ -1276,13 +1364,13 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
     async fn apply_engine_pause(&self, previous_paused: bool) -> Result<(), BridgeError> {
         let paused = self.playback_paused();
         let audio_suspended = self.audio_capture_suspended();
+        // Each scene takes `paused || its display is covered` in one pass, so a
+        // global resume never runs a display that is still hidden on its own.
+        let suspended_displays: Vec<u32> = self.state.suspended_displays.iter().copied().collect();
         let result = async {
-            self.engine.set_all_paused(paused).await?;
-            // A global resume must not restart a display that is still hidden
-            // on its own, so per-display suspension is re-applied on top.
-            for display_id in &self.state.suspended_displays {
-                self.engine.set_display_paused(*display_id, true).await?;
-            }
+            self.engine
+                .set_all_paused(paused, suspended_displays.clone())
+                .await?;
             self.engine.set_audio_capture_suspended(audio_suspended).await
         }
         .await;
@@ -1290,7 +1378,11 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
             let mut message = error.to_string();
             // Either operation may have changed live state before failing.
             // Restore both sides before the caller rolls back its actor state.
-            if let Err(rollback) = self.engine.set_all_paused(previous_paused).await {
+            if let Err(rollback) = self
+                .engine
+                .set_all_paused(previous_paused, suspended_displays)
+                .await
+            {
                 message.push_str(&format!("; renderer pause rollback failed: {rollback}"));
             }
             if let Err(rollback) = self
@@ -1837,8 +1929,7 @@ async fn reconcile_with<E: EngineFacade>(
             .set_audio_muted(handle, scene.audio_muted || audio_suppressed)
             .await
             .map_err(|error| BridgeError::engine(error.to_string()))?;
-        engine
-            .set_audio_capture_enabled(handle, scene.audio_response_enabled)
+        register_audio_capture(&engine, handle, scene.audio_response_enabled)
             .await
             .map_err(|error| BridgeError::engine(error.to_string()))?;
         // A newly opened scene already rasterizes at native size, so only a
@@ -3281,6 +3372,48 @@ impl<E: EngineFacade + Clone> Message<SetWebAudioSubscribed> for BridgeActor<E> 
     }
 }
 
+impl<E: EngineFacade + Clone> Message<AudioRequirementChanged> for BridgeActor<E> {
+    type Reply = messages::AudioRequirementChangedReply;
+
+    /// A scene started or stopped reading audio: re-register it, then
+    /// re-evaluate the tap, so a scene that reads nothing never holds it open
+    /// and one that starts reading late opens it without waiting for a
+    /// reconcile.
+    async fn handle(
+        &mut self,
+        msg: AudioRequirementChanged,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let displays = self.engine.display_snapshot();
+        let scenes = self
+            .activation_inputs(&displays, self.playback_paused())
+            .build()
+            .unwrap_or_default();
+        for handle in msg.handles {
+            // A handle no display shows any more was already released when
+            // its scene went away.
+            let Some(display_id) = displays
+                .iter()
+                .find(|display| display.handle == Some(handle))
+                .map(|display| display.desc.display_id)
+            else {
+                continue;
+            };
+            let response_enabled = scenes
+                .iter()
+                .find(|scene| scene.display.display_id == display_id)
+                .is_some_and(|scene| scene.audio_response_enabled);
+            register_audio_capture(&self.engine, handle, response_enabled)
+                .await
+                .map_err(|error| BridgeError::engine(error.to_string()))?;
+        }
+        self.engine
+            .set_audio_capture_suspended(self.audio_capture_suspended())
+            .await
+            .map_err(|error| BridgeError::engine(error.to_string()))
+    }
+}
+
 impl<E: EngineFacade + Clone> Message<SetMediaIntegrationEnabled> for BridgeActor<E> {
     type Reply = messages::SetMediaIntegrationEnabledReply;
 
@@ -3707,6 +3840,7 @@ fn renderer_surface_row(counters: &RendererSurfaceCounters) -> BridgeRendererSur
         present_requests: counters.value(K::PresentRequests),
         gpu_completions: counters.value(K::GpuCompletions),
         simulation_ticks: counters.value(K::SimulationTicks),
+        presents_skipped_unchanged: counters.value(K::PresentsSkippedUnchanged),
         tick_interval_micros: counters.value(K::TickIntervalMicros),
         content_period_micros: counters.value(K::ContentPeriodMicros),
         video_decode_outputs: counters.value(K::VideoDecodeOutputs),
@@ -3966,16 +4100,15 @@ impl<E: EngineFacade + Clone> Message<SetAudioResponseEnabled> for BridgeActor<E
         ctx.spawn(async move {
             let mut result = Ok(());
             for &handle in &handles {
-                if let Err(error) = engine.set_audio_capture_enabled(handle, msg.enabled).await {
+                if let Err(error) = register_audio_capture(&engine, handle, msg.enabled).await {
                     result = Err(BridgeError::engine(error.to_string()));
                     break;
                 }
             }
             if result.is_err() {
                 for handle in handles {
-                    if let Err(error) = engine
-                        .set_audio_capture_enabled(handle, previous_enabled)
-                        .await
+                    if let Err(error) =
+                        register_audio_capture(&engine, handle, previous_enabled).await
                     {
                         log::warn!("could not restore audio response after failed change: {error}");
                     }

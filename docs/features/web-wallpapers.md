@@ -112,7 +112,10 @@ a separate web view with its own handler.
   the descriptor changed.
 - Mouse input (`WebWallpaperMouseForwarder`): the windows stay mouse-transparent
   and nothing is consumed, so no Accessibility or Input Monitoring grant is
-  needed. A global `NSEvent` monitor observes desktop pointer events;
+  needed. The global `NSEvent` monitor is installed only while at least one page
+  is loaded and not host-suspended (`WebWallpaperHost.refreshPointerMonitor`);
+  a window whose page has not loaded, and a page the host has suspended, install
+  none. While it is installed it observes desktop pointer events;
   `WebWallpaperMouseRouting` forwards them only while the window the system
   would hit is below layer 0 (Finder's desktop, the system wallpaper, widgets),
   keeps a forwarded press's drags and release, and sends one exit when the

@@ -4162,9 +4162,13 @@ TEST(SceneSchema, SchemecolorUserPropertyUpdatesSceneClearColor) {
     EXPECT_FLOAT_EQ(parsed->clearColor[2], 0.125f);
 }
 
+#include <array>
 #include <chrono>
 #include <condition_variable>
+#include <filesystem>
 #include <mutex>
+#include <thread>
+#include "Core/RendererCounters.hpp"
 #include "SceneWallpaper.hpp"
 #include "Scene/Scene.h"
 #if defined(__APPLE__)
@@ -4268,6 +4272,156 @@ TEST(SceneSchema, PointerCapabilityFollowsActualCommitsWithoutFirstFrame) {
     EXPECT_FALSE(scene->first_frame_ok);
     std::lock_guard lock(observation.mutex);
     EXPECT_EQ(observation.first_frames, 0);
+}
+
+namespace {
+/// Parses `objects` over the shared scene files plus audio-reading variants of
+/// the image material and particle. Keeps the VFS and sound manager alive for
+/// as long as the scene is used.
+struct AudioProbeScene {
+    fs::VFS                           vfs;
+    audio::SoundManager               sound_manager;
+    ProjectProperties                 properties;
+    std::shared_ptr<wallpaper::Scene> scene;
+
+    explicit AudioProbeScene(std::string_view objects) {
+        MountSceneFiles(vfs);
+        auto files = std::map<std::string, std::string> {
+            { "/audio_image.json", R"({"width":64,"height":32,"material":"audio_mat.json"})" },
+            { "/audio_mat.json",
+              R"({"passes":[{"blending":"translucent","cullmode":"nocull","depthtest":"disabled",)"
+              R"("depthwrite":"disabled","shader":"genericimage","textures":["a.tex"],)"
+              R"("combos":{"AUDIOPROCESSING":1}}]})" },
+            { "/audio_particle.json",
+              R"({"emitter":[{"name":"boxrandom","id":1,"audioprocessingmode":1}],)"
+              R"("material":"mat.json","maxcount":4,"starttime":0})" },
+        };
+        EXPECT_TRUE(vfs.Mount("/assets", std::make_unique<MemoryFs>(std::move(files))));
+        // With project properties, as `loadScene` parses: that is what gives
+        // the scene a runtime, which is where the requirement lives.
+        scene = WPSceneParser().Parse(SceneParseRequest {
+                                          .scene_id           = "audio-probe",
+                                          .project_properties = &properties,
+                                      },
+                                      std::string(R"({
+          "camera": {"center":[0,0,0], "eye":[0,0,1], "up":[0,1,0]},
+          "general": {
+            "ambientcolor":[0.2,0.2,0.2], "skylightcolor":[0.3,0.3,0.3],
+            "clearcolor":[0,0,0], "cameraparallax":false,
+            "cameraparallaxamount":0, "cameraparallaxdelay":0,
+            "cameraparallaxmouseinfluence":0,
+            "orthogonalprojection":{"width":640,"height":360}
+          },
+          "objects": )") + std::string(objects) + "}",
+                                      vfs,
+                                      sound_manager);
+    }
+
+    bool RequiresAudio() const {
+        return scene != nullptr && scene->runtime != nullptr &&
+               scene->runtime->SceneRequiresAudioResponse();
+    }
+};
+
+constexpr std::string_view kPlainImageObjects =
+    R"([{"id":1,"name":"plain","image":"image.json","visible":true}])";
+}
+
+TEST(SceneSchema, AudioRequirementComesOnlyFromContentThatReadsAudio) {
+    AudioProbeScene plain(kPlainImageObjects);
+    ASSERT_NE(plain.scene, nullptr);
+    ASSERT_NE(plain.scene->runtime, nullptr);
+    EXPECT_FALSE(plain.RequiresAudio()) << "an image with an ordinary material reads no audio";
+    plain.scene->runtime->Tick(0.5);
+    EXPECT_FALSE(plain.RequiresAudio()) << "running the scene must not invent a requirement";
+
+    AudioProbeScene material(
+        R"([{"id":1,"name":"bars","image":"audio_image.json","visible":true}])");
+    ASSERT_NE(material.scene, nullptr);
+    EXPECT_TRUE(material.RequiresAudio()) << "an AUDIOPROCESSING material reads the spectrum";
+
+    AudioProbeScene particle(
+        R"([{"id":1,"name":"beat","particle":"audio_particle.json","visible":true}])");
+    ASSERT_NE(particle.scene, nullptr);
+    EXPECT_TRUE(particle.RequiresAudio()) << "an audio-processing emitter reads the spectrum";
+
+    // A script only reads audio once it asks for buffers, which may be long
+    // after the scene was parsed.
+    AudioProbeScene script(
+        R"([{"id":1,"name":"scripted","image":"image.json","visible":true,
+             "origin":{"value":[0,0,0],"script":"export function update(value) { engine.registerAudioBuffers(engine.AUDIO_RESOLUTION_16); return value; }"}}])");
+    ASSERT_NE(script.scene, nullptr);
+    ASSERT_NE(script.scene->runtime, nullptr);
+    EXPECT_FALSE(script.RequiresAudio());
+    script.scene->runtime->Tick(0.5);
+    EXPECT_TRUE(script.RequiresAudio()) << "registerAudioBuffers reads the spectrum";
+}
+
+TEST(SceneSchema, AudioRequirementIsReportedOncePerSceneAndResetByReplacement) {
+    NativePointerObservation audio;
+    NativePointerObservation commits;
+    wallpaper::SceneWallpaper wallpaper;
+    ASSERT_TRUE(wallpaper.init());
+    const auto observe_commits = [&] {
+        wallpaper.setPropertyObject(wallpaper::PROPERTY_POINTER_INPUT_CALLBACK,
+            std::make_shared<wallpaper::PointerInputCallback>([&](bool accepts) {
+                commits.Observe(accepts);
+            }));
+    };
+    // Every commit reports pointer capability right after the audio
+    // requirement, and re-registering replays on the same main looper, so the
+    // pointer count doubles as an ordering barrier for audio reports.
+    std::size_t barriers = 0;
+    const auto barrier = [&] {
+        observe_commits();
+        ASSERT_TRUE(commits.Wait(++barriers));
+    };
+    const auto commit = [&](std::shared_ptr<wallpaper::Scene> scene) {
+        wallpaper::SceneWallpaperInputTestAccess::PostScene(wallpaper, std::move(scene));
+        ASSERT_TRUE(commits.Wait(++barriers));
+    };
+    wallpaper.setPropertyObject(wallpaper::PROPERTY_AUDIO_REQUIREMENT_CALLBACK,
+        std::make_shared<wallpaper::AudioRequirementCallback>([&](bool requires_audio) {
+            audio.Observe(requires_audio);
+        }));
+    ASSERT_TRUE(audio.Wait(1));
+    barrier();
+    EXPECT_EQ(audio.Values(), (std::vector<bool> { false })) << "installing replays the state";
+
+    AudioProbeScene plain(kPlainImageObjects);
+    ASSERT_NE(plain.scene, nullptr);
+    commit(plain.scene);
+    EXPECT_EQ(audio.Values(), (std::vector<bool> { false }))
+        << "a scene that reads no audio never opens the tap";
+
+    AudioProbeScene bars(R"([{"id":1,"name":"bars","image":"audio_image.json","visible":true}])");
+    ASSERT_TRUE(bars.RequiresAudio());
+    commit(bars.scene);
+    EXPECT_EQ(audio.Values(), (std::vector<bool> { false, true }));
+    bars.scene->runtime->MarkSceneRequiresAudioResponse();
+    barrier();
+    EXPECT_EQ(audio.Values(), (std::vector<bool> { false, true }))
+        << "a scene that marks again is still one report";
+
+    // Replacing with a scene that reads nothing lowers it, and the old scene's
+    // late marks cannot raise it for the new one.
+    AudioProbeScene next(kPlainImageObjects);
+    commit(next.scene);
+    EXPECT_EQ(audio.Values(), (std::vector<bool> { false, true, false }));
+    bars.scene->runtime->MarkSceneRequiresAudioResponse();
+    barrier();
+    EXPECT_EQ(audio.Values(), (std::vector<bool> { false, true, false }));
+
+    // A late mark by the scene now showing -- what a script's
+    // registerAudioBuffers does -- raises it exactly once.
+    next.scene->runtime->MarkSceneRequiresAudioResponse();
+    next.scene->runtime->MarkSceneRequiresAudioResponse();
+    barrier();
+    EXPECT_EQ(audio.Values(), (std::vector<bool> { false, true, false, true }));
+
+    commit(nullptr);
+    wallpaper.shutdown();
+    EXPECT_EQ(audio.Values(), (std::vector<bool> { false, true, false, true, false }));
 }
 
 #if defined(__APPLE__)
@@ -4632,6 +4786,36 @@ scene.on('mediaPlaybackChanged', function(event) {
         "");
     return scene;
 }
+
+/// Returns once both loopers have handled everything posted before the call:
+/// a render-looper round trip, a main-looper round trip (installing a pointer
+/// callback replays the current capability from the main looper), and a
+/// render-looper round trip again for whatever the main looper forwarded.
+///
+/// Shutting down stops the loopers without draining them, so a test that
+/// posts a scene and shuts down straight away otherwise measures whether the
+/// render thread happened to get there first.
+void WaitForPostedWork(wallpaper::SceneWallpaper& wallpaper) {
+    ASSERT_TRUE(wallpaper.beginSurfaceReconfigure());
+    struct Replay {
+        std::mutex              mutex;
+        std::condition_variable changed;
+        bool                    seen { false };
+    };
+    auto replay = std::make_shared<Replay>();
+    wallpaper.setPropertyObject(wallpaper::PROPERTY_POINTER_INPUT_CALLBACK,
+                                std::make_shared<wallpaper::PointerInputCallback>([replay](bool) {
+                                    std::scoped_lock lock(replay->mutex);
+                                    replay->seen = true;
+                                    replay->changed.notify_all();
+                                }));
+    {
+        std::unique_lock lock(replay->mutex);
+        ASSERT_TRUE(replay->changed.wait_for(lock, std::chrono::seconds(5),
+                                             [&] { return replay->seen; }));
+    }
+    ASSERT_TRUE(wallpaper.beginSurfaceReconfigure());
+}
 } // namespace
 
 TEST(SceneSchema, MediaStateSurvivesTheSceneItArrivedBefore) {
@@ -4654,6 +4838,7 @@ TEST(SceneSchema, MediaStateSurvivesTheSceneItArrivedBefore) {
     ASSERT_FALSE(scene->runtime->NodeVisible("probe"));
 
     wallpaper::SceneWallpaperInputTestAccess::PostScene(wallpaper, scene);
+    WaitForPostedWork(wallpaper);
     wallpaper.shutdown();
 
     EXPECT_TRUE(scene->runtime->NodeVisible("probe"))
@@ -4680,10 +4865,42 @@ TEST(SceneSchema, WithdrawingConsentDropsWhatWasRetained) {
     ASSERT_NE(scene->runtime, nullptr);
 
     wallpaper::SceneWallpaperInputTestAccess::PostScene(wallpaper, scene);
+    WaitForPostedWork(wallpaper);
     wallpaper.shutdown();
 
     EXPECT_FALSE(scene->runtime->NodeVisible("probe"))
         << "consent was withdrawn and what was playing then was replayed anyway";
+}
+
+TEST(SceneSchema, NoFrameClockRunsWithoutAScene) {
+    // A surface still parsing, or one whose load failed, has nothing to draw.
+    // Its frame clock used to start with the renderer and tick at 30 fps for as
+    // long as the surface lived, posting draws that found no scene.
+    wallpaper::RendererCounters::SetEnabled(true);
+    wallpaper::SceneWallpaper wallpaper;
+    ASSERT_TRUE(wallpaper.init());
+    const auto wakeups = [&] {
+        std::array<uint64_t, OWE_RC_COUNT> values {};
+        wallpaper.counters(values.data(), values.size());
+        return values[OWE_RC_TIMER_WAKEUPS];
+    };
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    EXPECT_EQ(wakeups(), 0u) << "the frame clock ticked before any scene existed";
+
+    // Asked to play a source that yields no scene, the clock still has nothing
+    // to drive, so only the missing scene can be what keeps it stopped.
+    wallpaper::SceneWallpaperConfig config;
+    config.source = (std::filesystem::temp_directory_path() / "owe-no-such-project" /
+                     "project.json")
+                        .string();
+    config.fps    = 60;
+    config.paused = false;
+    wallpaper.applyConfig(config);
+    WaitForPostedWork(wallpaper);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    EXPECT_EQ(wakeups(), 0u) << "the frame clock ran for a load that produced no scene";
+    wallpaper.shutdown();
+    wallpaper::RendererCounters::SetEnabled(false);
 }
 
 TEST(SceneSchema, ASoundFollowsTheSliderValueTheUserActuallyHas) {

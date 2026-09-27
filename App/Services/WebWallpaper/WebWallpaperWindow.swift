@@ -103,7 +103,7 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
     private var lastLoadFinished: ContinuousClock.Instant?
     private weak var container: NSView?
     private var placeholder: NSImageView?
-    private var hostSuspended = false
+    private(set) var hostSuspended = false
     /// Invalidates an in-flight suspension poster when the decision changes.
     private var suspensionGeneration: UInt64 = 0
     var onFailure: (@MainActor (String) -> Void)?

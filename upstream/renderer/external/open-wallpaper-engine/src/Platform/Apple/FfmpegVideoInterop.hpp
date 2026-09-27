@@ -42,6 +42,16 @@ std::string DescribeAppleVideoFrame(const VideoTextureFrame& frame);
 // MTLTexture — and must be released exactly once with
 // ReleaseAppleVideoFrameLease once the GPU is finished with the frame.
 //
+// metal_command_queue decides when an NV12 conversion is finished. Given the
+// borrowed id<MTLCommandQueue> the caller's own GPU work is submitted to, the
+// conversion is committed there and not waited for: work the caller commits
+// to that queue afterwards is ordered after it, because command buffers on
+// one queue run in commit order and the destination is a hazard-tracked
+// texture. AppleVideoFrameLeaseConversion then reports the command buffer,
+// and the plane wrappers and pixel buffer the kernel reads stay retained
+// until it completes. With no queue the conversion completes before this
+// returns, for callers that read the texture on the CPU.
+//
 // reusable_destination is borrowed; success always takes an independent +1
 // retain, and failure never consumes the caller's retain. When it is given,
 // destination_allocation_failed reports whether the failure was the
@@ -60,9 +70,15 @@ void* CreateAppleVideoFrameLease(const VideoTextureFrame& frame,
                                  void* reusable_destination,
                                  std::string* error,
                                  bool* destination_allocation_failed = nullptr,
-                                 void** created_destination = nullptr);
+                                 void** created_destination = nullptr,
+                                 void* metal_command_queue = nullptr);
 // Borrowed id<MTLTexture> of a lease. Valid until the lease is released.
 void* AppleVideoFrameLeaseTexture(void* lease);
+// Borrowed id<MTLCommandBuffer> of a conversion committed without a CPU wait,
+// or null when the lease's texture was complete when the lease was made.
+// Valid until the lease is released; AppleVideoMetalTexturePool::Recycle takes
+// it to tell whether the destination may be reused yet.
+void* AppleVideoFrameLeaseConversion(void* lease);
 // Moves ownership of a recyclable conversion destination out of the lease, so
 // it can be handed to AppleVideoMetalTexturePool::Recycle. Returns null when
 // the lease holds no poolable destination; the lease never releases a
@@ -72,6 +88,10 @@ void ReleaseAppleVideoFrameLease(void* lease);
 // Releases a retained destination texture owned outside a lease, which is what
 // AppleVideoMetalTexturePool stores.
 void ReleaseAppleVideoMetalTexture(void* handle);
+// NV12 conversions, process-wide, whose completion the calling thread waited
+// for: the queue-less path of CreateAppleVideoFrameLease. A renderer passing
+// its frame queue never adds to it.
+[[nodiscard]] uint64_t AppleVideoConversionCpuWaits() noexcept;
 
 /// What one conversion pool has done. Counted per pool, which is per texture
 /// cache, which is per renderer instance.
@@ -167,15 +187,19 @@ struct AppleVideoConversionReservation {
     bool     first_in_flight_cap_report { false };
 };
 
-/// Imported frames one video texture can hold at once, and import submissions
-/// one texture cache can leave unretired.
+/// Imported frames one video texture can hold at once, and conversion
+/// submissions one texture cache can leave unretired.
 ///
 /// These are the two cache-side terms of the in-flight slot expectation; the
 /// third, the destination each consumer of a video texture retains, is only
 /// observable to the cache and reaches this layer already folded into
 /// `SetInFlightSlotExpectation`. Nothing here computes with them: they are
 /// published so the `ReserveFresh` contract above can state the structural
-/// bound, and so tests can assert against it.
+/// bound, and so tests can assert against it. An unretired submission is a
+/// conversion whose frame was dropped before the GPU finished it; the pool
+/// keeps its destination on loan until then (see `Recycle`). The GPU runs each
+/// conversion ahead of the frame committed after it, so in steady playback
+/// such a destination is retired by the next import.
 ///
 /// Both numbers are owned by `wallpaper::vulkan::TextureCache`, as
 /// `kMaxImportedVideoFramesPerVideoTex` and
@@ -223,7 +247,7 @@ public:
     void* Take(uint32_t width, uint32_t height);
     // Publishes how many conversion destinations the texture cache above it
     // can legitimately hold in flight right now. The pool cannot work this out
-    // for itself: it is the cache's pending import submissions, plus for every
+    // for itself: it is the cache's unretired conversion submissions, plus for every
     // live video texture its imported-frame cap and the destination each of
     // that texture's consumers retains, and only the cache observes the last
     // two. The budget floors it, so a pool that is never told keeps the
@@ -252,7 +276,7 @@ public:
     // recovered. Granting instead, the same shape converges: allocation stops
     // of its own accord and reuse carries playback indefinitely, because a
     // consumer retains one destination per slot and never a list. The bound
-    // is therefore pending import submissions, plus each live video texture's
+    // is therefore unretired conversion submissions, plus each live video texture's
     // imported-frame cap and its consumer count, which is what
     // `SetInFlightSlotExpectation` publishes; `in_flight_cap_breaches` counts
     // reservations made beyond it, so a breach means a destination that
@@ -275,12 +299,23 @@ public:
     void MarkGpuPending(void* destination) noexcept;
     // Ends a loan whose import never used the destination, releasing it.
     void EndLoan(void* retained_destination) noexcept;
-    // Offers a destination back now that the GPU has finished with it. The
-    // renderer calls this from the frame lease's deleter, which runs after the
-    // imported frame's last holder drops it — after the draw fence that
-    // sampled the frame signalled, and after the Vulkan image aliasing the
-    // texture was destroyed.
-    void Recycle(void* retained_destination) noexcept;
+    // Offers a destination back once the frame lease that referenced it has
+    // been dropped. The renderer calls this from the frame lease's deleter,
+    // which runs after the imported frame's last holder drops it — after the
+    // draw fence that sampled the frame signalled, and after that frame's hold
+    // on the Vulkan image aliasing the texture ended. `conversion` is the lease's
+    // AppleVideoFrameLeaseConversion, borrowed: while that command buffer has
+    // not completed the destination stays on loan, awaiting the GPU, and is
+    // recycled by a later pool call once it has. Never before.
+    void Recycle(void* retained_destination, void* conversion = nullptr) noexcept;
+    // Attaches an object whose lifetime must follow this destination's: it is
+    // dropped the moment the pool releases the destination (eviction, refusal,
+    // an ended loan, Clear or destruction) and never outlives it in the pool.
+    // The texture cache keeps the Vulkan image aliasing a destination here, so
+    // the alias is made once per destination rather than once per frame and
+    // cannot survive the texture it aliases.
+    void SetDestinationCompanion(void* destination, std::shared_ptr<void> companion);
+    [[nodiscard]] std::shared_ptr<void> DestinationCompanion(void* destination) const;
     // Drops cached destinations of every size other than this one, so a
     // resolution change stops holding shapes nothing requests any more.
     void RetainOnly(uint32_t width, uint32_t height) noexcept;

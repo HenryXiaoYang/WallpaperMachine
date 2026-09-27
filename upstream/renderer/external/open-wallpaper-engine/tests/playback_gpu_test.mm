@@ -13,6 +13,7 @@
 #include <cstring>
 #include <functional>
 #include <memory>
+#include <set>
 #include <stdexcept>
 #include <unordered_map>
 #include <unistd.h>
@@ -20,8 +21,10 @@
 #include <utility>
 
 #include "Image.hpp"
-#include "Interface/IShaderValueUpdater.h"
+#include "Core/RendererCounters.hpp"
+#include "Presentation/WallpaperScaling.hpp"
 #include "Runtime/RuntimeImageSource.hpp"
+#include "Scene/SceneWallpaper.hpp"
 #include "Platform/Apple/FfmpegVideoInterop.hpp"
 #include "Platform/Apple/SceneWallpaperBindings.h"
 #include "Shader/RustShaderBridge.hpp"
@@ -88,6 +91,7 @@ struct DispatchScope {
     uint64_t clears = 0;
     uint64_t render_passes = 0;
     uint64_t draws = 0;
+    uint64_t metal_image_imports = 0;
     VkBuffer watched_destination = VK_NULL_HANDLE;
     std::vector<VkBufferCopy> copies;
 
@@ -118,10 +122,12 @@ struct DispatchScope {
                                                        const VkAllocationCallbacks* alloc, VkImage* out) {
         auto& s = *current;
         for (auto* p = static_cast<const VkBaseInStructure*>(info->pNext); p; p = p->pNext) {
-            if (d == s.device && s.fail_import && p->sType == VK_STRUCTURE_TYPE_IMPORT_METAL_TEXTURE_INFO_EXT) {
+            if (d != s.device || p->sType != VK_STRUCTURE_TYPE_IMPORT_METAL_TEXTURE_INFO_EXT) continue;
+            if (s.fail_import) {
                 s.fail_import = false;
                 return VK_ERROR_OUT_OF_DEVICE_MEMORY;
             }
+            ++s.metal_image_imports;
         }
         return s.saved.vkCreateImage(d, info, alloc, out);
     }
@@ -240,6 +246,13 @@ public:
     }
     void Set(uint64_t generation, uint8_t y = 128, uint8_t u = 128, uint8_t v = 128,
              CFStringRef matrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2) {
+        // A decoder hands out a biplanar frame from a pool that never writes
+        // into a buffer someone still retains; the GPU conversion reads it
+        // after the import returns. Model that rather than rewriting a frame
+        // an import is still converting.
+        if (CVPixelBufferGetPlaneCount(buffer) == 2 && CFGetRetainCount(buffer) > 1) {
+            Resize(frame.width, frame.height, frame.pixel_format);
+        }
         frame.generation = generation;
         frame.pts_seconds = static_cast<double>(generation) / 60.0;
         CVBufferSetAttachment(buffer, kCVImageBufferYCbCrMatrixKey, matrix, kCVAttachmentMode_ShouldPropagate);
@@ -277,6 +290,8 @@ public:
     uint64_t loopCount() const override { return 0; }
     double frameDurationSeconds() const override { return frame_duration_seconds; }
     double frame_duration_seconds = 1.0 / 60.0;
+    video::VideoSourceStats stats {};
+    video::VideoSourceStats sourceStats() const override { return stats; }
 };
 
 struct TestUpdater final : IShaderValueUpdater {
@@ -494,6 +509,7 @@ protected:
         VkRequire(rr.command.Reset(), "reset command");
         VkRequire(rr.command.Begin(VkCommandBufferBeginInfo {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
                                                            .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}), "begin command");
+        device.tex_cache().RecordVideoFirstUseTransitions(rr.command);
     }
     void Upload() {
         Require(vertices->recordUpload(rr.command) && dynamic->recordUpload(rr.command), "record upload");
@@ -648,7 +664,10 @@ protected:
         }
         return expected;
     }
-    void Frame(std::span<VulkanPass* const> passes, bool batched = true) {
+    /// `graph` is the whole pass list when `passes` is only the part executed
+    /// this frame (static reuse leaves passes out); empty means the same list.
+    void Frame(std::span<VulkanPass* const> passes, bool batched = true,
+               std::span<VulkanPass* const> graph = {}) {
         // CPU writes precede command recording and the staging transaction.
         Require(device.tex_cache().BeginVideoFrameRecording(), "begin CPU frame scope");
         recording = true;
@@ -656,8 +675,9 @@ protected:
         VkRequire(rr.command.Reset(), "reset frame command");
         VkRequire(rr.command.Begin(VkCommandBufferBeginInfo {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
                                                            .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}), "begin frame command");
+        device.tex_cache().RecordVideoFirstUseTransitions(rr.command);
         Upload();
-        if (batched) VkRequire(CheckRecording(ExecutePreparedPasses(device, rr, passes, scratch)), "execute frame");
+        if (batched) VkRequire(CheckRecording(ExecutePreparedPasses(device, rr, passes, scratch, graph)), "execute frame");
         else for (auto* pass : passes) if (pass && pass->prepared()) Execute(*pass);
         Submit();
     }
@@ -717,7 +737,8 @@ protected:
                       const ImageParameters& target, VkFormat format, bool allow_direct = true) {
         final.setPresent(target);
         const std::array<VulkanPass*,3> sequence {&pre,&pass,&final};
-        Begin(); Require(UpdatePreparedPasses(device,rr,sequence),"presentation update"); Upload();
+        Begin(); Require(UpdatePreparedPasses(device,rr,sequence),"presentation update");
+        device.tex_cache().RecordVideoFirstUseTransitions(rr.command); Upload();
         const bool direct=allow_direct && pass.canPresentDirectly(rr,{target.extent.width,target.extent.height},format);
         if (direct) {
             VkRequire(CheckRecording(pass.executePresentation(device,rr,target,format)),"record private direct");
@@ -727,6 +748,38 @@ protected:
         }
         Submit();
         return direct;
+    }
+    /// The poster of what `PresentFrame` just put on a target of `extent`,
+    /// composed again by the same pass into an image of its own, the way the
+    /// renderer composes one: the drawable itself is never read.
+    Bytes ComposePoster(CustomShaderPass& pass, FinPass& final, PrePass& pre,
+                        VkExtent2D extent, VkFormat format, bool direct) {
+        const auto poster = PrivateTarget(extent.width, extent.height, format);
+        const VkRenderPass render_pass =
+            direct ? pass.presentationCopySourcePass() : final.copySourcePass();
+        Require(render_pass != VK_NULL_HANDLE, "copy-source render pass");
+        const VkImageView view = poster.view;
+        const VkFramebufferCreateInfo info {.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+            .renderPass = render_pass, .attachmentCount = 1, .pAttachments = &view,
+            .width = extent.width, .height = extent.height, .layers = 1};
+        vvk::Framebuffer framebuffer;
+        VkRequire(device.handle().CreateFramebuffer(info, framebuffer), "create poster framebuffer");
+        const std::array<VulkanPass*,3> sequence {&pre,&pass,&final};
+        Begin(); Require(UpdatePreparedPasses(device,rr,sequence),"poster update");
+        device.tex_cache().RecordVideoFirstUseTransitions(rr.command); Upload();
+        VkRequire(CheckRecording(direct
+                      ? pass.recordPresentation(device, rr, render_pass, *framebuffer, extent)
+                      : final.recordComposition(rr, render_pass, *framebuffer, extent)),
+                  "record poster");
+        VkImageMemoryBarrier barrier {.sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .srcAccessMask=VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,.dstAccessMask=VK_ACCESS_SHADER_READ_BIT,
+            .oldLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,.newLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            .srcQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,
+            .image=poster.handle,.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1}};
+        rr.command.PipelineBarrier(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,0,barrier);
+        Submit();
+        return Read(poster);
     }
     static Bytes NormalizeColorBytes(Bytes raw, VkFormat format) {
         if (format == VK_FORMAT_B8G8R8A8_UNORM)
@@ -791,6 +844,65 @@ TEST_F(PlaybackGPU, SameGenerationSkipsConversion) {
     EXPECT_EQ(Read(pass.desc().vk_output), Reference(*source));
     Bind(pass, old); Draw(pass);
     EXPECT_EQ(Read(pass.desc().vk_output), expected);
+}
+
+// Counting can be switched on and off while a decoder runs. Neither the work
+// done before counting started nor the work done while it was off may be
+// reported by the first counted frame; later frames report only their own.
+TEST_F(PlaybackGPU, TurningCountersOnDoesNotReportWorkAlreadyDone) {
+    auto source = std::make_shared<SyntheticVideo>();
+    source->stats.decoded_frames = 40;
+    source->stats.seek_requests = 3;
+    source->Set(9, 40, 90, 170);
+    auto ref = Register("baseline", source);
+
+    RendererCounters counters;
+    struct CountingOff {
+        TextureCache& cache;
+        ~CountingOff() { cache.SetCounters(nullptr); RendererCounters::SetEnabled(false); }
+    } counting_off {device.tex_cache()};
+    device.tex_cache().SetCounters(&counters);
+    RendererCounters::SetEnabled(true);
+    ASSERT_TRUE(Update("baseline", ref));
+    EXPECT_EQ(counters.Get(OWE_RC_VIDEO_DECODE_OUTPUTS), 0u);
+    EXPECT_EQ(counters.Get(OWE_RC_VIDEO_SEEKS), 0u);
+    EXPECT_EQ(counters.Get(OWE_RC_VIDEO_FRAMES_SELECTED), 0u);
+    EXPECT_EQ(counters.Get(OWE_RC_VIDEO_FRAMES_SKIPPED), 0u);
+
+    source->stats.decoded_frames = 42;
+    source->stats.seek_requests = 4;
+    source->Set(11, 180, 170, 80);
+    ASSERT_TRUE(Update("baseline", ref));
+    EXPECT_EQ(counters.Get(OWE_RC_VIDEO_DECODE_OUTPUTS), 2u);
+    EXPECT_EQ(counters.Get(OWE_RC_VIDEO_SEEKS), 1u);
+    EXPECT_EQ(counters.Get(OWE_RC_VIDEO_FRAMES_SELECTED), 1u);
+    EXPECT_EQ(counters.Get(OWE_RC_VIDEO_FRAMES_SKIPPED), 1u);
+
+    // Off for a while: the decoder keeps producing and frames keep changing.
+    RendererCounters::SetEnabled(false);
+    source->stats.decoded_frames = 60;
+    source->stats.seek_requests = 7;
+    source->Set(30, 60, 100, 150);
+    ASSERT_TRUE(Update("baseline", ref));
+    source->Set(35, 70, 110, 140);
+    ASSERT_TRUE(Update("baseline", ref));
+
+    RendererCounters::SetEnabled(true);
+    source->stats.decoded_frames = 61;
+    source->Set(36, 80, 120, 130);
+    ASSERT_TRUE(Update("baseline", ref));
+    EXPECT_EQ(counters.Get(OWE_RC_VIDEO_DECODE_OUTPUTS), 2u) << "work done while off was reported";
+    EXPECT_EQ(counters.Get(OWE_RC_VIDEO_SEEKS), 1u);
+    EXPECT_EQ(counters.Get(OWE_RC_VIDEO_FRAMES_SELECTED), 1u);
+    EXPECT_EQ(counters.Get(OWE_RC_VIDEO_FRAMES_SKIPPED), 1u)
+        << "frames shown while counting was off were reported as skipped";
+
+    source->stats.decoded_frames = 63;
+    source->Set(38, 90, 130, 120);
+    ASSERT_TRUE(Update("baseline", ref));
+    EXPECT_EQ(counters.Get(OWE_RC_VIDEO_DECODE_OUTPUTS), 4u);
+    EXPECT_EQ(counters.Get(OWE_RC_VIDEO_FRAMES_SELECTED), 2u);
+    EXPECT_EQ(counters.Get(OWE_RC_VIDEO_FRAMES_SKIPPED), 2u);
 }
 
 TEST_F(PlaybackGPU, SteadyGenerationsReuseRetiredDestinations) {
@@ -1461,6 +1573,145 @@ TEST_F(PlaybackGPU, MetalConversionMatchesTheCpuColorReference) {
     }
 }
 
+TEST_F(PlaybackGPU, NewVideoFramesNeitherWaitOnTheCpuNorSubmitOutsideTheFrame) {
+    // The Compatibility path, one draw per new NV12 generation. A new frame
+    // must reach the GPU inside the frame's own submission: no second submit
+    // for its layout, no CPU wait for its conversion, and the Vulkan images
+    // that alias the pooled conversion destinations are made once per
+    // destination rather than once per frame. Each generation must still
+    // carry its own pixels, checked against the CPU colour reference rather
+    // than against another GPU conversion.
+    auto source = std::make_shared<SyntheticVideo>();
+    source->Set(1, 90, 110, 150);
+    const std::string key = "in-frame";
+    auto ref = Register(key, source);
+    auto& pass = Pass(); Bind(pass, ref); Draw(pass);
+    const auto params = video::MakeYuvColorParams(
+        { .matrix = video::YuvMatrix::Bt709, .range = video::YuvRange::Full, .bit_depth = 8 });
+    const auto before = device.tex_cache().VideoSubmissionStats();
+    constexpr uint64_t kFrames = 24;
+    uint64_t frame_submits = 0;
+    uint64_t frame_waits = 0;
+    uint64_t image_imports = 0;
+    const uint64_t cpu_waits_before = video::AppleVideoConversionCpuWaits();
+    for (uint64_t g = 2; g < 2 + kFrames; ++g) {
+        const auto y = static_cast<uint8_t>(30 + (g * 23) % 190);
+        const auto u = static_cast<uint8_t>(60 + (g * 17) % 130);
+        const auto v = static_cast<uint8_t>(50 + (g * 29) % 150);
+        source->Set(g, y, u, v);
+        {
+            DispatchScope scope(device);
+            ASSERT_TRUE(Update(key, ref, g / 60.0)) << "generation " << g;
+            Bind(pass, ref); Draw(pass);
+            frame_submits += scope.submits;
+            frame_waits += scope.waits;
+            image_imports += scope.metal_image_imports;
+        }
+        // BGRA, as the conversion wrote it.
+        const Bytes pixels = Read(ref.getActive());
+        const video::Rgb8 expected = video::ConvertYuvCodeToRgb8(params, y, u, v);
+        ASSERT_EQ(pixels.size(), size_t(source->frame.width) * source->frame.height * 4);
+        for (size_t i = 0; i < pixels.size(); i += 4) {
+            const bool near = std::abs(int(pixels[i + 2]) - int(expected.red)) <= 2 &&
+                              std::abs(int(pixels[i + 1]) - int(expected.green)) <= 2 &&
+                              std::abs(int(pixels[i]) - int(expected.blue)) <= 2 &&
+                              pixels[i + 3] == 255;
+            if (!near) {
+                ADD_FAILURE() << "generation " << g << " pixel " << i / 4 << ": BGRA "
+                              << int(pixels[i]) << ',' << int(pixels[i + 1]) << ','
+                              << int(pixels[i + 2]) << ',' << int(pixels[i + 3]) << " expected RGB "
+                              << int(expected.red) << ',' << int(expected.green) << ','
+                              << int(expected.blue);
+                break;
+            }
+        }
+        EXPECT_EQ(Read(pass.desc().vk_output), NormalizeColorBytes(pixels, VK_FORMAT_B8G8R8A8_UNORM))
+            << "generation " << g;
+    }
+    const auto after = device.tex_cache().VideoSubmissionStats();
+    const uint64_t cpu_waits = video::AppleVideoConversionCpuWaits() - cpu_waits_before;
+    RecordProperty("frame_submits", std::to_string(frame_submits));
+    RecordProperty("frame_fence_waits", std::to_string(frame_waits));
+    RecordProperty("metal_image_imports", std::to_string(image_imports));
+    RecordProperty("conversion_cpu_waits", std::to_string(cpu_waits));
+    EXPECT_EQ(after.new_imports - before.new_imports, kFrames);
+    EXPECT_EQ(after.conversion_calls - before.conversion_calls, kFrames);
+    EXPECT_EQ(cpu_waits, 0u) << "a conversion on the frame path must never be waited for on the CPU";
+    EXPECT_EQ(frame_submits, kFrames) << "each new frame must be exactly one submission: its own";
+    EXPECT_EQ(frame_waits, kFrames) << "the only fence waited on is each frame's own";
+    EXPECT_LE(image_imports, after.converted_destinations_created)
+        << "one Vulkan image per pooled destination, not one per frame";
+    EXPECT_LT(image_imports, kFrames);
+    EXPECT_EQ(after.imported_images_created - before.imported_images_created, image_imports);
+    EXPECT_EQ(after.imported_images_created + after.imported_images_reused -
+                  before.imported_images_created - before.imported_images_reused,
+              kFrames);
+}
+
+TEST_F(PlaybackGPU, ADroppedFrameDestinationIsNotReusedBeforeItsConversionRuns) {
+    // A conversion is committed without a CPU wait, so a frame can be dropped
+    // before the GPU has run it — evicted unseen, or failed after the lease
+    // existed. Its destination must not be lent to another import until that
+    // command buffer has completed. A queue held on an event makes "not yet"
+    // deterministic instead of a race against a fast GPU.
+    id<MTLDevice> metal = MTLCreateSystemDefaultDevice();
+    ASSERT_NE(metal, nil);
+    id<MTLCommandQueue> queue = [metal newCommandQueue];
+    id<MTLSharedEvent>  gate = [metal newSharedEvent];
+    id<MTLCommandBuffer> blocker = [queue commandBuffer];
+    [blocker encodeWaitForEvent:gate value:1];
+    [blocker commit];
+    struct Release {
+        id<MTLSharedEvent> gate;
+        ~Release() { gate.signaledValue = 1; }
+    } release { gate };
+
+    auto source = std::make_shared<SyntheticVideo>();
+    source->Set(1, 60, 150, 110);
+    const auto expected = Reference(*source, false);
+    const uint32_t width = source->frame.width;
+    const uint32_t height = source->frame.height;
+    video::AppleVideoMetalTexturePool pool((__bridge void*)metal);
+    const auto reservation = pool.ReserveFresh(width, height);
+    ASSERT_TRUE(reservation.granted);
+    const uint64_t waits_before = video::AppleVideoConversionCpuWaits();
+    std::string error;
+    void*       created = nullptr;
+    void*       lease = video::CreateAppleVideoFrameLease(source->frame, (__bridge void*)metal,
+                                                          nullptr, &error, nullptr, &created,
+                                                          (__bridge void*)queue);
+    ASSERT_NE(lease, nullptr) << error;
+    ASSERT_NE(created, nullptr);
+    EXPECT_EQ(video::AppleVideoConversionCpuWaits(), waits_before)
+        << "given a queue, the import must return without waiting for the GPU";
+    id<MTLCommandBuffer> conversion =
+        (__bridge id<MTLCommandBuffer>)video::AppleVideoFrameLeaseConversion(lease);
+    ASSERT_NE(conversion, nil);
+    ASSERT_LT(conversion.status, MTLCommandBufferStatusCompleted);
+    pool.CommitFresh(reservation, created);
+    pool.MarkGpuPending(created);
+
+    // The frame goes before its conversion has run.
+    pool.Recycle(video::TakeAppleVideoFrameLeaseDestination(lease), (__bridge void*)conversion);
+    video::ReleaseAppleVideoFrameLease(lease);
+    const auto parked = pool.Stats();
+    EXPECT_EQ(parked.cached_texture_count, 0u);
+    EXPECT_EQ(parked.awaiting_gpu_bytes, parked.live_bytes);
+    EXPECT_GT(parked.live_bytes, 0u);
+    EXPECT_EQ(pool.Take(width, height), nullptr)
+        << "a destination the GPU has not written yet must not be lent out";
+
+    gate.signaledValue = 1;
+    [conversion waitUntilCompleted];
+    void* reused = pool.Take(width, height);
+    ASSERT_EQ(reused, created) << "once converted, the same destination is reused";
+    Bytes pixels(size_t(width) * height * 4);
+    [(__bridge id<MTLTexture>)reused getBytes:pixels.data() bytesPerRow:width * 4
+                                   fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+    EXPECT_EQ(pixels, expected) << "the parked destination holds its own conversion";
+    pool.EndLoan(reused);
+}
+
 TEST_F(PlaybackGPU, RecordedConsumersSurviveCacheEviction) {
     auto source = std::make_shared<SyntheticVideo>();
     auto ref = Register("six", source);
@@ -1634,29 +1885,40 @@ TEST_F(PlaybackGPU, RecordingDiscardAndSubmissionRecoveryKeepOwners) {
         Complete(); EXPECT_FALSE(scope.fail_reset);
     }
     Draw(pass); EXPECT_EQ(Read(pass.desc().vk_output), expected);
-    // Import submissions own independent commands/fences. An unsuccessful
-    // transition must not wait on its unsignalled fence, and a completed fence
-    // whose Reset failed must be recreated before a later transition.
-    ASSERT_TRUE(device.tex_cache().WaitForPendingUploads());
-    source->Set(20, 170, 90, 180);
+    // An import submits nothing of its own. A never-used image's first-use
+    // transition goes into the frame; a frame that recorded it and was then
+    // discarded never ran it, so the next frame must record it again, and a
+    // submitted one is not repeated. A fresh size forces a fresh destination,
+    // hence a fresh image that has never been transitioned.
+    auto fresh = std::make_shared<SyntheticVideo>(16, 16); fresh->Set(1, 170, 90, 180);
+    ImageSlotsRef fresh_ref;
+    {
+        DispatchScope scope(device);
+        fresh_ref = Register("recovery-fresh", fresh);
+        EXPECT_EQ(scope.submits, 0u) << "an import must not submit work of its own";
+        EXPECT_EQ(scope.waits, 0u) << "an import must not wait on a fence";
+    }
+    const auto converted = Reference(*fresh);
+    const Color fresh_color {converted[0], converted[1], converted[2], converted[3]};
+    const auto transitions = [&] {
+        return device.tex_cache().VideoSubmissionStats().first_use_transitions_recorded;
+    };
+    const auto before_frames = transitions();
+    Bind(pass, fresh_ref);
+    Begin(); ASSERT_TRUE(pass.updateFrame(device, rr)); Upload(); Execute(pass);
+    const auto discarded = transitions() - before_frames;
+    ASSERT_GT(discarded, 0u) << "the fresh image's transition belongs in the first frame";
     {
         DispatchScope scope(device); scope.fail_submit = true;
-        EXPECT_FALSE(Update("recovery", ref));
-        EXPECT_FALSE(scope.fail_submit);
-        EXPECT_EQ(scope.waits, 0u);
+        EXPECT_EQ(SubmitOnly(), VK_ERROR_OUT_OF_HOST_MEMORY);
+        Abandon();
     }
-    Bind(pass, ref); Draw(pass); EXPECT_EQ(Read(pass.desc().vk_output), expected);
-    ASSERT_TRUE(Update("recovery", ref));
-    {
-        DispatchScope scope(device); scope.fail_reset = true;
-        EXPECT_FALSE(device.tex_cache().WaitForPendingUploads());
-        EXPECT_FALSE(scope.fail_reset);
-    }
-    const auto allocations = device.tex_cache().VideoSubmissionStats().fence_allocations;
-    source->Set(21, 120, 180, 80);
-    ASSERT_TRUE(Update("recovery", ref));
-    EXPECT_GT(device.tex_cache().VideoSubmissionStats().fence_allocations, allocations);
-    Bind(pass, ref); Draw(pass); EXPECT_EQ(Read(pass.desc().vk_output), Reference(*source));
+    Draw(pass); ExpectSolid(Read(pass.desc().vk_output), fresh_color);
+    EXPECT_EQ(transitions() - before_frames, 2 * discarded)
+        << "a discarded frame's first-use transitions must be recorded again";
+    Draw(pass); ExpectSolid(Read(pass.desc().vk_output), fresh_color);
+    EXPECT_EQ(transitions() - before_frames, 2 * discarded)
+        << "a submitted first-use transition must not be recorded twice";
 }
 
 TEST_F(PlaybackGPU, ClearInvalidatesOldPoolWithoutInvalidatingOwners) {
@@ -1698,10 +1960,13 @@ TEST_F(PlaybackGPU, ClearInvalidatesOldPoolWithoutInvalidatingOwners) {
         auto terminal = std::make_unique<TextureCache>(device);
         auto input = std::make_shared<SyntheticVideo>();
         auto held = Register("terminal-unknown", input, terminal.get());
-        // The real queue is idle, but the import remains logically pending.
-        VkRequire(device.handle().WaitIdle(), "real idle before simulated wait error");
+        // A submitted frame never completed: the frames it pinned are still
+        // logically on the GPU, and the queue then fails to prove otherwise.
+        Require(terminal->BeginVideoFrameRecording(), "begin the unfinished frame");
+        terminal->PinVideoFrame(held);
+        terminal->MarkVideoFrameSubmitted();
         held = {};
-        DispatchScope scope(device); scope.timeout_wait = true; scope.idle_result = VK_ERROR_UNKNOWN;
+        DispatchScope scope(device); scope.idle_result = VK_ERROR_UNKNOWN;
         terminal.reset();
         _exit(74);
     }, ::testing::ExitedWithCode(73), "");
@@ -1824,7 +2089,11 @@ TEST_F(PlaybackGPU, FrameUpdatesAreVisibleBeforeUpload) {
             EXPECT_EQ(bytes[i], 0u); EXPECT_EQ(bytes[i+1], 0u); EXPECT_EQ(bytes[i+2], x < 16 ? 255u : 0u);
         }
         pass.desc().visibility_node->SetVisible(false); Draw(pass, batched);
-        EXPECT_EQ(updater->calls, 2u); ExpectSolid(Read(pass.desc().vk_output), {0,0,0,0});
+        EXPECT_EQ(updater->calls, 2u);
+        // Stepped one pass at a time, a hidden pass records its first-use clear
+        // itself. Batched, nothing reads this output, so the clear is left out;
+        // what a reader sees is HiddenClearsAreRecordedOnlyWhereSomethingReadsThem.
+        if (! batched) ExpectSolid(Read(pass.desc().vk_output), {0,0,0,0});
         updater->geometry = {};
     }
 }
@@ -1851,12 +2120,13 @@ TEST_F(PlaybackGPU, GraphOrderingAndDescriptorWritesPreservePixels) {
         {
             DispatchScope scope(device); Frame(sequence);
             EXPECT_EQ(scope.pushes, 3u);
+            EXPECT_EQ(scope.clears, 0u) << "nothing reads the hidden pass's output, so its clear "
+                                           "must not be recorded";
         }
         ExpectSolid(Read(a.desc().vk_output), {0,255,0,255});
         ExpectSolid(Read(b.desc().vk_output), {0,255,0,255});
         ExpectSolid(Read(copy.desc().vk_dst), {0,255,0,255});
         ExpectSolid(Read(consumer.desc().vk_output), {0,255,0,255});
-        ExpectSolid(Read(hidden.desc().vk_output), {0,0,0,0});
         EXPECT_EQ(b.desc().vk_texture_bindings[0].image_descriptor_type, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE);
         EXPECT_GE(b.desc().vk_texture_bindings[0].sampler_binding, 0);
         for (bool uniform : {false, true}) {
@@ -1874,6 +2144,104 @@ TEST_F(PlaybackGPU, GraphOrderingAndDescriptorWritesPreservePixels) {
         }
     }
 }
+// The batched executor leaves a hidden layer's first-use clear out only when
+// nothing can see the target. Every kind of reader keeps it, and a reader
+// then samples the clear, not the pixels the layer drew before it was hidden.
+TEST_F(PlaybackGPU, HiddenClearsAreRecordedOnlyWhereSomethingReadsThem) {
+    const auto drawn_then_hidden = [&](std::string output = {},
+                                       VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT)
+        -> CustomShaderPass& {
+        auto& pass = Pass(false, false, output, false, samples);
+        Draw(pass);
+        ExpectSolid(Read(pass.desc().vk_output), {0,255,0,255});
+        pass.desc().visibility_node->SetVisible(false);
+        return pass;
+    };
+    const auto reader_of = [&](CustomShaderPass& source) -> CustomShaderPass& {
+        auto& reader = Pass(true, false);
+        ImageSlotsRef ref; ref.slots = {source.desc().vk_output}; Bind(reader, ref);
+        return reader;
+    };
+    const auto clears = [&](std::span<VulkanPass* const> passes,
+                            std::span<VulkanPass* const> graph = {}) {
+        DispatchScope scope(device); Frame(passes, true, graph);
+        return scope.clears;
+    };
+    for (auto samples : {VK_SAMPLE_COUNT_1_BIT, VK_SAMPLE_COUNT_4_BIT}) {
+        if (!(device.limits().framebufferColorSampleCounts & samples)) {
+            RecordProperty("msaa4_variant", "not supported; single-sample cases still required"); continue;
+        }
+        SCOPED_TRACE(samples == VK_SAMPLE_COUNT_1_BIT ? "single-sample source" : "4x MSAA source");
+        auto& hidden = drawn_then_hidden({}, samples);
+        auto& reader = reader_of(hidden);
+        std::array<VulkanPass*, 2> sequence {&hidden, &reader};
+        EXPECT_EQ(clears(sequence), samples == VK_SAMPLE_COUNT_1_BIT ? 1u : 2u)
+            << "a visible reader later in the frame keeps the clear (resolve and MSAA image)";
+        ExpectSolid(Read(reader.desc().vk_output), {0,0,0,0});
+    }
+    {
+        SCOPED_TRACE("a reader earlier in the frame samples what the previous frame's clear left");
+        auto& hidden = drawn_then_hidden();
+        auto& reader = reader_of(hidden);
+        reader.desc().visibility_node->SetVisible(false);
+        std::array<VulkanPass*, 2> sequence {&reader, &hidden};
+        EXPECT_EQ(clears(sequence), 1u)
+            << "kept while the earlier reader is hidden too; nothing reads the reader's own output";
+        reader.desc().visibility_node->SetVisible(true);
+        EXPECT_EQ(clears(sequence), 1u);
+        ExpectSolid(Read(reader.desc().vk_output), {0,0,0,0});
+    }
+    {
+        SCOPED_TRACE("a later reader that is hidden sees nothing now and gets the clear when it draws");
+        auto& hidden = drawn_then_hidden();
+        auto& reader = reader_of(hidden);
+        reader.desc().visibility_node->SetVisible(false);
+        std::array<VulkanPass*, 2> sequence {&hidden, &reader};
+        EXPECT_EQ(clears(sequence), 0u);
+        reader.desc().visibility_node->SetVisible(true);
+        EXPECT_EQ(clears(sequence), 1u);
+        ExpectSolid(Read(reader.desc().vk_output), {0,0,0,0});
+    }
+    {
+        SCOPED_TRACE("a copy that reads the target, even one left out of this frame's execution");
+        auto& hidden = drawn_then_hidden();
+        const auto source = hidden.desc().output;
+        CopyPass copy(CopyPass::Desc {.src = source, .dst = Target()});
+        copy.prepare(scene, device, rr);
+        ASSERT_TRUE(copy.prepared());
+        std::array<VulkanPass*, 1> executed {&hidden};
+        std::array<VulkanPass*, 2> graph {&hidden, &copy};
+        EXPECT_EQ(clears(executed, graph), 1u);
+        ExpectSolid(Read(hidden.desc().vk_output), {0,0,0,0});
+        EXPECT_EQ(clears(graph), 1u);
+        ExpectSolid(Read(copy.desc().vk_dst), {0,0,0,0});
+    }
+    {
+        SCOPED_TRACE("a later pass that draws over the target without clearing it loads it");
+        auto& hidden = drawn_then_hidden();
+        // Something else in between, so the clear is an isolated one and not
+        // the opening of the loading draw's own render pass.
+        auto& between = Pass(false, false);
+        auto& over = Pass(false, false, hidden.desc().output, false, VK_SAMPLE_COUNT_1_BIT, {},
+                          [](CustomShaderPass::Desc& desc) {
+                              desc.preserve_target_contents = true; desc.clear_on_first_use = false;
+                          });
+        std::array<VulkanPass*, 3> sequence {&hidden, &between, &over};
+        EXPECT_EQ(clears(sequence), 1u);
+        over.desc().visibility_node->SetVisible(false);
+        EXPECT_EQ(clears(sequence), 0u) << "the loading draw is hidden too: nothing reads either";
+    }
+    {
+        SCOPED_TRACE("the scene output is always read after the frame");
+        scene.renderTargets[std::string(SpecTex_Default)] = SceneRenderTarget {.width = 32, .height = 32};
+        scene.clearColor = {0,0,1};
+        auto& hidden = drawn_then_hidden(std::string(SpecTex_Default));
+        std::array<VulkanPass*, 1> sequence {&hidden};
+        EXPECT_EQ(clears(sequence), 1u);
+        ExpectSolid(Read(hidden.desc().vk_output), {0,0,255,255});
+    }
+}
+
 TEST_F(PlaybackGPU, AttachmentToFinalPreservesNonuniformPixelsAcrossReuse) {
     const std::string output(SpecTex_Default);
     scene.renderTargets[output] = SceneRenderTarget {.width = 33, .height = 19};
@@ -2181,6 +2549,52 @@ TEST_F(PlaybackGPU, ClearLookaheadStopsAtPassBoundariesAndUnequalClearColors) {
     CompareClearPaths(load,target,0);
 }
 
+// A composite cleared to transparent, then drawn into: opening the first draw
+// with the same transparent clear leaves exactly the bytes the clear followed
+// by a loading draw left, and the separate transfer clear is then dropped.
+TEST_F(PlaybackGPU, FirstDrawAfterATransparentClearOpensWithItByteForByte) {
+    const auto name = Target();
+    auto& stale = Pass(false, false, name);
+    auto pre_owner = std::make_unique<PrePass>(PrePass::Desc {.result = name, .transparent = true});
+    pre_owner->prepare(scene, device, rr);
+    ASSERT_TRUE(pre_owner->prepared());
+    auto& pre = *pre_owner; auxiliary_passes.push_back(std::move(pre_owner));
+    const auto shader = Compile(false, false, false, "vec4(1.0,0.0,0.0,1.0)");
+    const auto left_half = [](CustomShaderPass& pass) {
+        const std::array<float,8> positions {-1,-1,0,-1,-1,1,0,1};
+        Require(pass.desc().node->Mesh()->GetVertexArray(0).SetVertexs(0, positions), "left-half quad");
+        pass.desc().node->Mesh()->SetDirty();
+    };
+    auto& loading = Pass(false, false, name, true, VK_SAMPLE_COUNT_1_BIT, shader,
+        [](auto& desc) { desc.preserve_target_contents = true; desc.clear_on_first_use = false; });
+    auto& opening = Pass(false, false, name, true, VK_SAMPLE_COUNT_1_BIT, shader,
+        [](auto& desc) { desc.preserve_target_contents = false; desc.clear_on_first_use = true; });
+    left_half(loading); left_half(opening);
+    const auto result = loading.desc().vk_output;
+
+    // Whatever the target held before must not show through either way.
+    Draw(stale); ExpectSolid(Read(result), {0,255,0,255});
+    std::array<VulkanPass*, 2> before {&pre, &loading};
+    {
+        DispatchScope scope(device); Frame(before);
+        EXPECT_EQ(scope.clears, 1u) << "a loading draw keeps the separate clear";
+    }
+    const auto expected = Read(result);
+    for (uint32_t y = 0; y < 32; ++y) for (uint32_t x = 0; x < 32; ++x) {
+        const auto i = (y * 32 + x) * 4;
+        const Color pixel {expected[i], expected[i+1], expected[i+2], expected[i+3]};
+        EXPECT_EQ(pixel, (x < 16 ? Color {255,0,0,255} : Color {0,0,0,0})) << x << ',' << y;
+    }
+
+    Draw(stale); ExpectSolid(Read(result), {0,255,0,255});
+    std::array<VulkanPass*, 2> after {&pre, &opening};
+    {
+        DispatchScope scope(device); Frame(after);
+        EXPECT_EQ(scope.clears, 0u) << "the draw's own clear makes the separate one redundant";
+    }
+    EXPECT_EQ(Read(result), expected);
+}
+
 TEST_F(PlaybackGPU, ClearLookaheadRejectsViewMipMsaaAndAliasBoundaries) {
     const std::string output(SpecTex_Default);
     scene.renderTargets[output]=SceneRenderTarget {.width=32,.height=32};
@@ -2360,6 +2774,139 @@ TEST_F(PlaybackGPU, DirectFallbackTransitionsPreserveFullFramesAndClearBackgroun
     const auto larger=PrivateTarget(35,21,VK_FORMAT_R8G8B8A8_UNORM);
     EXPECT_FALSE(PresentFrame(writer,final,pre,larger,VK_FORMAT_R8G8B8A8_UNORM));
     compare(true);
+}
+
+// The plain-video scene's one layer, as production builds it, presented
+// straight from its source through the final composition's viewport and
+// scissor. It must leave exactly the bytes the copy followed by the final
+// composition leaves, in every scaling mode, up and down, and on the frames
+// where it cannot it must fall back to that path. Either way, a poster
+// composed on request must be exactly the bytes the target received.
+TEST_F(PlaybackGPU, PlainVideoPresentsThroughTheFinalViewportByteForByte) {
+    std::string error;
+    auto node = SceneWallpaperInputTestAccess::CreateVideoProjectNode("synthetic/video.mp4", &error);
+    ASSERT_NE(node, nullptr) << error;
+    nodes.push_back(node);
+    const std::string output(SpecTex_Default);
+    // Even, so a 2x reduction puts every sample exactly on a texel edge.
+    constexpr uint32_t kWidth = 38, kHeight = 22;
+    scene.renderTargets[output] = SceneRenderTarget {.width = kWidth, .height = kHeight};
+    scene.clearColor = {0.25f, 0.5f, 0.75f};
+    // Distinct neighbouring texels, so any difference in which texels reach a
+    // target pixel, or how they are weighted, shows up.
+    const auto frame_shader = Compile(false, false, false,
+        "vec4(fract(gl_FragCoord.x*0.137+gl_FragCoord.y*0.011), fract(gl_FragCoord.y*0.291),"
+        " fract((gl_FragCoord.x+gl_FragCoord.y)*0.071), 1.0)");
+    auto& decoded = Pass(false, false, Target(kWidth, kHeight), false, VK_SAMPLE_COUNT_1_BIT, frame_shader);
+    auto& smaller = Pass(false, false, Target(kWidth - 2, kHeight), false, VK_SAMPLE_COUNT_1_BIT, frame_shader);
+    Draw(decoded); Draw(smaller);
+    auto& pre = ClearPass(output);
+    // The same texels in the BGRA layout imported video frames arrive in.
+    const auto decoded_bgra = PrivateTarget(kWidth, kHeight, VK_FORMAT_B8G8R8A8_UNORM);
+    {
+        auto& writer = Pass(false, false, Target(kWidth, kHeight), false, VK_SAMPLE_COUNT_1_BIT,
+                            frame_shader,
+                            [](auto& d) { d.presentation_format = VK_FORMAT_B8G8R8A8_UNORM; });
+        auto& copy = Final(decoded_bgra, VK_FORMAT_B8G8R8A8_UNORM); ASSERT_TRUE(copy.prepared());
+        ASSERT_TRUE(PresentFrame(writer, copy, pre, decoded_bgra, VK_FORMAT_B8G8R8A8_UNORM));
+        ASSERT_EQ(NormalizeColorBytes(Read(decoded_bgra), VK_FORMAT_B8G8R8A8_UNORM),
+                  Read(decoded.desc().vk_output));
+    }
+    // Decoded frames are sampled linearly; the nearest variant proves the
+    // source is resampled the way the copy is, not the way the source says.
+    const auto make_sampler = [&](VkFilter filter) {
+        const VkSamplerCreateInfo info {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+            .magFilter = filter, .minFilter = filter,
+            .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+            .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .maxAnisotropy = 1.0f, .compareOp = VK_COMPARE_OP_NEVER, .maxLod = 1.0f,
+            .borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK};
+        vvk::Sampler sampler;
+        VkRequire(device.handle().CreateSampler(info, sampler), "create frame sampler");
+        return sampler;
+    };
+    const vvk::Sampler linear = make_sampler(VK_FILTER_LINEAR);
+    const vvk::Sampler nearest = make_sampler(VK_FILTER_NEAREST);
+    const auto as_frame = [](ImageParameters image, VkSampler sampler) {
+        image.sampler = sampler;
+        ImageSlotsRef ref; ref.slots = {image}; return ref;
+    };
+
+    constexpr VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;
+    CustomShaderPass::Desc desc;
+    desc.node = node.get(); desc.visibility_node = node.get(); desc.output = output;
+    desc.textures = {""};
+    desc.presentation_format = format;
+    desc.presents_through_final_viewport = true;
+    auto owned = std::make_unique<CustomShaderPass>(desc);
+    // What the graph gives the scene output's first writer.
+    owned->desc().clear_on_first_use = true;
+    owned->desc().write_alpha = false;
+    owned->prepare(scene, device, rr);
+    ASSERT_TRUE(owned->prepared());
+    auto& video = *owned; owned_passes.push_back(std::move(owned));
+
+    struct Case { const char* name; WallpaperScalingMode mode; uint32_t w, h; double display_scale, user_scale; };
+    const std::array cases {
+        Case {"fit, letterboxed, enlarged", WallpaperScalingMode::FIT, 64, 64, 1.0, 1.0},
+        Case {"fill, cropped, enlarged", WallpaperScalingMode::FILL, 64, 64, 1.0, 1.0},
+        Case {"stretch, exactly halved", WallpaperScalingMode::STRETCH, 19, 11, 1.0, 1.0},
+        Case {"stretch, uneven reduction", WallpaperScalingMode::STRETCH, 27, 17, 1.0, 1.0},
+        Case {"stretch, one and a half", WallpaperScalingMode::STRETCH, 57, 33, 1.0, 1.0},
+        Case {"fit on a 2x display", WallpaperScalingMode::FIT, 30, 40, 2.0, 1.0},
+        Case {"fill with the user's scale", WallpaperScalingMode::FILL, 50, 30, 1.0, 0.7},
+        Case {"unscaled with the user's scale", WallpaperScalingMode::NONE, 50, 30, 1.0, 1.3},
+        Case {"same size", WallpaperScalingMode::STRETCH, kWidth, kHeight, 1.0, 1.0},
+    };
+    struct Source { const char* name; ImageParameters image; VkSampler sampler; };
+    const std::array sources {
+        Source {"RGBA, linear", decoded.desc().vk_output, *linear},
+        Source {"BGRA, linear", decoded_bgra, *linear},
+        Source {"RGBA, nearest", decoded.desc().vk_output, *nearest},
+        Source {"BGRA, nearest", decoded_bgra, *nearest},
+    };
+    for (const auto& source : sources) for (const auto& c : cases) {
+        SCOPED_TRACE(std::string(source.name) + "; " + c.name);
+        Bind(video, as_frame(source.image, source.sampler));
+        const auto layout = ComputeWallpaperScalingLayout(c.mode, kWidth, kHeight, c.w, c.h,
+                                                          c.display_scale, c.user_scale);
+        rr.wallpaper_viewport = MakeWallpaperViewport(layout);
+        rr.wallpaper_scissor = MakeWallpaperScissor(layout);
+        const auto target = PrivateTarget(static_cast<uint32_t>(layout.scissor_px.width),
+                                          static_cast<uint32_t>(layout.scissor_px.height), format);
+        auto& final = Final(target, format); ASSERT_TRUE(final.prepared());
+        const VkExtent2D extent {target.extent.width, target.extent.height};
+        const auto compare = [&](bool expected_direct) {
+            EXPECT_FALSE(PresentFrame(video, final, pre, target, format, false));
+            const auto reference = Read(target);
+            Poison(target, {1,0,1,1});
+            const bool direct = PresentFrame(video, final, pre, target, format);
+            EXPECT_EQ(direct, expected_direct);
+            EXPECT_EQ(Read(target), reference);
+            // A requested poster is exactly what the drawable received.
+            EXPECT_EQ(ComposePoster(video, final, pre, extent, format, direct), reference);
+            return reference;
+        };
+        const auto reference = compare(true);
+        // Not a degenerate picture: the source's texels reached the target.
+        std::set<Color> colors;
+        for (size_t i = 0; i + 3 < reference.size(); i += 4)
+            colors.insert({reference[i], reference[i+1], reference[i+2], reference[i+3]});
+        EXPECT_GT(colors.size(), 8u);
+        // Mirrored, the final composition samples differently: the copy path.
+        rr.wallpaper_horizontal_flip = true; compare(false);
+        rr.wallpaper_horizontal_flip = false;
+        // A frame decoded smaller than the scene is resampled into the copy.
+        Bind(video, as_frame(smaller.desc().vk_output, source.sampler)); compare(false);
+        Bind(video, as_frame(source.image, source.sampler));
+        // Any other pass keeps the old rule: only an identical target.
+        video.desc().presents_through_final_viewport = false;
+        compare(c.w == kWidth && c.h == kHeight && c.display_scale == 1.0 && c.user_scale == 1.0);
+        video.desc().presents_through_final_viewport = true;
+    }
+    rr.wallpaper_viewport = {}; rr.wallpaper_scissor = {};
 }
 
 TEST_F(PlaybackGPU, DirectRecordingFailuresDoNotSubmitAndRecoverWithFreshTargets) {
@@ -2593,3 +3140,69 @@ TEST_F(PlaybackGPU, AnAliasedCoverOutlivesTheNameItSharesBeingReplaced) {
     }
 }
 } // namespace
+
+// Material constants are written after the value updater, from the live
+// material, every frame. A binding or script may add a constant only after the
+// pass was prepared, and later change it in place; both must reach the uniform
+// the very next frame, and the constant keeps precedence over the updater.
+TEST_F(PlaybackGPU, MaterialConstantsAddedOrChangedAfterPrepareReachTheNextFrame) {
+    updater->color = {0,1,0,1};
+    auto& pass = Pass(false, true);
+    auto* material = nodes.back()->Mesh()->MaterialForSlot(0);
+    ASSERT_NE(material, nullptr);
+    auto& constants = material->customShader.constValues;
+    ASSERT_FALSE(constants.contains("g_TestColor"));
+    Draw(pass); ExpectSolid(Read(pass.desc().vk_output), {0,255,0,255});
+
+    constants["g_TestColor"] = std::array<float,4> {1,0,0,1};
+    Draw(pass); ExpectSolid(Read(pass.desc().vk_output), {255,0,0,255});
+
+    constants.find("g_TestColor")->second = std::array<float,4> {0,0,1,1};
+    Draw(pass); ExpectSolid(Read(pass.desc().vk_output), {0,0,255,255});
+
+    // A key the shader does not declare changes the map's shape, not the pass.
+    constants["g_NotInShader"] = 1.0f;
+    constants.find("g_TestColor")->second = std::array<float,4> {1,1,0,1};
+    Draw(pass); ExpectSolid(Read(pass.desc().vk_output), {255,255,0,255});
+}
+
+// A texture slot whose name joins the runtime image source after prepare is
+// resolved through that source from the next frame on.
+TEST_F(PlaybackGPU, RuntimeImagePublishedAfterPrepareReachesTheNextFrame) {
+    auto owned_images = std::make_unique<RuntimeImageSource>(nullptr);
+    auto* images = owned_images.get();
+    scene.imageParser = std::move(owned_images);
+    const std::array<uint8_t,4> red {255,0,0,255}, blue {0,0,255,255};
+    images->SetRgbaImage("$r14Early", 1, 1, red.data(), red.size());
+    auto& pass = Pass(true, false, {}, false, VK_SAMPLE_COUNT_1_BIT, {},
+                      [](CustomShaderPass::Desc& desc) { desc.textures = {"$r14Early"}; });
+    Draw(pass); ExpectSolid(Read(pass.desc().vk_output), {255,0,0,255});
+
+    // A new name first, so the slot's own name is not what changed.
+    const auto generation = images->NamesGeneration();
+    images->SetRgbaImage("$r14Other", 1, 1, red.data(), red.size());
+    EXPECT_NE(images->NamesGeneration(), generation);
+    images->SetRgbaImage("$r14Early", 1, 1, blue.data(), blue.size());
+    Draw(pass); ExpectSolid(Read(pass.desc().vk_output), {0,0,255,255});
+
+    // Rebinding the slot to a name that became runtime after prepare.
+    const std::array<uint8_t,4> green {0,255,0,255};
+    images->SetRgbaImage("$r14Late", 1, 1, green.data(), green.size());
+    pass.desc().textures[0] = "$r14Late";
+    Draw(pass); ExpectSolid(Read(pass.desc().vk_output), {0,255,0,255});
+}
+
+// A slot whose name is not published yet at prepare starts sampling it the
+// frame after it is published.
+TEST_F(PlaybackGPU, RuntimeImageNamePublishedAfterPrepareReachesTheNextFrame) {
+    auto owned_images = std::make_unique<RuntimeImageSource>(nullptr);
+    auto* images = owned_images.get();
+    scene.imageParser = std::move(owned_images);
+    auto& pass = Pass(true, false, {}, false, VK_SAMPLE_COUNT_1_BIT, {},
+                      [](CustomShaderPass::Desc& desc) { desc.textures = {"$r14Pending"}; }, false);
+    ASSERT_TRUE(pass.prepared());
+    Draw(pass);
+    const std::array<uint8_t,4> blue {0,0,255,255};
+    images->SetRgbaImage("$r14Pending", 1, 1, blue.data(), blue.size());
+    Draw(pass); ExpectSolid(Read(pass.desc().vk_output), {0,0,255,255});
+}

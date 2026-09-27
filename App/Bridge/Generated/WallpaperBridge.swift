@@ -5230,8 +5230,9 @@ public func FfiConverterTypeBridgeRendererCountersReport_lower(_ value: BridgeRe
 /**
  * Renderer work counters for one wallpaper surface.
  *
- * The fields are split on purpose. `timer_wakeups` through `simulation_ticks`
- * are work this surface alone performs and must stop when nobody can see it.
+ * The fields are split on purpose. `timer_wakeups` through
+ * `presents_skipped_unchanged` are work this surface alone performs and must
+ * stop when nobody can see it.
  * The `video_*` fields describe the decoded source, which may legitimately keep
  * running while one of its consumers is hidden as long as another consumer
  * still presents it.
@@ -5285,6 +5286,12 @@ public struct BridgeRendererSurfaceCounters {
      */
     public var gpuCompletions: UInt64
     public var simulationTicks: UInt64
+    /**
+     * Frames that ran (the scene ticked) but were not drawn or presented,
+     * because they would have put exactly the pixels already on the surface
+     * back. Neither a dropped draw nor a present request.
+     */
+    public var presentsSkippedUnchanged: UInt64
     public var tickIntervalMicros: UInt64
     /**
      * 0 when the content cannot prove how often it changes.
@@ -5341,7 +5348,12 @@ public struct BridgeRendererSurfaceCounters {
          */effectivePauseReasons: [String], paused: Bool, timerWakeups: UInt64, drawRequests: UInt64, drawTicksSuppressed: UInt64, drawsExecuted: UInt64, drawsDropped: UInt64, renderSubmissions: UInt64, renderFailures: UInt64, presentRequests: UInt64, 
         /**
          * The submitted frame's fence signalled. Not a display presentation.
-         */gpuCompletions: UInt64, simulationTicks: UInt64, tickIntervalMicros: UInt64, 
+         */gpuCompletions: UInt64, simulationTicks: UInt64, 
+        /**
+         * Frames that ran (the scene ticked) but were not drawn or presented,
+         * because they would have put exactly the pixels already on the surface
+         * back. Neither a dropped draw nor a present request.
+         */presentsSkippedUnchanged: UInt64, tickIntervalMicros: UInt64, 
         /**
          * 0 when the content cannot prove how often it changes.
          */contentPeriodMicros: UInt64, videoDecodeOutputs: UInt64, videoSeeks: UInt64, videoFramesSelected: UInt64, videoFramesReused: UInt64, 
@@ -5376,6 +5388,7 @@ public struct BridgeRendererSurfaceCounters {
         self.presentRequests = presentRequests
         self.gpuCompletions = gpuCompletions
         self.simulationTicks = simulationTicks
+        self.presentsSkippedUnchanged = presentsSkippedUnchanged
         self.tickIntervalMicros = tickIntervalMicros
         self.contentPeriodMicros = contentPeriodMicros
         self.videoDecodeOutputs = videoDecodeOutputs
@@ -5452,6 +5465,9 @@ extension BridgeRendererSurfaceCounters: Equatable, Hashable {
         if lhs.simulationTicks != rhs.simulationTicks {
             return false
         }
+        if lhs.presentsSkippedUnchanged != rhs.presentsSkippedUnchanged {
+            return false
+        }
         if lhs.tickIntervalMicros != rhs.tickIntervalMicros {
             return false
         }
@@ -5511,6 +5527,7 @@ extension BridgeRendererSurfaceCounters: Equatable, Hashable {
         hasher.combine(presentRequests)
         hasher.combine(gpuCompletions)
         hasher.combine(simulationTicks)
+        hasher.combine(presentsSkippedUnchanged)
         hasher.combine(tickIntervalMicros)
         hasher.combine(contentPeriodMicros)
         hasher.combine(videoDecodeOutputs)
@@ -5553,6 +5570,7 @@ public struct FfiConverterTypeBridgeRendererSurfaceCounters: FfiConverterRustBuf
                 presentRequests: FfiConverterUInt64.read(from: &buf), 
                 gpuCompletions: FfiConverterUInt64.read(from: &buf), 
                 simulationTicks: FfiConverterUInt64.read(from: &buf), 
+                presentsSkippedUnchanged: FfiConverterUInt64.read(from: &buf), 
                 tickIntervalMicros: FfiConverterUInt64.read(from: &buf), 
                 contentPeriodMicros: FfiConverterUInt64.read(from: &buf), 
                 videoDecodeOutputs: FfiConverterUInt64.read(from: &buf), 
@@ -5588,6 +5606,7 @@ public struct FfiConverterTypeBridgeRendererSurfaceCounters: FfiConverterRustBuf
         FfiConverterUInt64.write(value.presentRequests, into: &buf)
         FfiConverterUInt64.write(value.gpuCompletions, into: &buf)
         FfiConverterUInt64.write(value.simulationTicks, into: &buf)
+        FfiConverterUInt64.write(value.presentsSkippedUnchanged, into: &buf)
         FfiConverterUInt64.write(value.tickIntervalMicros, into: &buf)
         FfiConverterUInt64.write(value.contentPeriodMicros, into: &buf)
         FfiConverterUInt64.write(value.videoDecodeOutputs, into: &buf)

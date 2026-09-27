@@ -12,6 +12,7 @@
 #include <Eigen/Dense>
 
 #include <array>
+#include <atomic>
 #include <condition_variable>
 #include <functional>
 #include <memory>
@@ -309,8 +310,17 @@ public:
     void RequestUserShortcut(std::string_view property_name, std::string_view property_value);
     /// Takes the requests made since the last call, oldest first.
     std::vector<std::pair<std::string, std::string>> TakeUserShortcutRequests();
+    /// Records that this scene reads system audio. Monotonic per runtime: the
+    /// first call runs the audio-requirement listener, later calls are one
+    /// atomic load.
     void                         MarkSceneRequiresAudioResponse();
     bool                         SceneRequiresAudioResponse() const;
+    /// Installs (or clears, with an empty function) the listener run on the
+    /// false -> true transition of `SceneRequiresAudioResponse`. It may run on
+    /// any thread that marks the scene, so it must only hand the event on.
+    /// A caller must read `SceneRequiresAudioResponse` after installing: a
+    /// mark that raced the install is then seen by at least one of the two.
+    void SetAudioRequirementListener(std::function<void()> listener);
     void                         SetAudioResponseEnabled(bool enabled);
     bool                         AudioResponseEnabled() const;
     bool                         AudioResponseActive() const;
@@ -516,7 +526,14 @@ private:
     std::unordered_map<GeneratedLayerKey, std::string, GeneratedLayerKeyHash>
         m_generated_layers;
     std::unordered_map<std::string, std::vector<std::string>>      m_node_video_textures;
-    std::unordered_map<std::string, VideoTexturePlaybackBinding>   m_video_texture_playback;
+    struct StringHash {
+        using is_transparent = void;
+        std::size_t operator()(std::string_view value) const noexcept {
+            return std::hash<std::string_view> {}(value);
+        }
+    };
+    std::unordered_map<std::string, VideoTexturePlaybackBinding, StringHash, std::equal_to<>>
+        m_video_texture_playback;
     std::unordered_map<std::string, std::weak_ptr<WPSoundStream>>  m_sound_layers;
     std::vector<ScriptedDynamicValue*>                             m_scripted_values;
     std::unordered_map<ScriptedDynamicValue*, bool>                m_scripted_value_cursor_inside;
@@ -541,8 +558,16 @@ private:
     /// drains must not grow this without limit, and the oldest request is the
     /// one a user has already stopped waiting for.
     std::vector<std::pair<std::string, std::string>>               m_user_shortcut_requests;
-    bool m_scene_requires_audio_response { false };
-    bool m_audio_response_enabled { false };
+    /// Written from the parse thread (materials, particles), the render thread
+    /// (shader uniforms) and the script thread (`registerAudioBuffers`), and
+    /// read on all of them, so both flags are atomic. The requirement only ever
+    /// goes false -> true for one runtime: a replaced scene gets a new runtime.
+    std::atomic<bool> m_scene_requires_audio_response { false };
+    std::atomic<bool> m_audio_response_enabled { false };
+    /// Called once, on whichever thread first marks the scene as reading
+    /// audio. Guarded so installing it and marking cannot both miss.
+    std::mutex            m_audio_requirement_mutex;
+    std::function<void()> m_audio_requirement_listener;
     bool m_media_integration_enabled { false };
     bool m_scene_graph_mutated { false };
 };

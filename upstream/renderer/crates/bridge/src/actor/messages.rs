@@ -262,6 +262,13 @@ pub struct SetWebAudioSubscribed {
     pub subscribed: bool,
 }
 
+/// Live scenes whose renderers started or stopped reading system audio. The
+/// handler re-reads each one's current requirement rather than trusting an
+/// order of events, so coalesced deliveries are safe.
+pub struct AudioRequirementChanged {
+    pub handles: Vec<wallpaper_core::project::SceneHandle>,
+}
+
 pub struct SetMediaIntegrationEnabled {
     pub wallpaper_id: String,
     pub enabled: bool,
@@ -427,6 +434,7 @@ pub type SetSceneRendererReply = AllSnapshotsReply;
 pub type SetSceneOnDemandEnabledReply = AllSnapshotsReply;
 pub type SetSceneVideoPlaneSamplingEnabledReply = AllSnapshotsReply;
 pub type SetWebAudioSubscribedReply = Result<(), BridgeError>;
+pub type AudioRequirementChangedReply = Result<(), BridgeError>;
 pub type SetMediaIntegrationEnabledReply = WallpaperMutationReply;
 pub type FanOutSystemMediaEventReply = Result<(), BridgeError>;
 pub type FanOutSystemMediaArtworkReply = Result<(), BridgeError>;

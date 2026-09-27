@@ -59,6 +59,15 @@ bool ThreadTimer::Idle() const {
 
 void ThreadTimer::WakeOnce() {
     std::unique_lock<std::mutex> lock(m_cond_mutex);
+    // A second request before the tick consumes the first changes nothing: the
+    // latch is already set, and another notify cannot move a deadline that is
+    // already the ceiling. A continuous clock already running at that ceiling
+    // has the same property — the request is absorbed by the next tick — so it
+    // is latched without waking the thread at all.
+    if (m_wake_once || (!m_idle && m_interval.load() <= m_min_interval.load())) {
+        m_wake_once = true;
+        return;
+    }
     m_wake_once = true;
     m_condition.notify_all();
 }

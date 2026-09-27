@@ -78,12 +78,23 @@ same-throughput power claim needs timestamped counter deltas aligned to the
 actual power window. Neither the configured ceiling nor timer-wakeup counts
 provide elapsed time or displayed-frame counts.
 
-The observed 45–52 draws/s at a configured 60 fps ceiling remain measurements,
-not an explanation of the shortfall. `ThreadTimer` schedules from the previous
-tick and records the next tick before invoking the callback; `FrameTimer` posts
-DRAW asynchronously. `FrameEnd` calls `WakeOnce()` only for an outstanding update
-request, not after every ordinary frame. These observations do not establish a
-period of "16.7 ms plus frame work". The app opens its
+The observed 45–52 draws/s at a configured 60 fps ceiling have a mechanism in
+the frame clock itself. `ThreadTimer` computes each deadline from the time the
+previous tick actually woke (`last_tick = steady_clock::now()` after the wait),
+not from the previous deadline, so every wait's timer slack is added to the
+period instead of being absorbed. A headless probe that drives the production
+`FrameTimer`/`ThreadTimer` sources with a zero-cost draw measured about 20.3 ms
+between ticks at a 60 fps ceiling (50.5 draws/s), about 10.4 ms at 120 (100/s)
+and about 37.5 ms at 30 (27/s): 2–4 ms of slack per wait, which timer-thread QoS
+did not change. On top of that, `FrameTimer` drops any tick that finds the
+previous DRAW still running, and on Compatibility a DRAW includes the GPU frame
+(the fence wait follows the present), so a frame longer than the remaining
+interval loses a whole period (45.7/s with a 15.5 ms draw, 26.8/s with 20 ms).
+`FrameEnd` re-arms the clock only for an outstanding update request. This is
+measured delivery, not presentation: whether and when those frames were
+displayed is still not observable. Correcting the cadence would raise delivered
+work toward the configured ceiling, so a comparison across such a change has to
+report its throughput separately from any power figure. The app opens its
 control panel at launch, so each such run includes it; while the library page
 is visible, installed GIF previews animate. Some runs showed WebContent at
 8–13 % CPU and higher WindowServer CPU, but the recordings did not establish
@@ -129,14 +140,16 @@ rather than growing without limit.
 
 The renderer counts its own work: the frame clock's wakeups and draw requests,
 draws executed and dropped, queue submissions, present requests, frame-fence
-completions, simulation ticks, the effective pause reasons as independent bits,
+completions, simulation ticks, frames left undrawn because they would have
+repeated the picture on screen (`presents_skipped_unchanged`), the effective
+pause reasons as independent bits,
 and the decoder's outputs, seeks, selected/reused/skipped frames, conversions
 and imports. Those are also **off by default** — one relaxed atomic load gates
 each increment — and reading them is a pull: nothing is pushed to the UI, logged
 per frame or written to disk, and enabling starts no thread and no timer.
 
 The two groups inside a renderer row are deliberately separate.
-`timer_wakeups` through `simulation_ticks` are work a surface performs alone and
+`timer_wakeups` through `presents_skipped_unchanged` are work a surface performs alone and
 must stop when nobody can see it. The `video_*` values describe the decoded
 source, which may legitimately keep running while one of its consumers is
 hidden, provided another consumer still presents it. Collapsing them would make

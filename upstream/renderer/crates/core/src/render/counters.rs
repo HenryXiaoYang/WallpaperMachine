@@ -30,6 +30,9 @@ pub enum RendererCounterKind {
     PresentRequests,
     GpuCompletions,
     SimulationTicks,
+    /// Frames that ran but were not drawn or presented because they would have
+    /// put back exactly the pixels already on the surface.
+    PresentsSkippedUnchanged,
     // Surface state.
     PauseReasons,
     TickIntervalMicros,
@@ -71,6 +74,9 @@ impl RendererCounterKind {
             Self::PresentRequests => sys::owe_renderer_counter_OWE_RC_PRESENT_REQUESTS,
             Self::GpuCompletions => sys::owe_renderer_counter_OWE_RC_GPU_COMPLETIONS,
             Self::SimulationTicks => sys::owe_renderer_counter_OWE_RC_SIMULATION_TICKS,
+            Self::PresentsSkippedUnchanged => {
+                sys::owe_renderer_counter_OWE_RC_PRESENTS_SKIPPED_UNCHANGED
+            }
             Self::PauseReasons => sys::owe_renderer_counter_OWE_RC_PAUSE_REASONS,
             Self::TickIntervalMicros => sys::owe_renderer_counter_OWE_RC_TICK_INTERVAL_MICROS,
             Self::ContentPeriodMicros => sys::owe_renderer_counter_OWE_RC_CONTENT_PERIOD_MICROS,

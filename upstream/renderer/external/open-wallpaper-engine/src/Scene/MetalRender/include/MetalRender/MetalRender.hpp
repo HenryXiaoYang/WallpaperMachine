@@ -124,7 +124,14 @@ public:
     /// actually reached the layer: returning true having presented nothing is
     /// how a tick that found no drawable is distinguished from a failure, and
     /// the caller needs that difference to decide when the first frame exists.
+    /// With scene optimisation on, a frame whose passes were all reused and
+    /// whose composition would repeat the last present takes no drawable,
+    /// commits nothing and also reports `presented` false.
     bool drawFrame(Scene& scene, bool* presented = nullptr);
+
+    /// Forgets the last presented composition, so the next frame presents
+    /// whatever it would have presented anyway.
+    void InvalidatePresentedFrame();
 
     /// Serves a pending poster request outside the frame loop. Render thread
     /// only.

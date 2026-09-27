@@ -46,7 +46,6 @@ namespace
 {
 
 constexpr auto kPrimeTimeout = std::chrono::seconds(2);
-constexpr auto kPausedPoll = std::chrono::milliseconds(10);
 constexpr auto kDecodePoll = std::chrono::milliseconds(2);
 
 bool SetError(std::string* error, std::string message)
@@ -398,8 +397,10 @@ public:
             requested_absolute_seconds + discontinuity_threshold < m_display_frame.absolute_seconds) {
             clearDisplayFrameLocked();
             requestSeekLocked(requested_absolute_seconds);
+            // A seek, or a display slot that just went empty, is the only reason
+            // the decode thread has new work. An ordinary clock update does not.
+            m_condition.notify_all();
         }
-        m_condition.notify_all();
         return true;
     }
 
@@ -424,15 +425,21 @@ public:
             desired_absolute_seconds > latestBufferedAbsoluteLocked() + forward_resync_threshold) {
             requestSeekLocked(desired_absolute_seconds);
         }
+        // A seek requested above, or a display frame just cleared, is work the
+        // decode thread cannot see until it is woken. Promoting a queued frame
+        // is the other one: it freed a slot the thread may be waiting on.
+        if (m_seek_requested) m_condition.notify_all();
 
+        bool promoted = false;
         while (!m_pending_frames.empty() &&
                (!m_display_frame_ready ||
                 m_pending_frames.front().absolute_seconds <=
                     desired_absolute_seconds + presentationSlackSeconds())) {
-            promoteNextFrameLocked();
+            promoted = promoteNextFrameLocked() || promoted;
         }
         if (m_display_frame_ready) {
-            m_condition.notify_all();
+            // Promoting freed a queue slot. The display frame staying put did not.
+            if (promoted || m_seek_requested) m_condition.notify_all();
             return true;
         }
 
@@ -447,7 +454,6 @@ public:
 
             if (m_display_frame_ready ||
                 displayFrameCoversDesiredLocked(desired_absolute_seconds)) {
-                m_condition.notify_all();
                 return true;
             }
 
@@ -457,13 +463,15 @@ public:
 
             if (std::chrono::steady_clock::now() >= deadline) {
                 if (m_display_frame_ready) {
-                    m_condition.notify_all();
                     return true;
                 }
                 return SetError(error, "video frame is not ready");
             }
 
-            m_condition.notify_all();
+            // Still waiting on a frame this thread does not have. Wake the
+            // decoder only if a seek or an empty display slot is outstanding;
+            // the poll below is what notices a frame arriving either way.
+            if (m_seek_requested || !m_display_frame_ready) m_condition.notify_all();
             m_condition.wait_for(lock, kDecodePoll, [this]() {
                 return m_stop_requested || !m_last_error.empty() || !m_pending_frames.empty();
             });
@@ -679,6 +687,15 @@ private:
         if (video_stream_index < 0) {
             avformat_close_input(&format_context);
             return SetError(error, "failed to find FFmpeg video stream: " + AvErrorString(video_stream_index));
+        }
+        // Audio (and every other stream) is not decoded here. Discarding it
+        // stops the demuxer from reading those packets at all; the video
+        // stream, its PTS and the loop seam are unchanged.
+        for (unsigned index = 0; index < format_context->nb_streams; ++index) {
+            if (static_cast<int>(index) == video_stream_index) continue;
+            if (format_context->streams[index] != nullptr) {
+                format_context->streams[index]->discard = AVDISCARD_ALL;
+            }
         }
 
         AVStream* video_stream = format_context->streams[video_stream_index];

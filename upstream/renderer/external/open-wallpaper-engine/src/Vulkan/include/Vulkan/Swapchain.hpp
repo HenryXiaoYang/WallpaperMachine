@@ -19,10 +19,8 @@ public:
     VkExtent2D                       extent() const;
     VkPresentModeKHR                 presentMode() const;
     std::span<const ImageParameters> images() const;
-    bool supportsReadback() const { return m_supports_readback; }
 
 private:
-    bool                         m_supports_readback { false };
     vvk::SwapchainKHR            m_handle;
     VkSurfaceFormatKHR           m_format;
     VkExtent2D                   m_extent;

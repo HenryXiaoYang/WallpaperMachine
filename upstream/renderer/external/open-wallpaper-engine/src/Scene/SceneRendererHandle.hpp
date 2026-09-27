@@ -181,6 +181,9 @@ public:
         if (presented != nullptr) *presented = false;
         return false;
     }
+    /// Makes the next frame present whatever it draws, even if it would repeat
+    /// the last one exactly.
+    void InvalidatePresentedFrame() { OWE_FORWARD_VOID(InvalidatePresentedFrame()); }
 
     /// Completes a pending poster request without drawing anything new.
     ///

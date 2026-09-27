@@ -1431,7 +1431,7 @@ async fn lock_screen_export_ignores_presentation_suspension_but_preserves_playba
 async fn presentation_transitions_repair_in_flight_reconcile_pause_state() {
     for initially_suspended in [false, true] {
         let engine = FakeEngineFacade::default();
-        engine.set_snapshot(vec![display_snapshot(7, 75)]);
+        engine.set_snapshot(vec![live_display_snapshot(7, 75)]);
         let bridge = Arc::new(
             BridgeBuilder::new(engine.clone())
                 .with_state(crate::actor::state::BridgeActorState::default())
@@ -1498,7 +1498,7 @@ async fn presentation_transitions_repair_in_flight_reconcile_pause_state() {
 #[tokio::test]
 async fn failed_audio_resume_restores_renderer_and_allows_later_presentation_transitions() {
     let engine = FakeEngineFacade::default();
-    engine.set_snapshot(vec![display_snapshot(7, 75)]);
+    engine.set_snapshot(vec![live_display_snapshot(7, 75)]);
     let bridge = BridgeBuilder::new(engine.clone())
         .with_state(crate::actor::state::BridgeActorState::default())
         .build()
@@ -1535,6 +1535,15 @@ async fn failed_audio_resume_restores_renderer_and_allows_later_presentation_tra
     assert!(engine.audio_capture_suspended());
 }
 
+/// A display showing a live scene, whose renderer the bridge asks whether it
+/// reads audio. The fake's first reconcile hands this display handle 1.
+fn live_display_snapshot(display_id: u32, refresh_rate_hz: u32) -> DisplaySnapshotEntry {
+    DisplaySnapshotEntry {
+        handle: Some(SceneHandle::new(1)),
+        ..display_snapshot(display_id, refresh_rate_hz)
+    }
+}
+
 fn display_snapshot(display_id: u32, refresh_rate_hz: u32) -> DisplaySnapshotEntry {
     let desc = DisplayDesc::with_identity(
         display_id,
@@ -1552,6 +1561,7 @@ fn display_snapshot(display_id: u32, refresh_rate_hz: u32) -> DisplaySnapshotEnt
         desc,
         handle: None,
         accepts_pointer_input: false,
+        paused: false,
         window_active: false,
         assignment: None,
     }
@@ -1574,6 +1584,7 @@ fn active_display_snapshot_for_wallpaper(
     DisplaySnapshotEntry {
         handle: Some(SceneHandle::new(handle)),
         accepts_pointer_input: true,
+        paused: false,
         window_active: true,
         assignment: Some(WallpaperAssignment::Direct(
             SceneTemplate::builder(format!(

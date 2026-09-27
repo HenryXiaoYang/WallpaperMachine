@@ -115,10 +115,10 @@ pub(super) fn active_mouse_display() -> DisplaySnapshotEntry {
 }
 
 pub(super) fn await_mouse_sample(engine: &FakeEngineFacade) {
-    let poll = engine.block_next_mouse_poll();
-    let reached = poll.wait_until_blocked(std::time::Duration::from_secs(1));
-    poll.release();
-    assert!(reached, "enabled poller must reach the engine");
+    assert!(
+        engine.wait_for_unseen_mouse_poll(std::time::Duration::from_secs(1)),
+        "enabled poller must reach the engine"
+    );
 }
 
 pub(super) fn assert_mouse_idle(engine: &FakeEngineFacade) {
@@ -161,6 +161,137 @@ fn mouse_polling_follows_scene_lifetime_and_samples_latest_input_on_resume() {
         engine.set_snapshot(Vec::new());
         bridge.refresh_displays().await.unwrap();
         assert_mouse_idle(&engine);
+        drop(bridge);
+    });
+}
+
+#[test]
+fn mouse_polling_stops_while_the_only_interactive_scene_is_suspended_on_its_display() {
+    mouse_scenario(|| async {
+        let engine = FakeEngineFacade::default();
+        // Display 9 shows nothing a pointer can reach, so it is never suspended
+        // and the global "every display paused" gate stays open.
+        engine.set_snapshot(vec![active_mouse_display(), identified_display("empty", 9)]);
+        let bridge = BridgeBuilder::new(engine.clone())
+            .with_state(BridgeActorState::default())
+            .build()
+            .unwrap();
+        await_mouse_sample(&engine);
+
+        bridge
+            .set_display_presentation_suspended("7".into(), true)
+            .await
+            .unwrap();
+        assert_mouse_idle(&engine);
+
+        engine.set_mouse_input(12.0, 34.0);
+        let resumed = engine.block_next_mouse_poll();
+        bridge
+            .set_display_presentation_suspended("7".into(), false)
+            .await
+            .unwrap();
+        let reached = resumed.wait_until_blocked(std::time::Duration::from_secs(1));
+        resumed.release();
+        assert!(reached, "resuming the display must sample at once");
+        assert_eq!(engine.mouse_samples().last(), Some(&(12.0, 34.0)));
+        drop(bridge);
+    });
+}
+
+#[test]
+fn mouse_polling_samples_only_when_input_arrives() {
+    mouse_scenario(|| async {
+        let engine = FakeEngineFacade::default();
+        engine.set_snapshot(vec![active_mouse_display()]);
+        let bridge = BridgeBuilder::new(engine.clone())
+            .with_state(BridgeActorState::default())
+            .build()
+            .unwrap();
+        // A new consumer gets the current position without waiting for input.
+        await_mouse_sample(&engine);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        let quiet = engine.mouse_poll_calls().len();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(
+            engine.mouse_poll_calls().len(),
+            quiet,
+            "a consumer with no pointer input must not be sampled"
+        );
+
+        // One move: exactly one sample.
+        engine.simulate_pointer_input();
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        assert_eq!(engine.mouse_poll_calls().len(), quiet + 1, "one move is one sample");
+
+        // A burst inside one spacing window: the first sample runs at once and
+        // the rest coalesce into at most one more at the end of the window.
+        let before_burst = engine.mouse_poll_calls().len();
+        for _ in 0..50 {
+            engine.simulate_pointer_input();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        let burst = engine.mouse_poll_calls().len() - before_burst;
+        assert!((1..=2).contains(&burst), "50 moves within 16 ms took {burst} samples");
+
+        // After a quiet period the first move is not held back by the spacing.
+        let fastest = (0..3)
+            .map(|_| {
+                std::thread::sleep(std::time::Duration::from_millis(40));
+                let sample = engine.block_next_mouse_poll();
+                let moved = std::time::Instant::now();
+                engine.simulate_pointer_input();
+                let reached = sample.wait_until_blocked(std::time::Duration::from_secs(1));
+                let latency = moved.elapsed();
+                sample.release();
+                assert!(reached, "a move must be sampled");
+                latency
+            })
+            .min()
+            .unwrap();
+        assert!(
+            fastest < std::time::Duration::from_millis(16),
+            "a move after a quiet period waited {fastest:?}"
+        );
+        drop(bridge);
+    });
+}
+
+#[test]
+fn mouse_polling_in_a_monitor_gap_checks_the_cursor_without_engine_work() {
+    mouse_scenario(|| async {
+        let engine = FakeEngineFacade::default();
+        engine.set_snapshot(vec![active_mouse_display()]);
+        let bridge = BridgeBuilder::new(engine.clone())
+            .with_state(BridgeActorState::default())
+            .build()
+            .unwrap();
+        await_mouse_sample(&engine);
+        // This app became active: motion over its own windows reaches no
+        // monitor, so the poller has to look at the cursor itself.
+        engine.set_pointer_monitor_gap(true);
+        std::thread::sleep(std::time::Duration::from_millis(40));
+
+        let calls = engine.mouse_poll_calls().len();
+        let probes = engine.pointer_probe_count();
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        assert_eq!(
+            engine.mouse_poll_calls().len(),
+            calls,
+            "an unchanged cursor must not reach the engine"
+        );
+        assert!(engine.pointer_probe_count() > probes, "the gap is checked");
+
+        engine.set_pointer_probe(wallpaper_core::PointerProbe { x: 10.0, y: 20.0, buttons: 0 });
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        assert_eq!(engine.mouse_poll_calls().len(), calls + 1, "one change is one sample");
+
+        // Closing the gap stops the checks.
+        engine.set_pointer_monitor_gap(false);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let probes = engine.pointer_probe_count();
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        assert_eq!(engine.pointer_probe_count(), probes);
         drop(bridge);
     });
 }
@@ -569,6 +700,7 @@ fn identified_display_with_refresh(
             .with_refresh_rate(refresh_rate_hz),
         handle: None,
         accepts_pointer_input: false,
+        paused: false,
         window_active: true,
         assignment: None,
     }

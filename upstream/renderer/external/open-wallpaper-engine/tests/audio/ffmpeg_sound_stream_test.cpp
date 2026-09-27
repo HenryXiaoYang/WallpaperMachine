@@ -157,6 +157,33 @@ TEST(FfmpegSoundStreamTest, VfsBackedStreamDecodesPcm)
     }));
 }
 
+TEST(FfmpegSoundStreamTest, ResampledLoopingPcmMatchesBaseline)
+{
+    // Bit-exact regression guard for the decode/resample path, recorded before
+    // the converted-buffer reuse change: 12 kHz mono resampled to 48 kHz
+    // stereo across several loops with an odd read size.
+    auto stream = std::make_shared<MemoryBinaryStream>(MakeWavS16Mono(12'000, 512));
+    std::string error;
+    auto sound = CreateFfmpegSoundStream(stream, &error);
+    ASSERT_NE(sound, nullptr) << error;
+    sound->PassDesc({ .channels = 2, .sampleRate = 48'000 });
+
+    uint64_t hash = 1469598103934665603ull;
+    uint64_t total_frames = 0;
+    std::array<float, 2 * 97> output {};
+    for (int read = 0; read < 200; ++read) {
+        output.fill(0.0f);
+        total_frames += sound->NextPcmData(output.data(), 97);
+        for (float sample : output) {
+            uint32_t bits = 0;
+            std::memcpy(&bits, &sample, sizeof(bits));
+            hash = (hash ^ bits) * 1099511628211ull;
+        }
+    }
+    EXPECT_EQ(total_frames, 19400u);
+    EXPECT_EQ(hash, 11268528888657319991ull);
+}
+
 TEST(FfmpegSoundStreamTest, NonLoopingVfsStreamReportsEndOfFile)
 {
     auto stream = std::make_shared<MemoryBinaryStream>(MakeWavS16Mono(12'000, 16));

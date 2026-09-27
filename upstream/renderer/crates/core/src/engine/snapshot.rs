@@ -1,6 +1,9 @@
 use std::sync::{Arc, Mutex};
 
-use super::{DisplaySnapshotEntry, PointerConsumerCallback, UserShortcutObserverCallback};
+use super::{
+    DisplaySnapshotEntry, PointerActivity, PointerActivityCallback, PointerConsumerCallback,
+    UserShortcutObserverCallback,
+};
 use crate::window::MouseButtonTracker;
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -9,8 +12,12 @@ pub struct EngineSnapshot {
 }
 
 impl EngineSnapshot {
+    /// Only a presenting scene consumes pointer input: a paused scene's clock
+    /// is stopped, so sampling the pointer for it is work nobody sees.
     pub fn has_pointer_consumers(&self) -> bool {
-        self.displays.iter().any(|entry| entry.handle.is_some() && entry.accepts_pointer_input)
+        self.displays
+            .iter()
+            .any(|entry| entry.handle.is_some() && entry.accepts_pointer_input && !entry.paused)
     }
 }
 
@@ -19,11 +26,29 @@ struct PointerConsumerObserver {
     has_consumers: bool,
 }
 
+/// Whether the OS event monitors can miss pointer motion right now.
+#[derive(Default)]
+struct PointerMonitorGap {
+    app_active: bool,
+    monitors_installed: bool,
+}
+
+impl PointerMonitorGap {
+    fn open(&self) -> bool { self.app_active || !self.monitors_installed }
+}
+
 pub struct EngineSnapshotPublisher {
     snapshot: arc_swap::ArcSwap<EngineSnapshot>,
     pointer_consumer: Mutex<PointerConsumerObserver>,
     user_shortcut: Mutex<Option<UserShortcutObserverCallback>>,
     mouse_buttons: Arc<Mutex<MouseButtonTracker>>,
+    /// Read lock-free on every OS pointer event; written only on install.
+    pointer_activity: arc_swap::ArcSwapOption<PointerActivityCallback>,
+    /// Serializes gap changes with callback installation so a replay cannot
+    /// overtake a newer change.
+    pointer_monitor_gap: Mutex<PointerMonitorGap>,
+    /// Live scenes whose renderers report that they read system audio.
+    audio_requirement: super::audio_requirement::AudioRequirementObserver,
 }
 
 impl EngineSnapshotPublisher {
@@ -34,10 +59,55 @@ impl EngineSnapshotPublisher {
             pointer_consumer: Mutex::new(PointerConsumerObserver { callback: None, has_consumers }),
             user_shortcut: Mutex::new(None),
             mouse_buttons,
+            pointer_activity: arc_swap::ArcSwapOption::empty(),
+            pointer_monitor_gap: Mutex::new(PointerMonitorGap::default()),
+            audio_requirement: super::audio_requirement::AudioRequirementObserver::default(),
         }
     }
 
     pub fn load(&self) -> Arc<EngineSnapshot> { self.snapshot.load_full() }
+
+    pub fn audio_requirement(&self) -> &super::audio_requirement::AudioRequirementObserver {
+        &self.audio_requirement
+    }
+
+    /// Installs the pointer activity sink and synchronously replays whether the
+    /// monitors currently have a gap.
+    pub fn set_pointer_activity_callback(&self, callback: Option<PointerActivityCallback>) {
+        let gap = self.pointer_monitor_gap.lock().unwrap_or_else(|error| error.into_inner());
+        self.pointer_activity.store(callback.map(Arc::new));
+        self.signal_pointer_activity(PointerActivity::MonitorGap(gap.open()));
+    }
+
+    /// OS input arrived, or a presenting scene needs its pointer state again.
+    /// Called from the AppKit main thread for every monitored event: loads the
+    /// sink without locking or allocating.
+    pub fn signal_pointer_input(&self) {
+        self.signal_pointer_activity(PointerActivity::Input);
+    }
+
+    pub(crate) fn set_pointer_app_active(&self, active: bool) {
+        self.update_pointer_monitor_gap(|gap| gap.app_active = active);
+    }
+
+    pub(crate) fn set_pointer_monitors_installed(&self, installed: bool) {
+        self.update_pointer_monitor_gap(|gap| gap.monitors_installed = installed);
+    }
+
+    fn update_pointer_monitor_gap(&self, update: impl FnOnce(&mut PointerMonitorGap)) {
+        let mut gap = self.pointer_monitor_gap.lock().unwrap_or_else(|error| error.into_inner());
+        let was_open = gap.open();
+        update(&mut gap);
+        if gap.open() != was_open {
+            self.signal_pointer_activity(PointerActivity::MonitorGap(gap.open()));
+        }
+    }
+
+    fn signal_pointer_activity(&self, activity: PointerActivity) {
+        if let Some(callback) = self.pointer_activity.load().as_ref() {
+            callback(activity);
+        }
+    }
 
     /// Callbacks run synchronously under the observer lock and must only update
     /// polling control. They must not call back into the engine or panic.
@@ -98,6 +168,7 @@ mod tests {
             desc: DisplayDesc::new(1, 0, 0, 1920, 1080, 1.0),
             handle: Some(crate::project::SceneHandle::new(1)),
             accepts_pointer_input: true,
+            paused: false,
             window_active: true,
             assignment: None,
         }] }
@@ -134,6 +205,61 @@ mod tests {
             .map(|edge| (edge.button, edge.pressed)).collect();
         assert_eq!(edges, vec![(1, false), (2, true), (2, false)]);
         assert_eq!(*replay.lock().unwrap(), vec![true]);
+    }
+
+    #[test]
+    fn a_paused_scene_is_not_a_pointer_consumer_and_its_resume_drops_paused_clicks() {
+        let tracker = Arc::new(Mutex::new(MouseButtonTracker::new()));
+        let publisher = EngineSnapshotPublisher::new(EngineSnapshot::default(), tracker.clone());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        publisher.set_pointer_consumer_callback(Some(Arc::new({
+            let seen = seen.clone();
+            move |value| seen.lock().unwrap().push(value)
+        })));
+        publisher.publish(interactive_snapshot());
+
+        let mut paused = interactive_snapshot();
+        paused.displays[0].paused = true;
+        assert!(!paused.has_pointer_consumers(), "the only interactive scene is paused");
+        publisher.publish(paused);
+        // A click while the scene is paused must not reach it after resume.
+        {
+            let mut tracker = tracker.lock().unwrap();
+            tracker.set_button(0, true);
+            tracker.set_button(0, false);
+        }
+        publisher.publish(interactive_snapshot());
+
+        assert_eq!(*seen.lock().unwrap(), vec![false, true, false, true]);
+        assert!(tracker.lock().unwrap().consume_edges().transitions().next().is_none());
+    }
+
+    #[test]
+    fn pointer_monitor_gap_is_replayed_and_reported_only_on_change() {
+        let publisher = EngineSnapshotPublisher::new(
+            EngineSnapshot::default(),
+            Arc::new(Mutex::new(MouseButtonTracker::new())),
+        );
+        publisher.set_pointer_monitors_installed(true);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        publisher.set_pointer_activity_callback(Some(Arc::new({
+            let seen = seen.clone();
+            move |activity| seen.lock().unwrap().push(activity)
+        })));
+        publisher.set_pointer_app_active(false);
+        publisher.set_pointer_app_active(true);
+        publisher.set_pointer_app_active(true);
+        publisher.signal_pointer_input();
+        publisher.set_pointer_app_active(false);
+        publisher.set_pointer_monitors_installed(false);
+
+        assert_eq!(*seen.lock().unwrap(), vec![
+            PointerActivity::MonitorGap(false),
+            PointerActivity::MonitorGap(true),
+            PointerActivity::Input,
+            PointerActivity::MonitorGap(false),
+            PointerActivity::MonitorGap(true),
+        ]);
     }
 
     #[test]
@@ -259,6 +385,7 @@ mod tests {
             desc: display,
             handle: None,
             accepts_pointer_input: false,
+            paused: false,
             window_active: true,
             assignment: None,
         };

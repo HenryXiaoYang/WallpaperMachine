@@ -329,6 +329,15 @@ private:
         if (m_audio_stream_index < 0) {
             return fail("failed to find an FFmpeg audio stream: " + AvErrorString(m_audio_stream_index));
         }
+        // A video wallpaper's audio demuxer otherwise reads every video packet
+        // and drops it. Discarding the unused streams keeps the PCM, the
+        // generation and the loop seam identical.
+        for (unsigned index = 0; index < m_format_context->nb_streams; ++index) {
+            if (static_cast<int>(index) == m_audio_stream_index) continue;
+            if (m_format_context->streams[index] != nullptr) {
+                m_format_context->streams[index]->discard = AVDISCARD_ALL;
+            }
+        }
 
         m_audio_stream = m_format_context->streams[m_audio_stream_index];
         if (m_audio_stream == nullptr || m_audio_stream->codecpar == nullptr) {
@@ -481,11 +490,11 @@ private:
                     continue;
                 }
 
-                std::vector<float> converted(
-                    static_cast<size_t>(max_output_samples) * m_desc.channels,
-                    0.0f);
+                // Reused across frames; swr_convert writes the prefix that is
+                // kept below, so no zero-fill is needed.
+                m_converted.resize(static_cast<size_t>(max_output_samples) * m_desc.channels);
                 uint8_t* output_data[] = {
-                    reinterpret_cast<uint8_t*>(converted.data()),
+                    reinterpret_cast<uint8_t*>(m_converted.data()),
                 };
                 const int converted_samples = swr_convert(
                     m_swr,
@@ -502,15 +511,17 @@ private:
                 }
                 if (converted_samples == 0) continue;
 
-                converted.resize(static_cast<size_t>(converted_samples) * m_desc.channels);
+                m_converted.resize(static_cast<size_t>(converted_samples) * m_desc.channels);
                 if (m_pending_offset_samples == m_pending_samples.size()) {
-                    m_pending_samples = std::move(converted);
+                    // Hand the samples over and keep the drained buffer's
+                    // capacity as the next conversion target.
+                    std::swap(m_pending_samples, m_converted);
                     m_pending_offset_samples = 0;
                 } else {
                     m_pending_samples.insert(
                         m_pending_samples.end(),
-                        converted.begin(),
-                        converted.end());
+                        m_converted.begin(),
+                        m_converted.end());
                 }
                 return true;
             }
@@ -531,6 +542,7 @@ private:
     AVFrame*                           m_frame { nullptr };
     AVChannelLayout                    m_output_layout {};
     std::vector<float>                 m_pending_samples;
+    std::vector<float>                 m_converted; // swr_convert output scratch
     size_t                             m_pending_offset_samples { 0 };
 };
 

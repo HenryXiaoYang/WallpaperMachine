@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <cmath>
 #include <mutex>
@@ -618,19 +619,40 @@ bool CompatibleConvertedDestination(id<MTLTexture> texture, id<MTLDevice> device
         (texture.usage & required_usage) == required_usage;
 }
 
-id<MTLTexture> CreateConvertedMetalTexture(id<MTLDevice>    device,
-                                           CVPixelBufferRef pixel_buffer,
-                                           OSType           pixel_format,
-                                           uint32_t         width,
-                                           uint32_t         height,
-                                           id<MTLTexture>   reusable_destination,
-                                           bool*            destination_allocation_failed,
-                                           std::string*     error)
+/// Conversions whose command buffer the calling thread waited for. Only the
+/// queue-less path waits; see `CreateAppleVideoFrameLease`.
+std::atomic<uint64_t> g_conversion_cpu_waits { 0 };
+/// Set once the first asynchronous conversion reports a GPU error, so the
+/// condition is logged once per process rather than once per frame.
+std::atomic<bool> g_async_conversion_error_reported { false };
+
+/// Converts one NV12 frame into a BGRA destination.
+///
+/// With `frame_queue` the conversion is committed to that queue and not
+/// waited for: the caller's later work on the same queue is ordered after it
+/// by commit order and Metal's hazard tracking of the destination, which is a
+/// tracked resource. `*out_pending` then receives the retained command buffer,
+/// whose `status` says when the destination may be reused, and the plane
+/// wrappers and the pixel buffer stay retained until that command buffer
+/// completes. Without a queue the conversion runs on this file's private queue
+/// and returns only once it has completed, for callers that read the texture
+/// on the CPU straight away.
+id<MTLTexture> CreateConvertedMetalTexture(id<MTLDevice>        device,
+                                           CVPixelBufferRef     pixel_buffer,
+                                           OSType               pixel_format,
+                                           uint32_t             width,
+                                           uint32_t             height,
+                                           id<MTLTexture>       reusable_destination,
+                                           id<MTLCommandQueue>  frame_queue,
+                                           id<MTLCommandBuffer>* out_pending,
+                                           bool*                destination_allocation_failed,
+                                           std::string*         error)
 {
     CVMetalTextureCacheRef texture_cache = GetTextureCacheForDevice(device, error);
     if (texture_cache == nullptr) return nil;
 
-    id<MTLCommandQueue> command_queue = GetCommandQueueForDevice(device, error);
+    id<MTLCommandQueue> command_queue =
+        frame_queue != nil ? frame_queue : GetCommandQueueForDevice(device, error);
     if (command_queue == nil) return nil;
 
     id<MTLComputePipelineState> pipeline = GetNv12PipelineForDevice(device, error);
@@ -730,9 +752,32 @@ id<MTLTexture> CreateConvertedMetalTexture(id<MTLDevice>    device,
     const MTLSize threads_per_grid = MTLSizeMake(width, height, 1u);
     [encoder dispatchThreads:threads_per_grid threadsPerThreadgroup:threads_per_group];
     [encoder endEncoding];
+    if (frame_queue != nil) {
+        // Everything the kernel reads stays alive until the GPU has read it.
+        // The command buffer retains the Metal textures, but Core Video
+        // documents the wrappers, and the pixel buffer behind them, as what
+        // governs the planes' validity.
+        CFRetain(pixel_buffer);
+        [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> completed) {
+            if (completed.status == MTLCommandBufferStatusError &&
+                ! g_async_conversion_error_reported.exchange(true)) {
+                LOG_ERROR("Metal command buffer failed while converting a VideoToolbox frame: %s",
+                          completed.error != nil
+                              ? [[completed.error localizedDescription] UTF8String]
+                              : "no error description");
+            }
+            CFRelease(y_plane_ref);
+            CFRelease(uv_plane_ref);
+            CFRelease(pixel_buffer);
+        }];
+        [command_buffer commit];
+        *out_pending = command_buffer;
+        return texture;
+    }
 
     [command_buffer commit];
     [command_buffer waitUntilCompleted];
+    g_conversion_cpu_waits.fetch_add(1, std::memory_order_relaxed);
     CFRelease(y_plane_ref);
     CFRelease(uv_plane_ref);
     if (command_buffer.status == MTLCommandBufferStatusError) {
@@ -745,6 +790,12 @@ id<MTLTexture> CreateConvertedMetalTexture(id<MTLDevice>    device,
     }
 
     return texture;
+}
+
+bool ConversionCompleted(void* conversion)
+{
+    if (conversion == nullptr) return true;
+    return ((__bridge id<MTLCommandBuffer>)conversion).status >= MTLCommandBufferStatusCompleted;
 }
 
 } // namespace
@@ -765,6 +816,10 @@ struct AppleVideoFrameLease {
     void*             texture { nullptr };
     /// Set when `texture` is a conversion destination the pool can reuse.
     bool              recyclable_destination { false };
+    /// Retained id<MTLCommandBuffer> of a conversion committed without a CPU
+    /// wait, or null when the conversion had completed before the lease
+    /// existed. Its `status` is what says the destination has been written.
+    void*             conversion { nullptr };
 };
 
 struct AppleVideoMetalTexturePool::Impl {
@@ -787,9 +842,86 @@ struct AppleVideoMetalTexturePool::Impl {
         return { width, height, static_cast<uint32_t>(kConversionDestinationPixelFormat) };
     }
 
+    /// Per-destination objects a caller attached, dropped the moment the pool
+    /// lets go of that destination. Keyed on the retained handle, which cannot
+    /// be recycled into a different texture while the pool still holds it.
+    std::unordered_map<void*, std::shared_ptr<void>> companions;
+    /// Destinations whose lease let go before their conversion had finished
+    /// on the GPU. Each holds its destination retain and its command buffer
+    /// retain; the destination stays in the ledger's awaiting-GPU state until
+    /// the command buffer reports completion.
+    struct ParkedDestination {
+        void* destination { nullptr };
+        void* conversion { nullptr };
+    };
+    std::vector<ParkedDestination> parked;
+
+    void releaseDestination(void* resource) noexcept {
+        // Companions first: whatever aliases the texture goes before the
+        // texture itself can.
+        companions.erase(resource);
+        ReleaseAppleVideoMetalTexture(resource);
+    }
+
     void releaseReclaimed() noexcept {
-        for (void* resource : reclaimed) ReleaseAppleVideoMetalTexture(resource);
+        for (void* resource : reclaimed) releaseDestination(resource);
         reclaimed.clear();
+    }
+
+    /// Offers back a destination the GPU is known to have finished with.
+    void recycle(void* retained_destination) noexcept {
+        id<MTLTexture> texture = (__bridge id<MTLTexture>)retained_destination;
+        const uint32_t width = static_cast<uint32_t>(texture.width);
+        const uint32_t height = static_cast<uint32_t>(texture.height);
+        if (!CompatibleConvertedDestination(texture, device, width, height)) {
+            // Not a texture this pool could ever lend out for a conversion.
+            budget.EndLoan(retained_destination);
+            releaseDestination(retained_destination);
+            return;
+        }
+
+        const VideoConversionSlot slot {
+            .key = { width, height, static_cast<uint32_t>(texture.pixelFormat) },
+            .bytes = texture.allocatedSize,
+            .resource = retained_destination,
+        };
+        // The caller reached this point only after the GPU finished with the
+        // destination, which is what ends the loan the lend opened.
+        budget.ReportGpuComplete(retained_destination);
+        if (DeviceIsUnderMemoryPressure(device, slot.bytes)) {
+            budget.ReportMemoryPressure(reclaimed);
+        } else {
+            budget.ClearMemoryPressure();
+        }
+        reportPartialHosting(slot.key, slot.bytes);
+
+        const auto admission = budget.Admit(slot, reclaimed);
+        releaseReclaimed();
+        if (!admission.accepted) {
+            reportRefusal(admission.refusal);
+            releaseDestination(retained_destination);
+            return;
+        }
+        ++recycles;
+    }
+
+    /// Recycles every parked destination whose conversion has completed.
+    /// Called on the pool's own entry points, so it adds no thread and no
+    /// timer: a parked destination is looked at when an import next asks.
+    void retireCompletedConversions() noexcept {
+        if (parked.empty()) return;
+        std::size_t kept = 0;
+        std::vector<void*> completed;
+        for (auto& entry : parked) {
+            if (ConversionCompleted(entry.conversion)) {
+                CFRelease(entry.conversion);
+                completed.push_back(entry.destination);
+            } else {
+                parked[kept++] = entry;
+            }
+        }
+        parked.resize(kept);
+        for (void* destination : completed) recycle(destination);
     }
 
     void reportRefusal(VideoConversionRefusal refusal) noexcept {
@@ -879,12 +1011,34 @@ AppleVideoMetalTexturePool::AppleVideoMetalTexturePool(void* metal_device)
 AppleVideoMetalTexturePool::~AppleVideoMetalTexturePool()
 {
     Clear();
+    // Conversions still running when the pool goes: their command buffers
+    // retain the destinations until the GPU is done, so dropping this pool's
+    // retain frees nothing the GPU is writing.
+    for (auto& entry : m_impl->parked) {
+        CFRelease(entry.conversion);
+        m_impl->releaseDestination(entry.destination);
+    }
+    m_impl->parked.clear();
     SharedVideoConversionMemoryDomain().Forget(&m_impl->budget);
 }
 
 void* AppleVideoMetalTexturePool::Take(uint32_t width, uint32_t height)
 {
+    m_impl->retireCompletedConversions();
     return m_impl->budget.Take(Impl::KeyFor(width, height));
+}
+
+void AppleVideoMetalTexturePool::SetDestinationCompanion(void* destination,
+                                                         std::shared_ptr<void> companion)
+{
+    if (destination == nullptr) return;
+    m_impl->companions[destination] = std::move(companion);
+}
+
+std::shared_ptr<void> AppleVideoMetalTexturePool::DestinationCompanion(void* destination) const
+{
+    const auto found = m_impl->companions.find(destination);
+    return found != m_impl->companions.end() ? found->second : nullptr;
 }
 
 void AppleVideoMetalTexturePool::SetInFlightSlotExpectation(std::uint32_t slots) noexcept
@@ -901,6 +1055,7 @@ AppleVideoConversionReservation AppleVideoMetalTexturePool::ReserveFresh(uint32_
                                                                         uint32_t height)
 {
     const VideoConversionSlotKey key = Impl::KeyFor(width, height);
+    m_impl->retireCompletedConversions();
     // The estimate is the nominal cost, which is all anyone can know before
     // the texture exists. CommitFresh replaces it with what Metal allocated.
     const VideoConversionReservation reservation = m_impl->budget.ReserveAllocation(
@@ -957,49 +1112,25 @@ void AppleVideoMetalTexturePool::EndLoan(void* retained_destination) noexcept
 {
     if (retained_destination == nullptr) return;
     m_impl->budget.EndLoan(retained_destination);
-    ReleaseAppleVideoMetalTexture(retained_destination);
+    m_impl->releaseDestination(retained_destination);
 }
 
-void AppleVideoMetalTexturePool::Recycle(void* retained_destination) noexcept
+void AppleVideoMetalTexturePool::Recycle(void* retained_destination, void* conversion) noexcept
 {
     if (retained_destination == nullptr) return;
-    id<MTLTexture> texture = (__bridge id<MTLTexture>)retained_destination;
-    const uint32_t width = static_cast<uint32_t>(texture.width);
-    const uint32_t height = static_cast<uint32_t>(texture.height);
-    if (!CompatibleConvertedDestination(texture, m_impl->device, width, height)) {
-        // Not a texture this pool could ever lend out for a conversion.
-        m_impl->budget.EndLoan(retained_destination);
-        ReleaseAppleVideoMetalTexture(retained_destination);
+    m_impl->retireCompletedConversions();
+    if (! ConversionCompleted(conversion)) {
+        // The frame let go before the GPU wrote the destination. It stays on
+        // loan, awaiting the GPU, until its command buffer says otherwise.
+        m_impl->parked.push_back({ retained_destination, const_cast<void*>(CFRetain(conversion)) });
         return;
     }
-
-    const VideoConversionSlot slot {
-        .key = { width, height, static_cast<uint32_t>(texture.pixelFormat) },
-        .bytes = texture.allocatedSize,
-        .resource = retained_destination,
-    };
-    // The caller reached this point only after the GPU finished with the
-    // destination, which is what ends the loan the lend opened.
-    m_impl->budget.ReportGpuComplete(retained_destination);
-    if (DeviceIsUnderMemoryPressure(m_impl->device, slot.bytes)) {
-        m_impl->budget.ReportMemoryPressure(m_impl->reclaimed);
-    } else {
-        m_impl->budget.ClearMemoryPressure();
-    }
-    m_impl->reportPartialHosting(slot.key, slot.bytes);
-
-    const auto admission = m_impl->budget.Admit(slot, m_impl->reclaimed);
-    m_impl->releaseReclaimed();
-    if (!admission.accepted) {
-        m_impl->reportRefusal(admission.refusal);
-        ReleaseAppleVideoMetalTexture(retained_destination);
-        return;
-    }
-    ++m_impl->recycles;
+    m_impl->recycle(retained_destination);
 }
 
 void AppleVideoMetalTexturePool::RetainOnly(uint32_t width, uint32_t height) noexcept
 {
+    m_impl->retireCompletedConversions();
     m_impl->budget.DropOtherKeys(Impl::KeyFor(width, height), m_impl->reclaimed);
     m_impl->releaseReclaimed();
 }
@@ -1013,6 +1144,7 @@ void AppleVideoMetalTexturePool::ReportAllocationFailure(uint32_t width, uint32_
 
 void AppleVideoMetalTexturePool::Clear() noexcept
 {
+    m_impl->retireCompletedConversions();
     m_impl->budget.Drain(m_impl->reclaimed);
     m_impl->releaseReclaimed();
     // A new scene may well fit what this one could not.
@@ -1207,7 +1339,8 @@ void* CreateAppleVideoFrameLease(const VideoTextureFrame& frame,
                                  void* reusable_destination,
                                  std::string* error,
                                  bool* destination_allocation_failed,
-                                 void** created_destination)
+                                 void** created_destination,
+                                 void* metal_command_queue)
 {
     if (!frame.valid()) {
         return SetError(error, "video frame metadata is incomplete"), nullptr;
@@ -1222,9 +1355,10 @@ void* CreateAppleVideoFrameLease(const VideoTextureFrame& frame,
             return nullptr;
         }
 
-        id<MTLTexture>    texture = nil;
-        CVMetalTextureRef wrapper = nullptr;
-        bool              recyclable_destination = false;
+        id<MTLTexture>       texture = nil;
+        CVMetalTextureRef    wrapper = nullptr;
+        bool                 recyclable_destination = false;
+        id<MTLCommandBuffer> conversion = nil;
         const OSType pixel_format = static_cast<OSType>(frame.pixel_format);
         const bool is_nv12 = pixel_format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange ||
             pixel_format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
@@ -1255,9 +1389,9 @@ void* CreateAppleVideoFrameLease(const VideoTextureFrame& frame,
                 &wrapper,
                 error);
         } else if (is_nv12) {
-            // The conversion writes an ordinary destination texture and waits
-            // for completion, so its plane wrappers are already retired; the
-            // destination itself is what the pool can take back.
+            // The conversion writes an ordinary destination texture, which is
+            // what the pool can take back. On the caller's frame queue it is
+            // not waited for; see CreateConvertedMetalTexture.
             texture = CreateConvertedMetalTexture(
                 device,
                 reinterpret_cast<CVPixelBufferRef>(frame.pixel_buffer),
@@ -1265,6 +1399,8 @@ void* CreateAppleVideoFrameLease(const VideoTextureFrame& frame,
                 frame.width,
                 frame.height,
                 destination,
+                (__bridge id<MTLCommandQueue>)metal_command_queue,
+                &conversion,
                 destination_allocation_failed,
                 error);
             recyclable_destination = texture != nil;
@@ -1288,6 +1424,7 @@ void* CreateAppleVideoFrameLease(const VideoTextureFrame& frame,
         lease->texture = (__bridge_retained void*)texture;
         lease->plane_wrappers[0] = wrapper;
         lease->recyclable_destination = recyclable_destination;
+        if (conversion != nil) lease->conversion = (__bridge_retained void*)conversion;
         if (created_destination != nullptr && recyclable_destination &&
             reusable_destination == nullptr) {
             // The same handle Recycle will later be given, so the budget's
@@ -1307,6 +1444,16 @@ void* CreateAppleVideoFrameLease(const VideoTextureFrame& frame,
 void* AppleVideoFrameLeaseTexture(void* lease)
 {
     return lease != nullptr ? static_cast<AppleVideoFrameLease*>(lease)->texture : nullptr;
+}
+
+void* AppleVideoFrameLeaseConversion(void* lease)
+{
+    return lease != nullptr ? static_cast<AppleVideoFrameLease*>(lease)->conversion : nullptr;
+}
+
+uint64_t AppleVideoConversionCpuWaits() noexcept
+{
+    return g_conversion_cpu_waits.load(std::memory_order_relaxed);
 }
 
 void* TakeAppleVideoFrameLeaseDestination(void* lease)
@@ -1341,6 +1488,10 @@ void ReleaseAppleVideoFrameLease(void* lease)
         if (owned->pixel_buffer != nullptr) {
             CFRelease(reinterpret_cast<CVPixelBufferRef>(owned->pixel_buffer));
             owned->pixel_buffer = nullptr;
+        }
+        if (owned->conversion != nullptr) {
+            (void)CFBridgingRelease(owned->conversion);
+            owned->conversion = nullptr;
         }
         delete owned;
     }

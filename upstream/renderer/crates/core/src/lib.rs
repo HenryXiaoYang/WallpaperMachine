@@ -40,8 +40,10 @@ pub use display::{
     watcher::{DisplayEvent, DisplayWatcher},
 };
 pub use engine::{
-    DisplayConfig, DisplaySelector, DisplaySnapshotEntry, FirstFrameCallback, PointerConsumerCallback,
-    UserShortcutObserverCallback, WallpaperAssignment, WallpaperEngine, WallpaperEngineConfig,
+    AudioRequirementCallback, DisplayConfig, DisplaySelector, DisplaySnapshotEntry,
+    FirstFrameCallback, PointerActivity,
+    PointerActivityCallback, PointerConsumerCallback, PointerProbe, UserShortcutObserverCallback,
+    WallpaperAssignment, WallpaperEngine, WallpaperEngineConfig,
 };
 pub use error::EngineError;
 pub use owe::backend::AudioSpectrum128;

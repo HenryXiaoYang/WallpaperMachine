@@ -17,7 +17,7 @@ extern "C" {
  *
  * Two groups, deliberately separated, because they answer different questions:
  *
- *   - Surface-exclusive work (OWE_RC_TIMER_WAKEUPS .. OWE_RC_SIMULATION_TICKS)
+ *   - Surface-exclusive work (OWE_RC_TIMER_WAKEUPS .. OWE_RC_PRESENTS_SKIPPED_UNCHANGED)
  *     must stop for a surface nobody can see.
  *   - Source work (OWE_RC_VIDEO_*) belongs to the decoded media, which may
  *     legitimately keep running while one of its consumers is hidden, as long
@@ -53,6 +53,13 @@ typedef enum owe_renderer_counter {
     OWE_RC_GPU_COMPLETIONS,
     /* Scene simulation time was advanced by a completed frame. */
     OWE_RC_SIMULATION_TICKS,
+    /*
+     * A frame that ran (the scene ticked) but was not drawn or presented,
+     * because it would have put exactly the pixels already on the surface
+     * back: no drawable, no submission, no present. Counted apart from
+     * dropped draws and from present requests so neither is misread.
+     */
+    OWE_RC_PRESENTS_SKIPPED_UNCHANGED,
 
     /* --- surface state, stored rather than accumulated --- */
     /* Bitmask of owe_renderer_pause_reason. */

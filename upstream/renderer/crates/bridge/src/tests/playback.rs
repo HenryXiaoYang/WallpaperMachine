@@ -54,6 +54,8 @@ fn mouse_polling_survives_renderer_pause_failure() {
         await_mouse_sample(&engine);
         engine.fail_next_pause();
         assert!(bridge.pause_all().await.is_err());
+        // Still armed: the next move is sampled.
+        engine.simulate_pointer_input();
         await_mouse_sample(&engine);
         assert_eq!(
             bridge.app_snapshot().await.unwrap().playback_state,
@@ -360,6 +362,7 @@ async fn shutdown_disables_audio_capture_before_closing_scenes() {
         desc: wallpaper_core::DisplayDesc::new(7, 0, 0, 1920, 1080, 1.0),
         handle: Some(SceneHandle::new(42)),
         accepts_pointer_input: true,
+        paused: false,
         window_active: true,
         assignment: Some(WallpaperAssignment::Direct(
             wallpaper_core::project::SceneTemplate::builder("/tmp/project.json")
@@ -409,6 +412,15 @@ impl EngineFacade for FailingPlaybackEngine {
     ) {
     }
 
+    // Every scene reads audio here, as in `FakeEngineFacade` by default.
+    fn scene_requires_audio(&self, _handle: SceneHandle) -> bool { true }
+
+    fn set_audio_requirement_callback(
+        &self,
+        _callback: Option<wallpaper_core::AudioRequirementCallback>,
+    ) {
+    }
+
     fn update_media(&self, _handle: SceneHandle, _enabled: bool, _state: wallpaper_core::media::MediaPollResult) -> BoxFuture<'static, Result<(), EngineError>> {
         async move { Ok(()) }.boxed()
     }
@@ -439,7 +451,11 @@ impl EngineFacade for FailingPlaybackEngine {
         async move { Ok(()) }.boxed()
     }
 
-    fn set_all_paused(&self, _paused: bool) -> BoxFuture<'static, Result<(), EngineError>> {
+    fn set_all_paused(
+        &self,
+        _paused: bool,
+        _suspended_displays: Vec<u32>,
+    ) -> BoxFuture<'static, Result<(), EngineError>> {
         async move { Err(EngineError::Platform("pause failed".to_string())) }.boxed()
     }
 
@@ -570,6 +586,19 @@ impl EngineFacade for FailingPlaybackEngine {
             callback(false);
         }
     }
+
+    fn set_pointer_activity_callback(
+        &self,
+        callback: Option<wallpaper_core::PointerActivityCallback>,
+    ) {
+        if let Some(callback) = callback {
+            callback(wallpaper_core::PointerActivity::MonitorGap(false));
+        }
+    }
+
+    fn probe_pointer(&self) -> wallpaper_core::PointerProbe {
+        wallpaper_core::PointerProbe::default()
+    }
 }
 
 #[derive(Clone, Default)]
@@ -615,6 +644,15 @@ impl EngineFacade for ShutdownEngine {
     ) {
     }
 
+    // Every scene reads audio here, as in `FakeEngineFacade` by default.
+    fn scene_requires_audio(&self, _handle: SceneHandle) -> bool { true }
+
+    fn set_audio_requirement_callback(
+        &self,
+        _callback: Option<wallpaper_core::AudioRequirementCallback>,
+    ) {
+    }
+
     fn update_media(&self, handle: SceneHandle, enabled: bool, state: wallpaper_core::media::MediaPollResult) -> BoxFuture<'static, Result<(), EngineError>> {
         self.fake.update_media(handle, enabled, state)
     }
@@ -651,7 +689,11 @@ impl EngineFacade for ShutdownEngine {
         async move { Ok(()) }.boxed()
     }
 
-    fn set_all_paused(&self, _paused: bool) -> BoxFuture<'static, Result<(), EngineError>> {
+    fn set_all_paused(
+        &self,
+        _paused: bool,
+        _suspended_displays: Vec<u32>,
+    ) -> BoxFuture<'static, Result<(), EngineError>> {
         async move { Ok::<(), EngineError>(()) }.boxed()
     }
 
@@ -784,6 +826,17 @@ impl EngineFacade for ShutdownEngine {
         callback: Option<wallpaper_core::PointerConsumerCallback>,
     ) {
         self.fake.set_pointer_consumer_callback(callback);
+    }
+
+    fn set_pointer_activity_callback(
+        &self,
+        callback: Option<wallpaper_core::PointerActivityCallback>,
+    ) {
+        self.fake.set_pointer_activity_callback(callback);
+    }
+
+    fn probe_pointer(&self) -> wallpaper_core::PointerProbe {
+        self.fake.probe_pointer()
     }
 }
 
