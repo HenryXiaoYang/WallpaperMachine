@@ -33,6 +33,10 @@ INTERESTING = tuple(re.compile(pattern) for pattern in (
     r"^Command \S+ failed with a nonzero exit code",
     r"^\s*(?:\S+\.swift:\d+: error: |XCTAssert|Executed \d+ tests?, with \d+ failures? \(\d+ unexpected\))",
     r"could not build module|no such module|linker command failed|Undefined symbols",
+    # actool and other resource compilers: an absolute path with no line number, and
+    # Interface Builder's agent dying mid-compile.
+    r"^/\S+: (?:error|fatal error):",
+    r"IBPlatformToolFailureException|Terminating app due to uncaught exception",
 ))
 
 # Runtime chatter that happens to contain the word "error": Xcode plug-in faults,

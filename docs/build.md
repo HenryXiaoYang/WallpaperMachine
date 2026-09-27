@@ -86,9 +86,20 @@ python3 scripts/build.py                          # Debug, everything
 python3 scripts/build.py --configuration Release  # Release, everything
 python3 scripts/build.py --swift-only             # skip the renderer
 python3 scripts/build.py --renderer-only          # renderer + bindings only
+python3 scripts/build.py --compile-app-icon DIR   # only compile AppIcon.icon + Assets.xcassets into DIR
+python3 scripts/build.py --app-icon DIR           # build with that output instead of compiling the icon
 ```
 
 `--configuration` accepts `Debug` (default) or `Release`.
+
+`--compile-app-icon` runs `actool` with the arguments Xcode uses for this target and
+writes `Assets.car`, `AppIcon.icns` and `partial-info.plist`. `--app-icon` builds
+with `AppIcon.icon` excluded (`EXCLUDED_SOURCE_FILE_NAMES`, empty
+`ASSETCATALOG_COMPILER_APPICON_NAME`), then copies those files into the bundle,
+merges the Info.plist keys and re-signs it ad hoc. It exists for the release
+runner: on macOS 15, Xcode 26's `actool` crashes on most `.icon` compiles, so CI
+compiles the icon on macOS 26 ([release.md](release.md#build-buildyml)). A local
+build on either macOS never needs it.
 
 1. **Renderer** — `cargo build --workspace --release` in `upstream/renderer`.
    The Rust crates and the C++ scene engine are always built in release mode,
@@ -296,6 +307,7 @@ whole tree, which is how tests stay isolated from your real library.
 | `codesign --verify --deep --strict` fails | A dylib or the extension was modified after signing | Rerun packaging on a fresh build rather than re-signing pieces by hand. |
 | `Missing disk image input:` or `… not twice …` during the preflight | The DMG background under `Packaging/dmg/` or the bundle's `AppIcon.icns` is missing, or the 1x and 2x PNGs no longer pair up | `python3 scripts/brand.py --dmg`, then rerun packaging; the preflight stopped before the bundle was touched. |
 | `Could not detach …` while packaging | Something kept the volume busy past the retries (a Finder window on a leftover mount, an indexer), or a mount from an interrupted run is still attached | `hdiutil info` lists attached images; `hdiutil detach -force <device>` the leftover, then rerun packaging on a fresh build. |
+| `CompileAssetCatalogVariant` fails on `AppIcon.icon` with exit 65 on macOS 15 (actool exits 255 or dies with `IBPlatformToolFailureException`) | Xcode 26's `actool` crashes on most `.icon` compiles on macOS 15; the asset catalog alone is unaffected | Compile the icon on macOS 26 with `--compile-app-icon DIR` and build with `--app-icon DIR`, as the release workflow does. |
 
 ## Related documents
 

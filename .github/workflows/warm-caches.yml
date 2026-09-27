@@ -22,7 +22,13 @@ concurrency:
 
 jobs:
   warm:
-    runs-on: macos-15
+    # Build's release job runs on macOS 15 and its test job on macOS 26; each keeps
+    # its own entries.
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-26]
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4

@@ -214,12 +214,23 @@ Release for hand-pushed ones.
 
 The licensing gate that used to fail this workflow's first step was removed for
 1.0.0 by maintainer decision; the questions in [../LICENSING.md](../LICENSING.md)
-are still open. It runs three jobs. `build` and `test` start together on two
-`macos-15` runners (150-minute timeout each; the oldest runner that carries Xcode
-26, whose Homebrew bottles set the published app's minimum macOS), so the test
-gate adds no time on top of the Release build. `publish` runs on `ubuntu-latest`
-only after both succeed, so a published binary has passed the same gate a change
-has to pass.
+are still open. It runs four jobs. `app-icon` compiles the app icon on a
+`macos-26` runner in about a minute. `build` then runs on `macos-15` (the oldest
+runner that carries Xcode 26, whose Homebrew bottles set the published app's
+minimum macOS) while `test` runs on `macos-26`, 150-minute timeout each, so the
+test gate adds no time on top of the Release build. `publish` runs on
+`ubuntu-latest` only after both succeed, so a published binary has passed the same
+gate a change has to pass.
+
+**Why the icon is compiled apart.** On macOS 15, Xcode 26's `actool` exits 255 on
+most attempts to compile the Icon Composer `AppIcon.icon`: a probe on the
+`macos-15` image ran it three times with each installed Xcode from 26.0.1 to 26.3
+and 6 of 30 attempts succeeded, while the same runs on `macos-26` all succeeded
+and the asset catalog alone compiled 8 of 8 times on `macos-15`. The 1.0.1 build
+failed on exactly that step. `app-icon` runs `python3 scripts/build.py
+--compile-app-icon DIR`, which calls `actool` with Xcode's own arguments for this
+target, and hands `Assets.car`, `AppIcon.icns` and the partial Info.plist to
+`build` as the `app-icon-<tag>` artifact.
 
 **`build`**
 
@@ -229,8 +240,10 @@ has to pass.
    Version had the model write, or for a hand-pushed tag without one, notes the
    model writes now. It runs before anything is built, so a notes problem fails in
    seconds rather than after the macOS build;
-3. runs `prepare-build` (below);
-4. runs `python3 scripts/build.py --configuration Release`, then
+3. runs `prepare-build` (below) and downloads the `app-icon-<tag>` artifact;
+4. runs `python3 scripts/build.py --configuration Release --app-icon DIR`, which
+   leaves `AppIcon.icon` out of the Xcode build, puts the compiled icon and catalog
+   into the bundle with their Info.plist keys and re-signs it, then
    `python3 scripts/package.py --configuration Release --require-deployment-target`,
    which fails if a bundled library needs a newer macOS than the deployment target.
    Packaging proves the disk image, not the build tree: it mounts the image
@@ -246,7 +259,7 @@ has to pass.
 
 **`test`** runs `prepare-build`, `python3 scripts/build.py --renderer-only` for the
 renderer and the generated bridge, then `python3 scripts/test.py`, which builds the
-Debug app and its tests itself.
+Debug app, icon included, and its tests itself.
 
 When either macOS job fails it uploads its full tool logs (`artifacts/build/`, and
 for `test` also `artifacts/tests/*.log`) as `build-logs-<tag>` or `test-logs-<tag>`,
@@ -267,14 +280,15 @@ built version disagree and the job fails instead of publishing the wrong binary.
 **`prepare-build` and the caches.** The composite action selects the newest
 non-beta `/Applications/Xcode_26*.app`, `brew install --quiet`s the
 XcodeGen/CMake/renderer package set with `dav1d` and `ccache`, and restores three
-`actions/cache` entries. Both macOS jobs restore and save the same keys; when both
-miss, one saves and the other logs that the key is already reserved.
+`actions/cache` entries. Every key carries the runner's macOS (`<os>` below is
+`macos-15` or `macos-26`), because bottles, the FFmpeg keg and compiled objects
+differ between releases; `build` and `test` therefore keep separate entries.
 
 | Cache | Path | Key | What a hit saves |
 |---|---|---|---|
-| LGPL FFmpeg | `/opt/homebrew/Cellar/mwe-ffmpeg` | `mwe-ffmpeg-macos-15-<dav1d version>-<hash of Formula/mwe-ffmpeg.rb>` | the ~3 minute source build; the action restores the keg's `opt` link and `scripts/install_ffmpeg.py` finds the keg current |
-| C++ objects | `~/.ccache` | `ccache-macos-15-<run>`, restored by the `ccache-macos-15-` prefix | recompiling the scene engine. A checkout gives every file a new mtime, so CMake rebuilds the whole engine even from a restored build tree; ccache hashes content and returns the previous objects |
-| Renderer | `~/.cargo/registry`, `~/.cargo/git`, `upstream/renderer/target` | `renderer-ccache-macos-15-<hash of Cargo.lock, rust-toolchain.toml, provenance.json>`, restored by prefix | crate downloads, and Rust compilation while the nightly toolchain is unchanged |
+| LGPL FFmpeg | `/opt/homebrew/Cellar/mwe-ffmpeg` | `mwe-ffmpeg-<os>-<dav1d version>-<hash of Formula/mwe-ffmpeg.rb>` | the ~3 minute source build; the action restores the keg's `opt` link and `scripts/install_ffmpeg.py` finds the keg current |
+| C++ objects | `~/.ccache` | `ccache-<os>-<run>`, restored by the `ccache-<os>-` prefix | recompiling the scene engine. A checkout gives every file a new mtime, so CMake rebuilds the whole engine even from a restored build tree; ccache hashes content and returns the previous objects |
+| Renderer | `~/.cargo/registry`, `~/.cargo/git`, `upstream/renderer/target` | `renderer-ccache-<os>-<hash of Cargo.lock, rust-toolchain.toml, provenance.json>`, restored by prefix | crate downloads, and Rust compilation while the nightly toolchain is unchanged |
 
 The `CMAKE_<LANG>_COMPILER_LAUNCHER=ccache` variables only take effect on a build
 tree's first CMake configure, which is why the renderer key's prefix changed when
@@ -325,10 +339,11 @@ failed upload and reversed completion order:
 
 GitHub evicts a cache entry nobody has read for seven days. Twice a week (and on
 demand from **Actions -> Warm caches -> Run workflow**) this runs `prepare-build`
-and `python3 scripts/build.py --renderer-only` on `main`, which reads every entry
-Build uses and saves a fresh C++ object cache, so a release after a quiet week
-still starts warm. Caches saved on `main` are readable from every ref, including
-the tags Release builds. It publishes nothing.
+and `python3 scripts/build.py --renderer-only` on `main`, once on `macos-15` and
+once on `macos-26`, which reads every entry Build uses and saves a fresh C++ object
+cache for each, so a release after a quiet week still starts warm. Caches saved on
+`main` are readable from every ref, including the tags Release builds. It
+publishes nothing.
 
 ### Release (`release.yml`)
 

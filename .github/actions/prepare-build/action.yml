@@ -35,13 +35,16 @@ runs:
           vulkan-loader vulkan-headers molten-vk eigen nlohmann-json argparse shaderc \
           spirv-tools glm dav1d ccache
         echo "dav1d=$(brew list --versions dav1d | tr ' ' '-')" >> "$GITHUB_OUTPUT"
+        # Bottles, FFmpeg and compiled objects differ per macOS release, so every
+        # cache key carries the runner's (macos-15, macos-26).
+        echo "os=macos-$(sw_vers -productVersion | cut -d. -f1)" >> "$GITHUB_OUTPUT"
 
     - name: Restore the LGPL FFmpeg build
       id: ffmpeg
       uses: actions/cache@v4
       with:
         path: /opt/homebrew/Cellar/mwe-ffmpeg
-        key: mwe-ffmpeg-macos-15-${{ steps.brew.outputs.dav1d }}-${{ hashFiles('Formula/mwe-ffmpeg.rb') }}
+        key: mwe-ffmpeg-${{ steps.brew.outputs.os }}-${{ steps.brew.outputs.dav1d }}-${{ hashFiles('Formula/mwe-ffmpeg.rb') }}
 
     - name: Install the LGPL FFmpeg build
       shell: bash
@@ -78,8 +81,8 @@ runs:
       uses: actions/cache@v4
       with:
         path: ~/.ccache
-        key: ccache-macos-15-${{ github.run_id }}-${{ github.run_attempt }}
-        restore-keys: ccache-macos-15-
+        key: ccache-${{ steps.brew.outputs.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: ccache-${{ steps.brew.outputs.os }}-
 
     - name: Reset the C++ object cache statistics
       shell: bash
@@ -92,5 +95,5 @@ runs:
           ~/.cargo/registry
           ~/.cargo/git
           upstream/renderer/target
-        key: renderer-ccache-macos-15-${{ hashFiles('upstream/renderer/Cargo.lock', 'upstream/renderer/rust-toolchain.toml', 'upstream/provenance.json') }}
-        restore-keys: renderer-ccache-macos-15-
+        key: renderer-ccache-${{ steps.brew.outputs.os }}-${{ hashFiles('upstream/renderer/Cargo.lock', 'upstream/renderer/rust-toolchain.toml', 'upstream/provenance.json') }}
+        restore-keys: renderer-ccache-${{ steps.brew.outputs.os }}-
