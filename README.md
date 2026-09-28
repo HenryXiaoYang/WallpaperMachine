@@ -29,7 +29,9 @@
 
 One window, three tabs: Discover, Installed and Settings. The website runs that
 same interface on a demo library, so you can
-[try it in your browser](https://www.wallpapermachine.app/#app).
+[try it in your browser](https://www.wallpapermachine.app/#app). Close the
+window and the app keeps running in the menu bar, where you can pause, resume
+or skip to the next wallpaper.
 
 | Feature | What it does |
 | --- | --- |
@@ -39,9 +41,10 @@ same interface on a demo library, so you can
 | [**Music**](docs/features/audio-response.md) | Turn on Audio response and wallpapers made for sound move with what your Mac plays. Turn on [Media integration](docs/features/media-integration.md) and ones with a music display show the song that's on. |
 | [**Displays**](docs/features/control-panel.md#target-display) | Every display gets its own wallpaper, or mirrors another, with its own scaling, frame rate and volume. |
 | [**Battery**](docs/features/performance.md#playback) | On battery, keep running, drop to a render scale and frame rate you choose, or pause. One choice, off until you pick it. The rest of playback and quality is on [Performance](docs/features/performance.md). |
+| [**Energy**](docs/features/performance.md#energy-use) | Settings → Performance shows the power the app draws and, on a laptop, its share of a full charge per hour. Change a setting there and it compares before and after. Each installed wallpaper gets its own rating once it has been measured. |
 | [**Native**](docs/features/appearance.md) | Light, dark and your accent colour, like the rest of macOS, in English or [简体中文](docs/features/control-panel.md#language). |
 | [**Import**](docs/features/control-panel.md#downloads-and-import) | Bring the Wallpaper Engine folders you already have. The app copies them and leaves the originals alone. |
-| [**Out of sight, paused**](docs/architecture.md#desktop-wallpaper-windows-and-private-api-handling) | A covered display stops its own wallpaper, and sleep or lock pauses them all. Your own pause stays yours. |
+| [**Out of sight, paused**](docs/architecture.md#desktop-wallpaper-windows-and-private-api-handling) | A covered display stops its own wallpaper, and sleep or lock pauses them all. [Playback rules](docs/features/performance.md#playback) can also pause or mute them while another app plays sound, or while an app you choose is running or in front. Your own pause stays yours. |
 | [**Lock screen**](docs/features/lock-screen.md) | Video and scene wallpapers can animate the lock screen too. Experimental and off by default. |
 
 ## Rust core · Metal graphics
@@ -106,9 +109,12 @@ animated lock screen needs macOS 26 Tahoe or later. Intel Macs aren't supported.
 WallpaperMachine supports scene, video and web rendering. Compatibility varies
 by wallpaper; support for these formats does not mean every Workshop item will
 render identically, and Application wallpapers don't run. If one looks wrong,
-**Report a problem on GitHub** in the inspector opens a
-[GitHub issue](https://github.com/WallpaperMachine/WallpaperMachine/issues) form
-with its details filled in, for you to check and send.
+**Not working? Report on GitHub** in its details opens a new
+[GitHub issue](https://github.com/WallpaperMachine/WallpaperMachine/issues) with
+that wallpaper's information filled in, for you to check and send. To attach
+logs, export a [diagnostics report](docs/features/diagnostics.md) from
+Settings → Storage → Troubleshooting. Home folder paths, your Mac user name and
+Steam account names are replaced first.
 
 </details>
 
@@ -121,7 +127,9 @@ or [build it from the source](#open-source-free-to-build). The build is not
 notarized, so macOS holds its first launch until you click Open Anyway in
 System Settings → Privacy & Security. The
 [install guide](https://www.wallpapermachine.app/guides/install/) walks through
-it, from the download to the first-run guide.
+it, from the download to the first-run guide. From then on the app checks for
+new versions itself and, where it can replace its own copy, offers
+**Restart to Update**.
 
 </details>
 
