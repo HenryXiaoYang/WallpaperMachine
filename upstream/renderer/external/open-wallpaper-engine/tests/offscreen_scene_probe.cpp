@@ -220,6 +220,12 @@ void InjectSystemMedia(Scene& scene) {
     }
 }
 }
+#if defined(__APPLE__)
+#include <libproc.h>
+#include <sys/resource.h>
+#include <unistd.h>
+#endif
+
 int main() {
     try {
         const auto started = std::chrono::steady_clock::now();
@@ -575,7 +581,17 @@ int main() {
                                   << found->second.height;
                         }
                     }
-                    if (!d.vk_textures[t].slots.empty()) trace << " image=" << d.vk_textures[t].getActive().handle;
+                    if (!d.vk_textures[t].slots.empty()) {
+                        const auto& texture = d.vk_textures[t].getActive();
+                        VkMemoryRequirements memory {};
+                        if (texture.handle != VK_NULL_HANDLE) {
+                            device.handle().Dispatch().vkGetImageMemoryRequirements(
+                                *device.handle(), texture.handle, &memory);
+                        }
+                        trace << " image=" << texture.handle << " extent=" << texture.extent.width
+                              << 'x' << texture.extent.height << " mips=" << texture.mipmap_level
+                              << " bytes=" << memory.size;
+                    }
                     if (d.sprites_map.contains(t)) {
                         const auto& f = d.sprites_map.at(t).GetCurFrame();
                         trace << " sprite=" << f.x << ',' << f.y << " axis=" << f.xAxis[0] << ',' << f.xAxis[1] << ',' << f.yAxis[0] << ',' << f.yAxis[1];
@@ -753,9 +769,23 @@ int main() {
                       << " cacheable targets, " << stats.pinned_targets << " pinned\n";
         }
         Check(device.handle().WaitIdle() == VK_SUCCESS, "final probe idle");
+
         device.SavePipelineCache();
         Check(rr.command.Reset() == VK_SUCCESS, "discard final probe command");
         Check(device.tex_cache().WaitForPendingUploads(), "retire texture uploads");
+#if defined(__APPLE__)
+        rusage_info_v4 usage {};
+        if (proc_pid_rusage(getpid(), RUSAGE_INFO_V4,
+                           reinterpret_cast<rusage_info_t*>(&usage)) == 0) {
+            std::cout << "Process memory: footprint=" << usage.ri_phys_footprint
+                      << " peak=" << usage.ri_lifetime_max_phys_footprint << '\n';
+        }
+#endif
+        VmaStats memory {};
+        vmaCalculateStats(device.vma_allocator(), &memory);
+        std::cout << "VMA memory: blocks=" << memory.total.blockCount
+                  << " reserved=" << (memory.total.usedBytes + memory.total.unusedBytes)
+                  << " allocated=" << memory.total.usedBytes << '\n';
         for (auto* pass : passes) pass->destory(device, rr);
         passes.clear();
         scratch.passes.clear();

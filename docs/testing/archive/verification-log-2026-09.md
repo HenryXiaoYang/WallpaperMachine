@@ -15,6 +15,16 @@ renderer behaviour and known-failing tests into
 [../renderer.md](../renderer.md), build and code-signing traps into
 [../../build.md](../../build.md).
 
+## 2026-09-28 — Power set pre-commit finish: R25 revert, R3/R16/R1-R4 evidence
+
+R25 PowerWatcher restored to its original 5 s run_in_mode loop and its drop test and notes removed. New: ParticleHiddenGeometry.LayerShownByTickAfterEmittDrawsWhatAlwaysGeneratingDraws (fails with RebuildMesh stubbed out, passes as shipped); UnchangedPresent.TheSkipPresentsTheSameVideoFramesInTheSameOrder (75 distinct generations/PTS identical with the skip on and off) and OutputChangesOnAHeldVideoFramePresentOnceEach (crop, render scale, resize, fill mode), via the new observation-only RenderInitInfo::video_frame_presented. R3 late-flag bridge test already existed.
+
+- `python3 scripts/build.py --renderer-only` — exit 0
+- `python3 scripts/test.py --only RuntimeDiagnosticsReportTests --only ControlPanelDiscoverTests --only WebWallpaperRecoveryTests --only LockScreenWallpaperServiceTests` — 39 passed, 0 failed
+- `cargo test --release -p wallpaper-bridge --lib` — 349 passed; `-p wallpaper-core --lib` — 220 passed (first run failed in CMake configure after the environment change, as documented; unchanged retry passed)
+- `python3 scripts/check_renderer.py` — all cases pixels_equal, 0 diagnostics, reload cycles 0
+- By hand: audio_tests 45, scene_schema_tests 91, mouse_input_test 12, playback_gpu_test 50, unchanged_present_test 5, particle_rope_geometry_test 27, particle_mouse_controlpoint_test 39 passed; script_runtime_compat_test 78 passed, 1 failed (HostVectorUpdatesDoNotCallMutableGlobalVectorConstructors, also fails alone and at HEAD)
+
 ## 2026-09-27 — Installed: hold-and-drag multi-select with in-context tip
 
 - python3 scripts/test.py --only ControlPanelLibraryTests: 9 passed (new testHoldAndDragSelectsARunOfTilesWithoutWindow: stray drag ignored, hold checks, range sweep + sweep-back, ending click swallowed, sweep from checked tile clears, dragSelectLearned stored in defaults + snapshot).

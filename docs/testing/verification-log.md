@@ -25,6 +25,18 @@ move the oldest entries verbatim into
 (or a new dated archive file) first, and promote anything durable before it
 goes. Trimming is allowed; editing an entry's recorded result is not.
 
+## 2026-09-28 — Reduce active-scene reservations and release unlocked lock-screen renderer
+
+- Memory follow-up to the active-wallpaper report, not an idle-panel result. User approved unloading the unlocked lock-screen renderer and cold reloading on the next lock; original texture resolution, render scale, frame-rate ceiling and playback settings remain unchanged.
+- `scripts/test.py` with CPython 3.12.14 — exit 0; 190 Python passed, 663 native passed, 11 skipped. Final `python3 scripts/test.py --only WallpaperPresentationAuthorityTests` — 14 passed; covers retained-poster eligibility, paused/sleeping/host-suspended reload refusal, and failed-reload retry boundaries.
+- `python3 scripts/check_renderer.py` — exit 0; 23 test binaries, ten generated pixel comparisons, eight synthetic projects reloaded twice. Three asset-dependent cases skipped. Allocator regression fails under the prior policy (about 160 MiB unused retained allocation) and passes with the 32 MiB Apple block policy.
+- Current local scene, three-frame offscreen comparison: allocator reservation 632,029,696 → 514,261,760 bytes (−112.3 MiB); live allocation 479,332,096 bytes unchanged; all three output frames byte-identical. Probe now reports image extents/allocation requirements, retired-upload allocator totals and process footprint/peak separately.
+- `scripts/build.py --renderer-only` and `scripts/build.py --swift-only --configuration Release` — passed. Installed into `/Applications/WallpaperMachine.app`, signature checked, backups retained. Desktop-control actions used Codex computer use.
+- Live unlocked-session observation on the same selected scene: earlier vmmap main 820.4 MiB and extension 624.8 MiB; final main 745.9–749.9 MiB and extension 38.7 MiB. Final app coalition plus separately measured extension: 915.5–923.9 MiB over three samples ten seconds apart. No claim that the remaining roughly 0.9 GiB is a solved low-memory target.
+- Extension log confirms first-frame readiness followed by renderer unload while retaining its poster. Actual lock/unlock reload verification is pending user participation. No texture downsampling was applied; two 7680×4320 input images each require about 173 MiB on this scene.
+- Corrected test-bundle extension registration pollution: unregistered non-installed copies, renamed the two task-owned benchmark apps to non-launchable backup bundles, and verified the single registered/running extension is under `/Applications`. Config comparison confirmed playback, quality, power and monitor assignments unchanged.
+- Heap-pressure and prefetch/upload-overlap experiments were removed: no reliable useful gain on this scene (heap call reported zero; peak probe change about 6 MiB). Their measurements are not credited to the final change. Private wallpaper pixels, app copies and traces stay out of Git.
+
 ## 2026-09-28 — Release before-after resource measurements with Codex computer use
 
 - Built baseline and modified Release bundles with `python3 scripts/build.py --configuration Release`; both exit 0. Baseline restores the four changed production files from `31fb981`; modified code is `075e85e` (subsequent commits are docs). Current source and normal Release build restored; benchmark bundles use isolated homes and identical signing treatment.
@@ -116,13 +128,3 @@ Conflicts only in verification logs (entries unioned verbatim, oldest six archiv
 - `python3 scripts/check_renderer.py` — exit 0; 10/10 generated cases pixel-equal pooled vs isolated, 0 diagnostics, reload cycles 0 (artifacts/renderer/adaptive-20260928-001427)
 - `python3 scripts/test.py` — 650 passed, 0 failed, 11 skipped of 661; Python script suites OK
 - Not run: desktop, visual or power verification; no Release build.
-
-## 2026-09-28 — Power set pre-commit finish: R25 revert, R3/R16/R1-R4 evidence
-
-R25 PowerWatcher restored to its original 5 s run_in_mode loop and its drop test and notes removed. New: ParticleHiddenGeometry.LayerShownByTickAfterEmittDrawsWhatAlwaysGeneratingDraws (fails with RebuildMesh stubbed out, passes as shipped); UnchangedPresent.TheSkipPresentsTheSameVideoFramesInTheSameOrder (75 distinct generations/PTS identical with the skip on and off) and OutputChangesOnAHeldVideoFramePresentOnceEach (crop, render scale, resize, fill mode), via the new observation-only RenderInitInfo::video_frame_presented. R3 late-flag bridge test already existed.
-
-- `python3 scripts/build.py --renderer-only` — exit 0
-- `python3 scripts/test.py --only RuntimeDiagnosticsReportTests --only ControlPanelDiscoverTests --only WebWallpaperRecoveryTests --only LockScreenWallpaperServiceTests` — 39 passed, 0 failed
-- `cargo test --release -p wallpaper-bridge --lib` — 349 passed; `-p wallpaper-core --lib` — 220 passed (first run failed in CMake configure after the environment change, as documented; unchanged retry passed)
-- `python3 scripts/check_renderer.py` — all cases pixels_equal, 0 diagnostics, reload cycles 0
-- By hand: audio_tests 45, scene_schema_tests 91, mouse_input_test 12, playback_gpu_test 50, unchanged_present_test 5, particle_rope_geometry_test 27, particle_mouse_controlpoint_test 39 passed; script_runtime_compat_test 78 passed, 1 failed (HostVectorUpdatesDoNotCallMutableGlobalVectorConstructors, also fails alone and at HEAD)

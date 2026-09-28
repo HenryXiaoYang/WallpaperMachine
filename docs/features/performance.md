@@ -215,6 +215,21 @@ reports and **Renderer compatibility**), and the experimental switches:
 content pacing, shared video decode and direct video plane sampling.
 **What these settings change** stays last, outside this disclosure.
 
+## Renderer memory
+
+On Apple platforms, the Compatibility renderer grows its Vulkan allocator in
+32 MiB preferred blocks rather than the library's 256 MiB default. This reduces
+unused reservations in unified memory; it is not a cap on wallpaper size, and
+larger resources still allocate normally. Texture sizes, render targets, frame
+rates and effects are unchanged. The offscreen probe prints allocator reserved
+and used bytes separately from process memory.
+
+The lock-screen extension releases its renderer while unlocked after preserving
+a poster; see [lock-screen behavior and reload costs](lock-screen.md#enabling-it).
+The desktop renderer still needs the textures and render targets of the active
+wallpaper. An idle control-panel benchmark cannot establish its playback memory
+usage, and the extension must be measured separately from the app coalition.
+
 ## Repeated-work reduction
 
 These internal optimizations do not change any setting, target frame rate,
