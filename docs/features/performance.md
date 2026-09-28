@@ -215,6 +215,37 @@ reports and **Renderer compatibility**), and the experimental switches:
 content pacing, shared video decode and direct video plane sampling.
 **What these settings change** stays last, outside this disclosure.
 
+## Renderer memory
+
+On Apple platforms, the Compatibility renderer grows its Vulkan allocator in
+32 MiB preferred blocks rather than the library's 256 MiB default. This reduces
+unused reservations in unified memory; it is not a cap on wallpaper size, and
+larger resources still allocate normally. The offscreen probe prints allocator reserved
+and used bytes separately from process memory.
+
+Both scene backends load packaged image mip chains to match the physical display:
+the texture's longest edge is limited to the next power of two at or above the
+display's longest edge. A 3024×1964 display therefore uses the authored 4K mip
+instead of an 8K source level. Larger levels are skipped before decoding and GPU
+upload. Layout metadata, render-target resolution, frame rate and effects stay
+unchanged, but source detail can differ, especially when zooming into an image.
+Display-surface replacement rebuilds the textures for the new display size.
+
+This policy uses available authored mips; a single-level image or an incomplete
+chain may remain above the limit. Loose images, videos, sprite atlases, multi-slot
+images and unknown encoded containers retain their original loading behavior.
+This is a texture-residency reduction, not a fixed ceiling on total process memory.
+
+The lock-screen extension releases its renderer while unlocked after preserving
+a poster; see [lock-screen behavior and reload costs](lock-screen.md#enabling-it).
+The desktop renderer still needs the textures and render targets of the active
+wallpaper. An idle control-panel benchmark cannot establish its playback memory
+usage, and the extension must be measured separately from the app coalition.
+
+Closing the control panel releases its web view and allows its WebKit helpers
+to exit, rather than keeping the whole page hidden. Reopening reloads the page;
+see [panel lifecycle and import exception](control-panel.md#tabs).
+
 ## Repeated-work reduction
 
 These internal optimizations do not change any setting, target frame rate,
@@ -265,6 +296,16 @@ render scale, animation speed or audio-response subscription:
 - A video demuxer discards packets of streams it does not decode, and the
   wallpaper audio demuxer discards the video bitstream. The decoded picture,
   the PCM and the loop seam are unchanged.
+
+- Discover retains animation sources only for visible tiles in a visible document.
+  Scrolling a tile out of view, hiding the panel document or leaving Discover
+  releases its animation source; returning loads from the existing disk cache.
+  Stills and brightness-based fade handling are preserved. Failed or single-frame
+  previews are not retried just because the user scrolls.
+- Bridge snapshot bursts reuse one shader-cache size measurement for up to two
+  seconds instead of walking its directory for every property or playback update.
+  Explicit settings-snapshot requests and cache clearing force a fresh measurement.
+  This affects storage statistics only, not shader loading or rendering.
 
 Fewer allocations, queue moves or conversions are workload evidence, not a
 measurement of watts. Draw-call CPU timing excludes simulation and is not

@@ -498,6 +498,12 @@ std::shared_ptr<Image> WPTexImageParser::Parse(const std::string& name) {
 
         usize mipmap_count = (usize)std::max<i32>(file.ReadInt32(), 0);
         mipmaps.resize(mipmap_count);
+        usize first_mip = 0;
+        // Use the authored mip chain, without decoding or uploading discarded
+        // levels. Atlases, videos and unknown containers keep their full layout.
+        const bool limit_mips = m_texture_dimension_limit != 0 && image_count == 1 &&
+            !img.header.isSprite && !img.header.isVideo &&
+            (img.header.extraHeader["texb"].val < 3 || img.header.type != ImageType::UNKNOWN);
         // load image
         for (usize i_mipmap = 0; i_mipmap < mipmap_count; i_mipmap++) {
             auto& mipmap  = mipmaps.at(i_mipmap);
@@ -520,6 +526,13 @@ std::shared_ptr<Image> WPTexImageParser::Parse(const std::string& name) {
             i32 src_size = file.ReadInt32();
             if (src_size <= 0 || mipmap.width <= 0 || mipmap.height <= 0 || decompressed_size < 0)
                 return nullptr;
+            if (src_size > file.Size() - file.Tell()) return nullptr;
+            if (limit_mips && i_mipmap == first_mip && i_mipmap + 1 < mipmap_count &&
+                uint64_t(std::max(mipmap.width, mipmap.height)) > m_texture_dimension_limit) {
+                file.SeekSet(file.Tell() + src_size);
+                ++first_mip;
+                continue;
+            }
 
             char* result;
             result = new char[(usize)src_size];
@@ -590,6 +603,11 @@ std::shared_ptr<Image> WPTexImageParser::Parse(const std::string& name) {
             }
             mipmap.size = src_size * (i32)sizeof(uint8_t);
             delete[] result;
+        }
+        if (first_mip != 0) {
+            mipmaps.erase(mipmaps.begin(), mipmaps.begin() + first_mip);
+            img_slot.width = mipmaps.front().width;
+            img_slot.height = mipmaps.front().height;
         }
     }
     return img_ptr;

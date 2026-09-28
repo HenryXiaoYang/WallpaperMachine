@@ -618,15 +618,14 @@ final class ControlPanelDiscoverTests: ControlPanelTestCase {
         const liveOf = id => tile(id)?.querySelector('img.tile-live');
         const diagnose = () => ['a', 'b', 'c'].map(id => `${id}: still=${stillOf(id)?.complete}/${stillOf(id)?.naturalWidth} live=${!!liveOf(id)}/${liveOf(id)?.complete}/${liveOf(id)?.naturalWidth} playing=${tile(id)?.classList.contains('playing')}`).join('; ');
         // The panel samples animation brightness only while its page is visible. This web view
-        // has no window, so WebKit reports the page hidden: first prove nothing is sampled then,
+        // has no window, so WebKit reports the page hidden: first prove no animation loads then,
         // then show the page the way a visibility change would and let the sampling start.
         let hiddenPlayed = null;
         try {
           if (!document.hidden) return { error: 'expected a windowless page to report itself hidden' };
           await waitFor(() => ['a', 'b', 'c'].every(id => stillOf(id)?.complete && stillOf(id).naturalWidth > 0), 'stills to load');
-          await waitFor(() => liveOf('a')?.complete && liveOf('a').naturalWidth > 0, 'the bright animation to arrive');
-          await new Promise(resolve => setTimeout(resolve, 600));
           hiddenPlayed = tile('a').classList.contains('playing');
+          if (grid.querySelector('img.tile-live')) throw new Error('hidden previews must not load animations');
           Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });
           document.dispatchEvent(new Event('visibilitychange'));
           await waitFor(() => tile('a')?.classList.contains('playing'), 'the bright animation to play');
@@ -640,6 +639,31 @@ final class ControlPanelDiscoverTests: ControlPanelTestCase {
           bLoaded: !!liveOf('b'), bPlaying: tile('b').classList.contains('playing'),
           cLive: !!liveOf('c'), cStill: !!stillOf('c'), hiddenPlayed,
         };
+        // Shrink to one visible tile. Scrolling releases offscreen decoders, but returning
+        // to a tile reuses the disk cache. A failed/single-frame animation is not retried.
+        grid.style.gridTemplateColumns = '1fr'; grid.style.maxHeight = '160px';
+        grid.scrollTop = 0;
+        window.dispatchEvent(new Event('resize'));
+        try {
+          await waitFor(() => !!liveOf('a') && !liveOf('b'), 'offscreen animation to retire');
+          const previous = liveOf('a');
+          grid.scrollTop = grid.scrollHeight;
+          grid.dispatchEvent(new Event('scroll'));
+          await waitFor(() => !liveOf('a'), 'scrolled animation to retire');
+          discover.retiredSource = !previous.hasAttribute('src') && !previous.isConnected;
+          discover.failedPreviewRetried = !!liveOf('c');
+          grid.scrollTop = 0;
+          grid.dispatchEvent(new Event('scroll'));
+          await waitFor(() => liveOf('a')?.complete && tile('a').classList.contains('playing'), 'animation to resume after scrolling');
+          Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+          document.dispatchEvent(new Event('visibilitychange'));
+          discover.hiddenAnimations = grid.querySelectorAll('img.tile-live').length;
+          Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });
+          document.dispatchEvent(new Event('visibilitychange'));
+          await waitFor(() => tile('a').classList.contains('playing'), 'animation to resume after hiding');
+          window.wallpaperUI.receive(Object.assign({}, base, { page: 'settings' }));
+          discover.settingsAnimations = grid.querySelectorAll('img.tile-live').length;
+        } catch (error) { return { error: `${error.message} — ${diagnose()}` }; }
         // Leaving Discover while `a` plays: its Installed tile must show the library still.
         window.wallpaperUI.receive(Object.assign({}, base, { page: 'installed',
           wallpapers: [{ id: 'a', title: 'Tile a', kind: 'Scene', preview: 'mwe-ui://preview/a', active: false, supported: true, tags: [] }] }));
@@ -659,6 +683,10 @@ final class ControlPanelDiscoverTests: ControlPanelTestCase {
     XCTAssertEqual(
       result?["hiddenPlayed"] as? Bool, false,
       "A hidden page samples no animation brightness, so nothing starts playing")
+    XCTAssertEqual(result?["retiredSource"] as? Bool, true, "Offscreen images release their source and leave the DOM")
+    XCTAssertEqual(result?["failedPreviewRetried"] as? Bool, false, "Scrolling does not retry a single-frame preview")
+    XCTAssertEqual(result?["hiddenAnimations"] as? Int, 0, "Hiding the page releases all animation sources")
+    XCTAssertEqual(result?["settingsAnimations"] as? Int, 0, "Settings retains no Discover animation sources")
     XCTAssertEqual(result?["aPlaying"] as? Bool, true, "A bright animation replaces its still")
     XCTAssertEqual(result?["aStillKept"] as? Bool, true, "The still stays underneath for the dark loops")
     XCTAssertEqual(result?["bLoaded"] as? Bool, true, "The black animation loads beneath its still")

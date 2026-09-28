@@ -224,6 +224,7 @@ function render() {
   if (!state) return;
   const discover = state.page === 'discover';
   const settings = state.page === 'settings';
+  if (!discover) retireLivePreviews(new Set());
   document.querySelectorAll('.tabs [data-page]').forEach(tab => { if (tab.dataset.page === state.page) tab.setAttribute('aria-current', 'page'); else tab.removeAttribute('aria-current'); tab.disabled = busy('navigate', { page: tab.dataset.page }); });
   document.documentElement.style.setProperty('--window-controls-inset', `${Math.max(0, Number(state.windowControlsInset) || 0)}px`);
   morph($('app-identity'), `<span class="app-brand-mark">${icon('wallpaperMachine', 22)}</span><span class="app-title"><span class="app-name">WallpaperMachine</span></span>`);
@@ -1280,7 +1281,12 @@ function tileOnScreen(tile) {
   return rect.width > 0 && rect.bottom > grid.top && rect.top < grid.bottom;
 }
 function retireLivePreviews(ids) {
-  for (const id of live.keys()) if (!ids.has(id)) { $('wallpaper-grid').querySelector(`[data-key="live-${CSS.escape(id)}"]`)?.removeAttribute('src'); live.delete(id); }
+  for (const id of live.keys()) if (!ids.has(id)) {
+    const image = $('wallpaper-grid').querySelector(`[data-key="live-${CSS.escape(id)}"]`);
+    image?.closest('.wallpaper-tile')?.classList.remove('playing');
+    image?.removeAttribute('src'); image?.remove(); live.delete(id);
+  }
+  syncLiveSampler();
 }
 // Animations wait for the whole page of stills: every tile shows its picture before any tile
 // spends bandwidth on motion, so a slow link reveals the page all at once rather than one
@@ -1289,29 +1295,41 @@ function stillsSettled() {
   return [...$('wallpaper-grid').querySelectorAll('img.tile-still')].every(still => still.complete);
 }
 function queueLivePreviews() {
-  if (state?.page !== 'discover' || !stillsSettled()) return;
-  let added = false;
+  if (state?.page !== 'discover') return;
+  const canLoad = !document.hidden && stillsSettled();
+  let changed = false;
   for (const tile of $('wallpaper-grid').querySelectorAll('.tile-select')) {
     const id = tile.dataset.id;
-    if (live.has(id) || !tileOnScreen(tile)) continue;
+    const entry = live.get(id);
+    if (document.hidden || !tileOnScreen(tile)) {
+      if (entry && ['loading', 'ready'].includes(entry.status)) {
+        // Keep the disk cache and still, but release WebKit's animated image/decoder.
+        tile.querySelector('img.tile-live')?.removeAttribute('src');
+        entry.status = 'queued'; entry.playing = false; changed = true;
+      }
+      continue;
+    }
+    if (!canLoad || entry) continue;
     const item = (state.workshop?.items || []).find(each => each.id === id);
     const still = tile.querySelector('img.tile-still');
     if (!item || !safeImage(item.animated) || !item.thumbnail || !still?.complete || !still.naturalWidth) continue;
     live.set(id, { status: 'queued', playing: false, still: imageLuminance(still) ?? 0 });
-    added = true;
   }
-  if (added || live.size) pumpLivePreviews();
+  pumpLivePreviews(changed);
+  syncLiveSampler();
 }
-function pumpLivePreviews() {
-  let active = [...live.values()].filter(entry => entry.status === 'loading').length;
-  let admitted = false;
-  for (const tile of $('wallpaper-grid').querySelectorAll('.tile-select')) {
-    if (active >= LIVE_CONCURRENCY) break;
-    const entry = live.get(tile.dataset.id);
-    if (entry?.status !== 'queued' || !tileOnScreen(tile)) continue;
-    entry.status = 'loading'; active += 1; admitted = true;
+function pumpLivePreviews(changed = false) {
+  if (state?.page !== 'discover') return;
+  if (!document.hidden && stillsSettled()) {
+    let active = [...live.values()].filter(entry => entry.status === 'loading').length;
+    for (const tile of $('wallpaper-grid').querySelectorAll('.tile-select')) {
+      if (active >= LIVE_CONCURRENCY) break;
+      const entry = live.get(tile.dataset.id);
+      if (entry?.status !== 'queued' || !tileOnScreen(tile)) continue;
+      entry.status = 'loading'; active += 1; changed = true;
+    }
   }
-  if (admitted && state?.page === 'discover') renderGrid(true);
+  if (changed) renderGrid(true);
 }
 function settleLivePreview(image, loaded) {
   const id = image.closest('.tile-select')?.dataset.id;
@@ -1338,7 +1356,7 @@ function sampleLivePreviews() {
   if (!livePreviewsNeedSampling()) { syncLiveSampler(); return; }
   for (const image of $('wallpaper-grid').querySelectorAll('img.tile-live')) {
     const tile = image.closest('.wallpaper-tile'); const entry = live.get(tile?.dataset.key);
-    if (!entry || entry.status !== 'ready' || !image.complete || !image.naturalWidth) continue;
+    if (!entry || entry.status !== 'ready' || !image.complete || !image.naturalWidth || !tileOnScreen(tile)) continue;
     const luminance = imageLuminance(image);
     if (luminance === null) continue;
     const playing = luminance >= entry.still * (entry.playing ? 0.4 : 0.6);
@@ -1346,7 +1364,7 @@ function sampleLivePreviews() {
   }
 }
 $('wallpaper-grid').addEventListener('scroll', () => { clearTimeout(liveScrollTimer); liveScrollTimer = setTimeout(queueLivePreviews, 120); }, { passive: true });
-document.addEventListener('visibilitychange', () => { syncLiveSampler(); if (!document.hidden) queueLivePreviews(); });
+document.addEventListener('visibilitychange', () => { queueLivePreviews(); syncLiveSampler(); });
 const welcomeInert = new Set();
 function setWelcomeBackgroundInert(open) {
   for (const node of $('app').children) {

@@ -12,6 +12,49 @@ final class WallpaperPresentationAuthorityTests: XCTestCase {
 
   // MARK: - lock-screen surfaces
 
+  func testUnlockedRendererRetiresOnlyAfterItsPosterExists() {
+    let unlocked = Authority.Request(role: .lockScreen)
+    XCTAssertEqual(Authority.rendererAction(for: unlocked, hasRenderer: true,
+      hasSnapshot: false, reloadFailed: false), .updatePlayback)
+    XCTAssertEqual(Authority.rendererAction(for: unlocked, hasRenderer: true,
+      hasSnapshot: true, reloadFailed: false), .unload)
+    XCTAssertEqual(Authority.rendererAction(for: .init(role: .preview), hasRenderer: false,
+      hasSnapshot: true, reloadFailed: false), .updatePlayback)
+    let preview = Authority.Request(role: .preview, presentedFor: .seconds(20))
+    XCTAssertEqual(Authority.rendererAction(for: preview, hasRenderer: true,
+      hasSnapshot: true, reloadFailed: false), .updatePlayback)
+  }
+
+  func testOnlyAnEligibleLockReloadsItsReleasedRenderer() {
+    var locked = Authority.Request(role: .lockScreen, sessionLocked: true)
+    XCTAssertEqual(Authority.rendererAction(for: locked, hasRenderer: false,
+      hasSnapshot: true, reloadFailed: false), .reload)
+    locked.userPaused = true
+    XCTAssertEqual(Authority.rendererAction(for: locked, hasRenderer: false,
+      hasSnapshot: true, reloadFailed: false), .updatePlayback)
+    locked.userPaused = false
+    locked.displaysAsleep = true
+    XCTAssertEqual(Authority.rendererAction(for: locked, hasRenderer: false,
+      hasSnapshot: true, reloadFailed: false), .updatePlayback)
+    locked.displaysAsleep = false
+    locked.hostActivity = .suspended
+    XCTAssertEqual(Authority.rendererAction(for: locked, hasRenderer: false,
+      hasSnapshot: true, reloadFailed: false), .updatePlayback)
+  }
+
+  func testFailedReloadWaitsForANewUnlockLockCycle() {
+    let locked = Authority.Request(role: .lockScreen, sessionLocked: true)
+    XCTAssertEqual(Authority.rendererAction(for: locked, hasRenderer: false,
+      hasSnapshot: true, reloadFailed: true), .updatePlayback)
+    // Unloading an already released surface resets the failure latch for the next lock.
+    XCTAssertEqual(Authority.rendererAction(for: .init(role: .lockScreen), hasRenderer: false,
+      hasSnapshot: true, reloadFailed: true), .unload)
+    XCTAssertEqual(Authority.rendererAction(for: locked, hasRenderer: false,
+      hasSnapshot: true, reloadFailed: false), .reload)
+    XCTAssertEqual(Authority.rendererAction(for: locked, hasRenderer: true,
+      hasSnapshot: true, reloadFailed: false), .updatePlayback)
+  }
+
   func testALockScreenSurfacePresentsOnlyWhileTheLockScreenIsShowing() {
     XCTAssertTrue(
       Authority.mayPresent(.init(role: .lockScreen, sessionLocked: true)),

@@ -14,6 +14,7 @@ enum SettingsSection: String, CaseIterable {
 final class ControlPanelNavigation: ObservableObject {
   @Published var selection: SidebarSelection?
   @Published var targetDisplayID = "primary"
+  var isImporting = false
   @Published private(set) var settingsSection = SettingsSection.performance
   @Published private(set) var settingsSectionToken: UInt64 = 0
 

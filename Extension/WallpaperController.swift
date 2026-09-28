@@ -55,7 +55,7 @@ final class WallpaperController {
           surface.clear()
           continue
         }
-        if surface.hasRenderer, surface.scene.projectPath == scene.projectPath,
+        if surface.hasContent, surface.scene.projectPath == scene.projectPath,
           surface.scene.assetsPath == scene.assetsPath,
           surface.scene.propertiesJSON == scene.propertiesJSON,
           surface.scene.scalingMode == scene.scalingMode,
@@ -83,7 +83,7 @@ final class WallpaperController {
     }
   }
 
-  private func acknowledge(surface: WallpaperSurface, error: Error? = nil) {
+  func acknowledge(surface: WallpaperSurface, error: Error? = nil) {
     guard !surface.preview, let configuration,
       configuration.scenes.contains(surface.scene)
     else { return }

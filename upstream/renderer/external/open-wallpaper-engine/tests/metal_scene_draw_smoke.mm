@@ -3726,6 +3726,9 @@ TEST_F(MetalSceneDraw, LocalProjectsNamedByTheEnvironmentRunThroughTheNativeBack
     std::size_t index = 0;
     for (const auto& project : projects) {
         SCOPED_TRACE(project);
+        if (const char* seed = std::getenv("WE_TEST_RANDOM_SEED")) {
+            Random::seed(static_cast<uint32_t>(std::strtoul(seed, nullptr, 10)));
+        }
         const std::string label = "local-" + std::to_string(index++);
 
         SceneSourcePaths paths;

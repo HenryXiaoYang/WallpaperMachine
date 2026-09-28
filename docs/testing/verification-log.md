@@ -25,6 +25,74 @@ move the oldest entries verbatim into
 (or a new dated archive file) first, and promote anything durable before it
 goes. Trimming is allowed; editing an entry's recorded result is not.
 
+## 2026-09-28 — Display-sized packaged texture residency
+
+- scripts/test.py with CPython 3.12.14: 190 Python passed; 663 native passed, 11 skipped. Full gate run once for this feature.
+- scripts/check_renderer.py passed: 23 binaries, ten generated pixel comparisons, eight projects x2 reloads. Three asset-dependent cases skipped; the local Metal scene was tested separately.
+- tex_schema_tests: 22 passed, including surface budget selection/reset, metadata preservation, pre-decode skipping, payload truncation and sprite/video exclusions.
+- Current local scene: GPU allocated 457.1 to 198.1 MiB, reserved 490.4 to 231.4 MiB. Matched headless process peak 1175.4 to 622.9 MiB.
+- Compatibility: five frames spanning two seconds with particle seed 42 and synthetic silent audio were byte-identical before/after; the frames differed over time.
+- Metal: fixed local-project random-seed handling; full-source and budgeted seeded 120-frame runs ended with byte-identical images. Temporary baseline budget bypass was restored before final review.
+- Live closed-panel samples, 3 per build 10 seconds apart: main median 735.5 to 458.9 MiB; whole app coalition plus separate extension median 786.3 to 509.4 MiB (after range 413.9–509.4). GPU accounting and settling samples fluctuate; no universal ceiling or CPU saving claimed.
+- Renderer/bindings and Release builds passed. Signed app installed into /Applications with backup, launched using Codex computer use, same wallpaper playing and first frame ready. Saved configuration identical; only installed extension registered.
+- Policy may reduce source detail under zoom and only limits available authored mip chains. Actual lock/unlock and the local-import close exception remain unexercised; private scene assets/images stay in artifacts.
+
+## 2026-09-28 — Release the closed control panel to reduce memory
+
+- Panel lifecycle follow-up: CPython 3.12.14 scripts/test.py --only ControlPanelWindowSizingTests --only ControlPanelShellTests --only ControlPanelSyncTests passed 30/30. Earlier full gate is recorded separately; not repeated.
+- scripts/build.py --swift-only --configuration Release passed; installed signed result into /Applications/WallpaperMachine.app with the previous bundle backed up.
+- Codex computer use confirmed original scene playback, close/reopen, Settings navigation and restoration of the last native section. No quality, audio, power or renderer settings changed.
+- Old installed build retained 121.6 MiB across WebKit GPU/WebContent/Networking after closing. Updated build released WebContent/Networking immediately and GPU after its idle timeout.
+- Same updated main PID 88547: total app coalition plus separate installed extension 904.6 MiB with panel open, 790.0 MiB after close and helper exit; main 734.8 to 734.7 MiB. This isolates panel residency, not a build-to-build benchmark.
+- Fresh startup remained above 1 GiB before freed decode allocations were reclaimed; closing the panel does not solve the remaining scene texture/renderer memory.
+- Existing native Metal local-scene harness drew 120 frames at 3840x2160; no demonstrated memory win and no live backend switch. Raw-mip copy experiment did not apply to this scene’s embedded PNGs and was removed.
+- Local imports retain the hidden page until the next close to avoid cancellation. This exception was reviewed but not exercised with a real file picker; real lock/unlock remains pending user operation.
+
+## 2026-09-28 — Reduce active-scene reservations and release unlocked lock-screen renderer
+
+- Memory follow-up to the active-wallpaper report, not an idle-panel result. User approved unloading the unlocked lock-screen renderer and cold reloading on the next lock; original texture resolution, render scale, frame-rate ceiling and playback settings remain unchanged.
+- `scripts/test.py` with CPython 3.12.14 — exit 0; 190 Python passed, 663 native passed, 11 skipped. Final `python3 scripts/test.py --only WallpaperPresentationAuthorityTests` — 14 passed; covers retained-poster eligibility, paused/sleeping/host-suspended reload refusal, and failed-reload retry boundaries.
+- `python3 scripts/check_renderer.py` — exit 0; 23 test binaries, ten generated pixel comparisons, eight synthetic projects reloaded twice. Three asset-dependent cases skipped. Allocator regression fails under the prior policy (about 160 MiB unused retained allocation) and passes with the 32 MiB Apple block policy.
+- Current local scene, three-frame offscreen comparison: allocator reservation 632,029,696 → 514,261,760 bytes (−112.3 MiB); live allocation 479,332,096 bytes unchanged; all three output frames byte-identical. Probe now reports image extents/allocation requirements, retired-upload allocator totals and process footprint/peak separately.
+- `scripts/build.py --renderer-only` and `scripts/build.py --swift-only --configuration Release` — passed. Installed into `/Applications/WallpaperMachine.app`, signature checked, backups retained. Desktop-control actions used Codex computer use.
+- Live unlocked-session observation on the same selected scene: earlier vmmap main 820.4 MiB and extension 624.8 MiB; final main 745.9–749.9 MiB and extension 38.7 MiB. Final app coalition plus separately measured extension: 915.5–923.9 MiB over three samples ten seconds apart. No claim that the remaining roughly 0.9 GiB is a solved low-memory target.
+- Extension log confirms first-frame readiness followed by renderer unload while retaining its poster. Actual lock/unlock reload verification is pending user participation. No texture downsampling was applied; two 7680×4320 input images each require about 173 MiB on this scene.
+- Corrected test-bundle extension registration pollution: unregistered non-installed copies, renamed the two task-owned benchmark apps to non-launchable backup bundles, and verified the single registered/running extension is under `/Applications`. Config comparison confirmed playback, quality, power and monitor assignments unchanged.
+- Heap-pressure and prefetch/upload-overlap experiments were removed: no reliable useful gain on this scene (heap call reported zero; peak probe change about 6 MiB). Their measurements are not credited to the final change. Private wallpaper pixels, app copies and traces stay out of Git.
+
+## 2026-09-28 — Release before-after resource measurements with Codex computer use
+
+- Built baseline and modified Release bundles with `python3 scripts/build.py --configuration Release`; both exit 0. Baseline restores the four changed production files from `31fb981`; modified code is `075e85e` (subsequent commits are docs). Current source and normal Release build restored; benchmark bundles use isolated homes and identical signing treatment.
+- Used Codex built-in computer use for the final A/B UI sequence. Same 1054×659 panel, Chinese locale, same 30 displayed Discover titles, six page-scrolls down and six up, then Command-W. No active wallpaper or quality/default changes. Both sessions seeded with the same 120 thumbnail-cache files, verified byte-identical; live adjacent-page prefetch differed by one unused animated preview/still pair.
+- Collected three approximately 22-second closed-panel windows per build, 21 samples each. Every sample verified no on-screen test panel, exactly one WallpaperMachine instance, and a stable resource-coalition process set. These are repeated windows within one app session per build, not independent launches. Interrupted foreground attempts excluded.
+- App plus helper CPU: baseline median 0.64%, range 0.25–1.02%; modified median 0.60%, range 0.45–3.94%. Ranges overlap and the first modified window was higher: no demonstrated idle-CPU improvement. Mach-absolute rusage times converted with the local 125/3 timebase, checked against ps cumulative CPU time.
+- Physical footprint: baseline median 248.6 MiB, range 248.6–248.7; modified median 186.0 MiB, range 185.7–199.9. Observed difference −62.6 MiB (25.2%) in this browsing/closed-panel comparison, not a general playback or system-RAM claim.
+- Summed process RSS: baseline median 551.4 MiB, range 551.0–551.5; modified median 426.5 MiB, range 426.3–432.2. Observed difference −125.0 MiB (22.7%). RSS may double-count shared pages; physical footprint is reported separately.
+- Both benchmark apps quit through Codex computer use and their exit was verified. App preferences restored to the pre-run snapshot; no wallpaper was applied during this comparison. Existing app-code gates remain applicable; only documentation changed afterward.
+- Limits: foreground/active-playback CPU and RAM still unmeasured under controlled conditions; the public Workshop page and neighboring-page prefetch are not a frozen network fixture. No broad CPU-saving or all-wallpapers RAM-saving percentage is claimed.
+
+## 2026-09-28 — Authorized Release live check for preview and snapshot optimizations
+
+- Explicit follow-up authorization: live desktop run on source `075e85e`. `python3 scripts/build.py --swift-only --configuration Release` — exit 0; the Release app contains the modified panel asset (SHA-256 matched the source).
+- Release app launched with an isolated `WALLPAPER_MACHINE_HOME`; initial user desktop image URLs and app preferences were saved locally. Apple M5 Pro, macOS 27.0, built-in 3024×1964 display at 120 Hz; default Compatibility video, native render scale.
+- Live functional checks: real Discover results and animated-preview cache loaded; Settings/Installed navigation and hide/reopen remained responsive. Aurora Drift applied through the UI and the renderer logged first-frame readiness. Pause and resume controls changed state correctly; timer stop/start and occlusion suspension/resume appeared in the runtime log. No Release-process crash.
+- CPU/RSS sampled for the Release resource coalition, including its WebKit services. Discarded active-playback comparison: foreground changed repeatedly, and a separate Debug instance began running with the same bundle ID. No matched pre-change baseline or reliable whole-app CPU/RAM saving is claimed.
+- UI targeting switched to the exact Release PID after detecting the second instance. Scrolling was attempted but its viewport movement and animation pixels were not independently verified; source-release behavior remains covered by the passing headless regression.
+- Restoration: requested graceful termination of the Release PID only; it exited and logged renderer teardown. Desktop image URLs match the pre-run records. Other Debug instance left running. Only the shared window-frame preference differed; it was not overwritten while another instance owned it.
+- No screenshots, screen/audio capture, live Steam login, installation, lock-screen/sleep-wake tests, or quality/default changes. Previous passing headless gates remain applicable; this follow-up changed documentation only.
+
+## 2026-09-28 — Reduce invisible preview retention and repeated storage scans
+
+- `scripts/test.py` with installed CPython 3.12.14 — exit 0; 190 Python tests passed; 660 native passed, 11 skipped, 0 failed. Initial Python 3.9 attempt stopped in unchanged brand tests (`zip(strict=True)`); the interpreter requirement is now in the testing guide.
+- `python3 scripts/test.py --only ControlPanelDiscoverTests` — exit 0; 6 passed. Extended regression covers hidden loading, offscreen source release, scrolling/visibility resume, Settings retirement, still fallback and one download per URL.
+- New Discover regression against unmodified upstream `panel.js` — failed as expected because hidden animations retained sources; modified code passes in the full gate.
+- `cargo test --release -p wallpaper-bridge --lib` with the build environment — exit 0; 360 passed. A burst of 1,001 size requests performs one walk; expiry and explicit invalidation remeasure. Actor test covers immediate cache growth and clearing.
+- `python3 scripts/build.py --renderer-only` — exit 0; rebuilt the bridge and regenerated bindings; no interface changes.
+- `python3 scripts/check_renderer.py` — exit 0; 23 test binaries, 10 generated scenes with matching pooled/isolated pixels and no diagnostics, and 8 synthetic projects reloaded twice. Three asset-dependent cases skipped (two text scenes and native local-project coverage).
+- Synthetic Rust 2024 optimized probe using production directory-size/cache methods: 1,000 queries over 256 files of 1 KiB, five runs per variant. Median elapsed 239.714 ms before vs 0.449 ms cached; ranges 237.600–251.058 ms vs 0.418–0.523 ms. Workload timing only; tiny RSS differences and rounded CPU-time samples do not establish app memory/CPU savings.
+- Reviewed frame scheduling, bounded video queues, shared-decoder ownership, native-video teardown, web-audio subscription loops and extension surface release; no additional renderer/quality/default changes were justified.
+- Headless only: desktop CPU/RAM, visual behavior, live Steam and opt-in media tests unverified. No wallpaper changes, desktop capture, app launch/restart or Release app delivery build.
+
 ## 2026-09-28 — Reconcile keeps unchanged scenes; launch-at-login read once per burst
 
 Follow-up to 4ee91e5: full reconciles (Apply, display edits, backend switch, repair) now hand the engine live descriptors (frame-rate ceiling and transient mute applied), and the launch-at-login status is read from SMAppService at most every two seconds.
@@ -64,54 +132,3 @@ User report on 1.0.2 (Workshop 3521337568, Lucy): lock screen held a still frame
 - `python3 scripts/test.py` — exit 0; 652 passed, 0 failed, 11 skipped of 663.
 - `python3 scripts/check_renderer.py` — exit 0; 23 test binaries passed, 10 generated fixtures pixel-equal pooled vs isolated, reload cycles 0 failures.
 - Not verified: the lock/unlock and display-wake behaviour on the desktop (no desktop run authorised), and no Release build was made. Apply, display edits and repair reconciles still compare saved values, so they can still reopen a scene held to a frame-rate ceiling or transient mute, as in 1.0.1.
-
-## 2026-09-28 — Panel stays open after applying; Command-W closes it
-
-Settings → General → Hide window after applying a wallpaper now defaults to off (a stored choice is kept). The main menu gains File → Close (Command-W), which goes through the panel's windowShouldClose like the close button.
-
-- `python3 scripts/test.py --only WebPanelGeneralSettingsTests` — exit 0; 1 passed (first attempt stopped at CodeSign on Finder/file-provider xattrs on the Debug bundle; cleared with `xattr -cr`)
-- `python3 scripts/test.py` — exit 0; Python suites OK; native 661: 650 passed, 11 skipped, 0 failed
-- `xcodebuild build-for-testing -scheme WallpaperMachineUI` — TEST BUILD SUCCEEDED; the new `testCommandWClosesLikeTheCloseButton` compiles but was not run
-- Not exercised: Command-W and the panel staying open after Apply on the desktop (no desktop run requested); no Release build
-
-## 2026-09-28 — Rebase of the power change set onto origin/main f383bbd
-
-Conflicts only in verification logs (entries unioned verbatim, oldest six archived) and provenance.json (sceneEngine.equalQualityPerformanceChanges keeps upstream's 2026-09-24 note followed by ours; upstream deferredSurfaceLifetimeChanges kept). Upstream 36359b3 SceneWallpaperBindings.mm and 2d1322a panel.js/WebControlPanel.swift touch disjoint hunks; no bridge API change upstream.
-
-- `python3 scripts/build.py --renderer-only` — exit 0; regenerated App/Bridge/Generated unchanged
-- `cargo test --release -p wallpaper-bridge --lib` (build.py cargo environment) — 349 passed; `-p wallpaper-core --lib` — 220 passed
-- `python3 scripts/check_renderer.py` — exit 0; 10/10 generated cases pixel-equal pooled vs isolated, 0 diagnostics, reload cycles 0 (artifacts/renderer/adaptive-20260928-001427)
-- `python3 scripts/test.py` — 650 passed, 0 failed, 11 skipped of 661; Python script suites OK
-- Not run: desktop, visual or power verification; no Release build.
-
-## 2026-09-28 — Power set pre-commit finish: R25 revert, R3/R16/R1-R4 evidence
-
-R25 PowerWatcher restored to its original 5 s run_in_mode loop and its drop test and notes removed. New: ParticleHiddenGeometry.LayerShownByTickAfterEmittDrawsWhatAlwaysGeneratingDraws (fails with RebuildMesh stubbed out, passes as shipped); UnchangedPresent.TheSkipPresentsTheSameVideoFramesInTheSameOrder (75 distinct generations/PTS identical with the skip on and off) and OutputChangesOnAHeldVideoFramePresentOnceEach (crop, render scale, resize, fill mode), via the new observation-only RenderInitInfo::video_frame_presented. R3 late-flag bridge test already existed.
-
-- `python3 scripts/build.py --renderer-only` — exit 0
-- `python3 scripts/test.py --only RuntimeDiagnosticsReportTests --only ControlPanelDiscoverTests --only WebWallpaperRecoveryTests --only LockScreenWallpaperServiceTests` — 39 passed, 0 failed
-- `cargo test --release -p wallpaper-bridge --lib` — 349 passed; `-p wallpaper-core --lib` — 220 passed (first run failed in CMake configure after the environment change, as documented; unchanged retry passed)
-- `python3 scripts/check_renderer.py` — all cases pixels_equal, 0 diagnostics, reload cycles 0
-- By hand: audio_tests 45, scene_schema_tests 91, mouse_input_test 12, playback_gpu_test 50, unchanged_present_test 5, particle_rope_geometry_test 27, particle_mouse_controlpoint_test 39 passed; script_runtime_compat_test 78 passed, 1 failed (HostVectorUpdatesDoNotCallMutableGlobalVectorConstructors, also fails alone and at HEAD)
-
-## 2026-09-27 — Installed: hold-and-drag multi-select with in-context tip
-
-- python3 scripts/test.py --only ControlPanelLibraryTests: 9 passed (new testHoldAndDragSelectsARunOfTilesWithoutWindow: stray drag ignored, hold checks, range sweep + sweep-back, ending click swallowed, sweep from checked tile clears, dragSelectLearned stored in defaults + snapshot).
-- python3 scripts/test.py: 649 passed, 0 failed, 11 skipped; panel localization tests pass with the new zh-Hans strings.
-- Not exercised: real mouse sweep on a desktop, edge auto-scroll (rAF does not run in the offscreen test web view), hold animation visuals, reduced-motion appearance. No Release build.
-
-## 2026-09-27 — Updater: staged restart-install, writability gate, release certificate signing
-
-- Fix 1: AppUpdateInstaller.canReplace requires a writable bundle and folder; startReplacement stages the new app beside the old, swaps by rename, restores and reopens the previous app on any failure.
-- Repro before: old script (rm -rf then ditto) with a missing source left Applications empty and never reopened.
-- python3 scripts/test.py --only AppUpdateTests: 33 passed (new: canReplace permission, successful swap, failed swap keeps and reopens old app).
-- Fix 2: package.py --sign-identity; build.yml imports SIGNING_CERTIFICATE_P12/PASSWORD (set on repo) into a temp keychain and fails without them.
-- Local CI-step replay on a copy of the Release app: import ok, codesign --verify --deep --strict ok, DR = identifier app.wallpapermachine and certificate root = H"2bdf...fa82" (was cdhash); extension keeps app-sandbox; missing-secret path exits 1.
-- python3 scripts/test.py: 648 passed, 0 failed, 11 skipped.
-- Not exercised: a real CI release run, launching a certificate-signed app, lock-screen extension loading under the new signature, TCC persistence across an actual update (no desktop run authorized); no Release build.
-- 1.0.1 -> 1.0.2 still uses 1.0.1's installer and ad-hoc grants; fixes apply from 1.0.2 onward.
-
-## 2026-09-27 — Release build
-
-- python3 scripts/test.py: 648 passed, 0 failed, 11 skipped
-- python3 scripts/build.py --configuration Release: OK; bundled WebUI matches WebUI/

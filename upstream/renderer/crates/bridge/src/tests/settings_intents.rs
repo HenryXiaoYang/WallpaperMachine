@@ -1959,6 +1959,11 @@ async fn clear_shader_cache_removes_cache_and_rebuilds_active_scenes() {
     apply_primary_wallpaper(&bridge, "100").await;
     wait_for_reconcile_count(&engine, 1);
 
+    assert_eq!(bridge.settings_snapshot().await.unwrap().storage.shader_cache_size_bytes, 3);
+    std::fs::write(paths.shader_cache_root().join("new-cache.bin"), [4, 5]).unwrap();
+    assert_eq!(bridge.settings_snapshot().await.unwrap().storage.shader_cache_size_bytes, 5,
+        "an explicit settings read sees new files even within a snapshot burst");
+
     let snapshot = bridge.clear_shader_cache().await.unwrap();
 
     wait_for_reconcile_count(&engine, 2);

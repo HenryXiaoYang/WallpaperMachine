@@ -828,6 +828,29 @@ protected:
     }
 };
 
+TEST_F(PlaybackGPU, ReleasingLargeFrameBufferDoesNotRetainAnOversizedEmptyBlock) {
+    constexpr size_t frame_bytes = 40u * 1024 * 1024;
+    {
+        VmaBufferParameters frame;
+        ASSERT_TRUE(CreateReadbackBuffer(device.vma_allocator(), frame_bytes, frame));
+        void* mapped = nullptr;
+        ASSERT_EQ(frame.handle.MapMemory(&mapped), VK_SUCCESS);
+        auto* bytes = static_cast<uint8_t*>(mapped);
+        bytes[0] = 17;
+        bytes[frame_bytes - 1] = 91;
+        EXPECT_EQ(bytes[0], 17);
+        EXPECT_EQ(bytes[frame_bytes - 1], 91);
+        frame.handle.UnMapMemory();
+        VmaStats memory {};
+        vmaCalculateStats(device.vma_allocator(), &memory);
+        EXPECT_GE(memory.total.usedBytes, frame_bytes);
+    }
+    VmaStats memory {};
+    vmaCalculateStats(device.vma_allocator(), &memory);
+    // A transient large frame must not leave a desktop-sized idle allocation behind.
+    EXPECT_LE(memory.total.unusedBytes, 32u * 1024 * 1024);
+}
+
 TEST_F(PlaybackGPU, SameGenerationSkipsConversion) {
     auto source = std::make_shared<SyntheticVideo>(); source->Set(1, 40, 90, 170);
     auto ref = Register("same", source);

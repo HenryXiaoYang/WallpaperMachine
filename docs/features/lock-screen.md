@@ -14,6 +14,15 @@ This uses a sandboxed native wallpaper extension — the
 [`Extension/`](../../Extension) ExtensionKit target — rather than drawing an
 ordinary app window over the login UI. While it is active the native desktop
 remains a still frame, while the existing desktop renderer keeps playing.
+Once its first frame is ready, an unlocked lock-screen surface retains its
+captured poster and releases the renderer, textures and device allocations.
+Locking again reloads the scene behind that poster before resuming animation.
+This saves memory while unlocked; a cold lock may briefly show the still frame,
+and animation/script state starts again. Resolution, frame rate and effects
+are unchanged. A failed reload keeps the poster and reports readiness failure;
+it does not repeatedly retry until a new unlock/lock cycle or scene replacement.
+User pause, display sleep and host suspension still prevent a reload.
+
 Lock-screen audio, audio input and media integration are disabled; see
 [Audio response](audio-response.md) and
 [Media integration](media-integration.md). The extension turns media off again
@@ -60,6 +69,10 @@ macOS may launch any of them — including the Debug build `scripts/test.py`
 rebuilds beside the Release app.
 `pluginkit -m -A -D -v -i app.wallpapermachine.wallpaper-extension` lists every
 registered copy (without `-A -D` it shows only one); keep one while testing.
+After testing copied app bundles, unregister their `.appex` paths with
+`pluginkit -r` and stop keeping those copies as launchable `.app` bundles.
+Verify the running extension's executable path points inside the installed app;
+checking only the bundle identifier does not establish which copy macOS chose.
 
 ## Turning it off
 

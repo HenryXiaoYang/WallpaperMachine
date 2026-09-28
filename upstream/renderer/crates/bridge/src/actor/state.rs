@@ -2,7 +2,11 @@ pub mod drafts {
     pub use crate::state::drafts::*;
 }
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::{Arc, Mutex},
+    time::Instant,
+};
 
 use drafts::WallpaperOptionsDraft;
 use wallpaper_core::project::{SceneDesc, WallpaperProjectType};
@@ -20,6 +24,7 @@ use crate::{
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug)]
 pub struct BridgeActorState {
+    pub(crate) shader_cache_size: Arc<Mutex<Option<(Instant, u64)>>>,
     pub playback_state: BridgePlaybackState,
     /// Global presentation suspension: display sleep or session lock, where no
     /// display can show a wallpaper pixel at all.
@@ -80,6 +85,7 @@ pub struct BridgeActorState {
 impl Default for BridgeActorState {
     fn default() -> Self {
         Self {
+            shader_cache_size: Arc::default(),
             playback_state: BridgePlaybackState::Playing,
             presentation_suspended: false,
             presentation_unloaded: false,

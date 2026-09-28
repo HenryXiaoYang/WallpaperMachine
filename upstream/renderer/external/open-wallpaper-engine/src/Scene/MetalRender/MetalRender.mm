@@ -3836,6 +3836,9 @@ bool MetalRender::Impl::planStaticSkips(Scene& scene)
 bool MetalRender::Impl::compile(Scene& scene, rg::RenderGraph& graph)
 {
     releaseGraph();
+    if (scene.imageParser != nullptr) {
+        scene.imageParser->SetTextureSurfaceSize(output_width, output_height);
+    }
 
     if (auto reason = MetalGraphRejection(scene, graph); ! reason.empty()) {
         return fail(std::move(reason));

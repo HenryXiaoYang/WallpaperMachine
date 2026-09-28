@@ -69,7 +69,9 @@ final class WebPanelController: NSObject, WKNavigationDelegate {
   var observationInstalled = false
   var commandBusy = false
   var actionError: String?
-  var importTask: Task<Void, Never>?
+  var importTask: Task<Void, Never>? {
+    didSet { navigation.isImporting = importTask != nil }
+  }
   var importStatus = ""
   var importReport: WallpaperImportService.Report?
   var remembersSession = true

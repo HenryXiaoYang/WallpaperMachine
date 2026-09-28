@@ -23,6 +23,7 @@
 #include "WPTexImageParser.hpp"
 #include "Utils/Algorism.h"
 #include "Scene/Parse/ImageOrientation.hpp"
+#include "Runtime/RuntimeImageSource.hpp"
 
 TEST(ImageOrientation, AllEightDisplayTransformsPreserveRGBA) {
     const std::vector<std::vector<int>> expected = {
@@ -386,6 +387,74 @@ WPTexImageParser MakeParser(fs::VFS& vfs, std::vector<uint8_t> tex) {
     };
     EXPECT_TRUE(vfs.Mount("/assets", std::make_unique<MemoryFs>(std::move(files))));
     return WPTexImageParser(&vfs);
+}
+
+std::vector<uint8_t> BuildMipTex(uint32_t flags = 0, bool encoded = false,
+                               bool truncated = false) {
+    Bytes b;
+    b.Stamp('V', 5); b.Stamp('I', 1);
+    b.I32(0); b.U32(flags);
+    for (int i = 0; i < 4; ++i) b.I32(8);
+    b.I32(0); b.Stamp('B', encoded ? 3 : 2); b.I32(1);
+    if (encoded) b.I32(static_cast<int32_t>(ImageType::PNG));
+    b.I32(encoded ? 2 : 3);
+    for (int size : encoded ? std::vector<int>{8, 1} : std::vector<int>{8, 4, 2}) {
+        const auto payload = encoded && size == 1 ? Png1x1()
+            : std::vector<uint8_t>(size * size * 4, uint8_t(size));
+        b.I32(size); b.I32(size); b.I32(0); b.I32(0);
+        b.I32(truncated ? 65536 : static_cast<int32_t>(payload.size()));
+        b.Raw(payload);
+    }
+    return b.Take();
+}
+
+TEST(TexSchema, SurfaceBudgetSelectsAuthoredMipsAndKeepsLayoutMetadata) {
+    fs::VFS vfs;
+    RuntimeImageSource parser(std::make_unique<WPTexImageParser>(MakeParser(vfs, BuildMipTex())));
+    for (const auto [surface, expected] : std::vector<std::pair<uint32_t, int>>{
+             {0, 8}, {3, 4}, {5, 8}, {1, 2}, {0, 8}}) {
+        parser.SetTextureSurfaceSize(surface, surface);
+        auto image = parser.Parse("sample");
+        ASSERT_NE(image, nullptr);
+        ASSERT_EQ(image->slots.size(), 1u);
+        const auto& slot = image->slots.front();
+        ASSERT_FALSE(slot.mipmaps.empty());
+        EXPECT_EQ(slot.width, expected);
+        EXPECT_EQ(slot.height, expected);
+        EXPECT_EQ(slot.mipmaps.front().size, expected * expected * 4);
+        EXPECT_EQ(slot.mipmaps.front().data.get()[0], expected);
+        EXPECT_EQ(image->header.width, 8);
+        EXPECT_EQ(image->header.mapWidth, 8);
+        EXPECT_EQ(parser.ParseHeader("sample").width, 8);
+    }
+}
+
+TEST(TexSchema, SurfaceBudgetSkipsEncodedPixelsButRejectsTruncatedPayloads) {
+    for (bool truncated : {false, true}) {
+        fs::VFS vfs;
+        auto parser = MakeParser(vfs, BuildMipTex(0, true, truncated));
+        parser.SetTextureSurfaceSize(1, 1);
+        // The oversized level contains invalid PNG bytes. Success proves it
+        // was skipped before decoding, not decoded and resized afterward.
+        auto image = parser.Parse("sample");
+        if (truncated) { EXPECT_EQ(image, nullptr); continue; }
+        ASSERT_NE(image, nullptr);
+        ASSERT_EQ(image->slots.front().mipmaps.size(), 1u);
+        EXPECT_EQ(image->slots.front().width, 1);
+        EXPECT_EQ(image->slots.front().mipmaps.front().data.get()[0], 255);
+    }
+}
+
+TEST(TexSchema, SurfaceBudgetPreservesSpriteAndVideoMipChains) {
+    for (uint32_t flag : {kSpriteFlag, kVideoFlag}) {
+        fs::VFS vfs;
+        auto parser = MakeParser(vfs, BuildMipTex(flag));
+        parser.SetTextureSurfaceSize(1, 1);
+        auto image = parser.Parse("sample");
+        ASSERT_NE(image, nullptr);
+        EXPECT_EQ(image->slots.front().width, 8);
+        EXPECT_EQ(image->slots.front().mipmaps.size(), 3u);
+    }
 }
 
 // A package may ship an ordinary picture next to its `.tex` files; those are
