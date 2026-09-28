@@ -13,6 +13,7 @@ export const qualityPresetLabels = [['low', 'Low'], ['medium', 'Medium'], ['high
 const batteryModes = [['keepRunning', 'Keep running'], ['reducedQuality', 'Reduced quality'], ['pause', 'Pause']];
 const otherAudioActions = [['keepRunning', 'Keep running'], ['mute', 'Mute'], ['pause', 'Pause']];
 const displaySleepActions = [['pause', 'Pause'], ['stop', 'Stop (free memory)']];
+const desktopCoveredActions = [['pause', 'Pause'], ['keepRunning', 'Keep running']];
 const appRuleConditions = [['running', 'Running'], ['frontmost', 'In front']];
 const appRuleActions = [['pause', 'Pause'], ['mute', 'Mute'], ['stop', 'Stop']];
 const compactNavigation = window.matchMedia('(max-width: 560px)');
@@ -91,9 +92,9 @@ function frameRateCapMax(settings) {
   return max != null && max >= 10 ? Math.round(max) : 60;
 }
 
-// Slider position `max` is reserved for no limit, which runs every display at its
-// native refresh rate, so a stored cap at or above that ceiling is the same choice
-// the control can send.
+// Slider position `max` is reserved for no limit, which leaves every display at its
+// own frame rate, so a stored cap at or above that ceiling is the same choice the
+// control can send.
 export function frameRateCapSlider(settings) {
   const max = frameRateCapMax(settings);
   const cap = storedFrameRateCap(settings);
@@ -109,7 +110,7 @@ export function frameRateCapValue(value, max) {
 
 export function frameRateCapReadout(value, max) {
   const number = finiteNumber(value);
-  if (number == null || number >= Number(max)) return t('Native refresh rate');
+  if (number == null || number >= Number(max)) return t('No limit');
   return t('{fps} fps', { fps: Math.round(number) });
 }
 
@@ -370,7 +371,7 @@ function draw(view) {
   const energy = group('performance-energy', t('Energy use'),
     row('energy-use', t('This app, last few seconds'), energyControl(e), t('As macOS accounts for it: GPU energy is shared out by GPU time. Includes the control panel, video decoding and the lock screen. Screen compositing, memory and the display itself are not included. Low is under 0.5 W, Medium under 2 W. Change a quality setting below and this row shows the figure before and after.'), 'settings-readout'));
   const playback = group('performance-playback', t('Playback'),
-    row('occlusion', t('Covered, full-screen or hidden'), `<span class="settings-status" role="status">${e(t('Paused automatically'))}</span>`, t('A wallpaper you can’t see stops on its own. This is not a setting.'), 'settings-readout')
+    row('desktop-covered', t('When windows cover the desktop'), select('desktopCoveredAction', t('When windows cover the desktop'), draft('desktopCoveredAction', settings.desktopCoveredAction || 'pause'), localizedOptions(desktopCoveredActions), 'data-setting="desktopCoveredAction"', busy || unavailable), t('Covered means windows hide everything but the menu bar and the screen edges. Pause keeps the last frame there. Wallpapers you can’t see at all always pause.'))
     + row('other-audio', t('When another app plays sound'), select('otherAudioAction', t('When another app plays sound'), draft('otherAudioAction', settings.otherAudioAction || 'keepRunning'), localizedOptions(otherAudioActions), 'data-setting="otherAudioAction"', busy || unavailable), t('Mute affects scene and video wallpapers only. Web wallpapers have no mute channel, so Mute does not silence them. Pause applies to every wallpaper.'))
     + row('display-sleep', t('When displays sleep'), select('displaySleepAction', t('When displays sleep'), draft('displaySleepAction', settings.displaySleepAction || 'pause'), localizedOptions(displaySleepActions), 'data-setting="displaySleepAction"', busy || unavailable), t('Stop frees renderer memory and reloads the wallpaper when the display wakes. Pause keeps it loaded.'))
     + row('battery-mode', t('On battery'), select('batteryMode', t('On battery'), draft('batteryMode', settings.batteryMode || 'keepRunning'), localizedOptions(batteryModes), 'data-setting="batteryMode"', busy || unavailable), t('Reduced quality uses the scale and frame rate below instead of your usual quality settings. Pause stops wallpapers until you plug in.'))
@@ -380,7 +381,7 @@ function draw(view) {
     + row('app-rules', t('App rules'), '', t('Pause, mute or stop wallpapers while a chosen app is running or in front.')) + disclosure('app-rules-editor', t('Edit…'), rulesEditor));
   const quality = group('performance-quality', t('Quality'),
     row('quality-preset', t('Preset'), `<div class="settings-segment" role="group" aria-label="${e(t('Quality preset'))}">${presetButtons}</div>`, t('Low, Medium and High set the frame-rate limit and render scale together. Custom means the current values match none of those.'))
-    + row('frame-rate-cap', t('Frame rate limit'), `<input data-key="frameRateCap" type="range" aria-label="${e(t('Frame rate limit'))}" min="10" max="${capSlider.max}" step="1" value="${e(capDraft)}" data-setting="frameRateCap"${disabled(busy || unavailable)}><output class="settings-unit" data-value-for="frameRateCap">${e(frameRateCapReadout(capDraft, capSlider.max))}</output>`, t('At the top of the slider every display runs at its own native refresh rate. A lower value caps every display; saved per-display frame rates are not rewritten.'))
+    + row('frame-rate-cap', t('Frame rate limit'), `<input data-key="frameRateCap" type="range" aria-label="${e(t('Frame rate limit'))}" min="10" max="${capSlider.max}" step="1" value="${e(capDraft)}" data-setting="frameRateCap"${disabled(busy || unavailable)}><output class="settings-unit" data-value-for="frameRateCap">${e(frameRateCapReadout(capDraft, capSlider.max))}</output>`, t('At the top of the slider there is no limit, and each display runs at its own frame rate: up to 60 fps unless you chose more for it. A lower value caps every display; saved per-display frame rates are not rewritten.'))
     + row('render-scale', t('Internal render scale'), select('renderScale', t('Internal render scale'), draft('renderScale', preferredScale), scaleOptions(preferredScale), 'data-setting="renderScale" data-number', busy || unavailable || !scaleSupported), scaleSupported ? t('Renders at a lower resolution and scales the result to fill the same area. Size and position on screen don’t change.') : t('Not applicable to the wallpapers currently running'))
     + (scaleSupported && scaleOverridden ? row('render-scale-effective', t('Effective now'), `<span class="settings-status" role="status">${e(batteryActive ? t('{effective} on battery. Your setting is {saved}.', { effective: percent(settings.renderScale), saved: percent(settings.preferredRenderScale) }) : t('{effective}. Your setting of {saved} is not in effect right now.', { effective: percent(settings.renderScale), saved: percent(settings.preferredRenderScale) }))}</span>`, '', 'settings-readout') : ''));
   const sceneGroup = group('performance-scene', t('Scene wallpapers'),
@@ -401,7 +402,8 @@ function draw(view) {
       + settingToggle('sceneVideoPlaneSampling', 'Direct video plane sampling', false, t('Experimental. In scenes drawn by Native Metal, lets a layer’s shader read video frames directly instead of converting them to a color image every frame. Only works with 8-bit NV12 video and shaders that support it; everything else converts as before. The list above shows which path each scene uses.'))
       + (sessions || consumers ? row('shared-decode-report', t('Shared decode in use'), `<span class="settings-status" role="status">${e(t('{sessions} serving {surfaces}', { sessions: t(sessions === 1 ? '{count} session' : '{count} sessions', { count: sessions }), surfaces: t(consumers === 1 ? '{count} surface' : '{count} surfaces', { count: consumers }) }))}</span>`, '', 'settings-readout') : ''), 'settings-group settings-disclosure-rows')
     + disclosure('performance-context', t('What these settings change'), paragraphs(
-      t('Covered, full-screen and hidden wallpapers pause on their own. When another app plays sound, Mute silences scene and video wallpapers only — web wallpapers have no mute channel — and Pause stops every wallpaper until that sound ends.'),
+      t('Wallpapers you can’t see, such as behind a full-screen app, pause on their own. When windows cover the desktop, Pause keeps the last frame and Keep running keeps it moving in the gaps.'),
+      t('When another app plays sound, Mute silences scene and video wallpapers only. Web wallpapers have no mute channel. Pause stops every wallpaper until that sound ends.'),
       t('When displays sleep, Pause keeps wallpapers loaded. Stop frees renderer memory and reloads them when the display wakes.'),
       t('On battery, Keep running leaves quality alone, Reduced quality uses the battery scale and frame rate, and Pause stops wallpapers until you plug in. None of these promises a measured power saving.'),
       t('App rules pause, mute or stop wallpapers while a chosen app is running or in front. Your own Play and Pause are not changed.'),

@@ -78,6 +78,12 @@ void ThreadTimer::WakeAt(std::chrono::steady_clock::time_point when) {
     m_condition.notify_all();
 }
 
+void ThreadTimer::FireNow() {
+    std::unique_lock<std::mutex> lock(m_cond_mutex);
+    m_fire_now = true;
+    m_condition.notify_all();
+}
+
 void ThreadTimer::Start() {
     std::unique_lock<std::mutex> lock(m_op_mutex);
 
@@ -91,12 +97,27 @@ void ThreadTimer::Start() {
         // not a tick: the loop re-checks the deadline instead.
         auto last_tick = std::chrono::steady_clock::now();
         while (Running()) {
+            // When the tick about to run was due. A cadence tick is anchored to
+            // its deadline, not to when the thread happened to wake: taking the
+            // wake time added every wait's 2-4 ms of timer slack to the period,
+            // so a 60 fps ceiling delivered about 50 frames a second and 120
+            // about 100. A tick more than a whole interval late restarts the
+            // cadence from now rather than bursting to catch up.
+            auto tick_at = std::chrono::steady_clock::now();
             {
                 std::unique_lock<std::mutex> lock(m_cond_mutex);
                 while (Running()) {
                     if (m_rebase) {
                         m_rebase = false;
                         last_tick = std::chrono::steady_clock::now();
+                    }
+                    if (m_fire_now) {
+                        // The frame owed a dropped tick: the cadence restarts
+                        // here, so the next tick is a whole interval away.
+                        m_fire_now = false;
+                        m_wake_once = false;
+                        tick_at = std::chrono::steady_clock::now();
+                        break;
                     }
                     // The user's FPS ceiling is a floor on the gap between two
                     // callbacks, and it binds every path into one — not only
@@ -138,6 +159,8 @@ void ThreadTimer::Start() {
                         }
                         const auto now = std::chrono::steady_clock::now();
                         if (now >= *due) {
+                            // An event-driven frame has no cadence to keep.
+                            tick_at = now;
                             m_wake_once = false;
                             // Only a kept appointment is consumed. One that is
                             // still in the future survives a frame that ran for
@@ -156,7 +179,13 @@ void ThreadTimer::Start() {
                     // not predict — but only as far as the ceiling, never past
                     // it. When the cadence is the ceiling this changes nothing.
                     if (m_wake_once && earliest < deadline) deadline = earliest;
-                    if (std::chrono::steady_clock::now() >= deadline) {
+                    const auto now = std::chrono::steady_clock::now();
+                    if (now >= deadline) {
+                        // Late by more than the step this deadline took — the
+                        // interval, or the ceiling when a request cut the wait
+                        // short — restarts from now, so an old anchor cannot
+                        // let requests through faster than the ceiling.
+                        tick_at = now - deadline < deadline - last_tick ? deadline : now;
                         // The tick satisfies any pending request: the frame it
                         // is about to run is the frame that was asked for.
                         // Clearing here rather than discarding at the request
@@ -169,7 +198,7 @@ void ThreadTimer::Start() {
                 }
             }
             if (!Running()) break;
-            last_tick = std::chrono::steady_clock::now();
+            last_tick = tick_at;
             if (m_callback) m_callback();
         }
         LOG_INFO("thread timer exited");

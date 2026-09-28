@@ -29,9 +29,10 @@ the document without writing an artifact.
 and the machine as a whole before and after a window of that length and writes
 `artifacts/power/measure-<timestamp>.json`: the manifest, `"measured": true`,
 the sources in `measurement_tool`, the condition marked measured, and
-`measurement` with the actual elapsed time, one row per role, the system power
-and the package power. One line per role is printed, e.g.
-`app: CPU 38.2 %, GPU 65.1 %`. The window is always the length asked for: a
+`measurement` with the actual elapsed time, one row per role, the coalition
+energy, the system power and the package power. One line per role is printed,
+e.g. `app: CPU 38.2 %, GPU 65.1 %; coalition CPU 67 mW, GPU 5434 mW`, then the
+total over all coalitions. The window is always the length asked for: a
 powermetrics that fails or is refused at once does not shorten it.
 
 | Role | Executable | Note |
@@ -47,6 +48,17 @@ powermetrics that fails or is refused at once does not shorten it.
   `AGXDeviceUserClient` entries in `ioreg`: how long its command queues kept the
   GPU busy. It is utilisation, not energy. A process whose GPU client closed
   during the window reports no GPU value instead of an undercount.
+- **Coalition energy** is the CPU and GPU energy the kernel charged to each
+  role's resource coalition over the window, in mW, plus the total over every
+  coalition, read without privileges the way the app's own Energy use readout
+  reads it (`coalition_info_resource_usage`; see
+  [performance](../features/performance.md#energy-use)). It is the figure to
+  compare WindowServer by: its coalition is its own, while `ps` CPU time says
+  nothing about energy. The app's coalition includes its XPC services and every
+  WebContent process it started, so the `web_content` row counts only other
+  coalitions. GPU energy is the whole GPU's energy shared out by GPU time, so
+  when other coalitions keep the GPU busy for 25 % of the window or more the
+  window is marked contended and the app's figure reads high.
 - **System power** is the whole machine's mean draw over the window, from the
   battery controller's own running sums in `ioreg -r -c AppleSmartBattery -a`
   (`PowerTelemetryData`): `AccumulatedSystemLoad` over
@@ -78,23 +90,30 @@ same-throughput power claim needs timestamped counter deltas aligned to the
 actual power window. Neither the configured ceiling nor timer-wakeup counts
 provide elapsed time or displayed-frame counts.
 
-The observed 45–52 draws/s at a configured 60 fps ceiling have a mechanism in
-the frame clock itself. `ThreadTimer` computes each deadline from the time the
-previous tick actually woke (`last_tick = steady_clock::now()` after the wait),
-not from the previous deadline, so every wait's timer slack is added to the
-period instead of being absorbed. A headless probe that drives the production
-`FrameTimer`/`ThreadTimer` sources with a zero-cost draw measured about 20.3 ms
-between ticks at a 60 fps ceiling (50.5 draws/s), about 10.4 ms at 120 (100/s)
-and about 37.5 ms at 30 (27/s): 2–4 ms of slack per wait, which timer-thread QoS
-did not change. On top of that, `FrameTimer` drops any tick that finds the
+Before 2026-09-28 the frame clock delivered 45–52 draws/s at a configured 60 fps
+ceiling. `ThreadTimer` computed each deadline from the time the previous tick
+actually woke, not from the previous deadline, so every wait's timer slack was
+added to the period instead of being absorbed: a headless probe with a
+zero-cost draw measured about 20.3 ms between ticks at a 60 fps ceiling
+(50.5 draws/s), about 10.4 ms at 120 (100/s) and about 37.5 ms at 30 (27/s). A
+cadence tick is now anchored to the deadline it was due at, and one more than a
+whole interval late restarts the cadence instead of bursting to catch up
+(`ThreadTimerTest.CadenceKeepsItsPeriodDespiteWakeSlack`: 50 ticks in 600 ms
+at 10 ms before, 54–62 required after). Measurements taken before that date at
+a given ceiling therefore describe fewer frames than the same ceiling delivers
+now. `FrameTimer` still drops any tick that finds the
 previous DRAW still running, and on Compatibility a DRAW includes the GPU frame
-(the fence wait follows the present), so a frame longer than the remaining
-interval loses a whole period (45.7/s with a 15.5 ms draw, 26.8/s with 20 ms).
+(the fence wait follows the present). A DRAW that ends within a quarter
+interval of the tick it made the clock drop runs that frame at once and restarts
+the cadence from it (`FrameTimerTest.ADrawSlightlyLongerThanTheIntervalDoesNotHalveTheRate`:
+18 ms draws at 60 fps deliver at least 42 frames a second, 35 without it); one
+that ends later loses the whole period, so a scene that cannot keep up settles at
+a steady fraction of the rate instead of drawing back to back. Otherwise
 `FrameEnd` re-arms the clock only for an outstanding update request. This is
 measured delivery, not presentation: whether and when those frames were
-displayed is still not observable. Correcting the cadence would raise delivered
-work toward the configured ceiling, so a comparison across such a change has to
-report its throughput separately from any power figure. The app opens its
+displayed is still not observable. Correcting the cadence raised delivered work
+toward the configured ceiling, so a comparison across that change has to report
+its throughput separately from any power figure. The app opens its
 control panel at launch, so each such run includes it; while the library page
 is visible, installed GIF previews animate. Some runs showed WebContent at
 8–13 % CPU and higher WindowServer CPU, but the recordings did not establish
@@ -142,6 +161,53 @@ Findings from 2026-09 on an M5 Pro, macOS 26.6, checked against `powermetrics`:
   whole-GPU figure within 5–9 %. GPU energy is apportioned by GPU time, so it
   overstates an app sharing the GPU with a heavy load. The in-app readout uses
   it; see [features/performance.md](../features/performance.md#energy-use).
+
+## WindowServer's share
+
+Findings from 2026-09-28 on an M3 Max, macOS 27.2, built-in XDR at 120 Hz in
+a 4112x2658 scaled mode, AC power, coalition energy over 40–45 s windows run
+in alternation, other apps hidden. The probe was a disposable desktop-level
+window configured like `MWEWallpaperDesktopWindow` whose frames are one clear,
+so its own GPU work was negligible.
+
+- **It follows the present rate of a full-screen layer.** With the desktop
+  exposed, WindowServer drew 31–39 mW idle and, for the probe, 197–213 mW at
+  30 fps, 294–364 mW at 60 and 568–571 mW at 120. Lucy (3521337568) cost it
+  the same for the same rate (506 mW at about 89 fps, 297–361 mW at 46–50).
+  Next to the app's own GPU work (about 5 W at 89 fps, 2.3 W at 48, 1.1 W at
+  26) it is about a tenth, so the renderer's frame rate is the lever for both.
+- **A covered desktop still costs it.** Behind zoomed windows the strip under
+  the translucent menu bar kept the wallpaper presenting; pausing that display
+  took WindowServer from 365 to 23 mW (the covered-desktop setting in
+  [performance](../features/performance.md#playback)).
+- **No direct-to-display.** Metal System Trace's `displayed-surfaces-interval`
+  table never marked a wallpaper frame `direct-to-display` in any drawable size
+  or colour space: a desktop-level layer under the Finder desktop window and
+  the menu bar is always composited.
+- **Pacing and drawable size did not matter.** At 60 fps, plain presents,
+  `presentDrawable:afterMinimumDuration:` and a `CAMetalDisplayLink` gave
+  294–377 mW; a drawable at the panel's 3456x2234 or half the backing size
+  gave 287–388 mW against 294–364 for the backing size.
+- **Colour space costs the probe a third, the wallpaper little.** The layer
+  is tagged sRGB so it matches the sRGB desktop poster, and WindowServer
+  colour-matches it to the display. In strict alternation the probe cost
+  268–290 mW tagged sRGB against 175–200 mW tagged with the display's own
+  space at 60 fps, and 495–503 against 328–345 at 120. Lucy at 60 fps, tagged
+  or left untagged, gave 215–333 against 203–307 mW (pairs 12, 75 and 19 mW
+  apart), inside the run-to-run spread. Not adopted: an exact sRGB-to-display
+  conversion in both renderers, a poster that stays sRGB and a rebuild on
+  every display-profile change would buy at most tens of milliwatts next to
+  about 3 W of rendering.
+- **Not established:** whether the ProMotion panel drops below 120 Hz for a
+  60 fps wallpaper. Single 6-second traces disagreed (display link 78 Hz at
+  60 fps but 121 Hz at 30), and about 30 composited frames a second had no
+  attributed process even with nothing running. Panel power is outside
+  coalition energy and `powermetrics`, and battery-telemetry system power was
+  too noisy to settle it.
+
+Two traps: a covered-layout run with the user active gave an idle WindowServer
+of 141–762 mW, so compare only quiet windows; and Chrome left open triggered
+about 60 composites a second on its own.
 
 ## Runtime counters
 
