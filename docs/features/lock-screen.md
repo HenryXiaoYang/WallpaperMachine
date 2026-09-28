@@ -41,7 +41,8 @@ well inside that; see
   reloads the wallpaper service.
 - System-wide linked wallpapers, or another wallpaper app, can prevent
   activation. The app reports the conflict instead of overwriting those choices.
-- Playback respects the pause and battery settings.
+- Playback respects the pause and battery settings. The lock screen covering the
+  desktop does not pause it.
 
 ## When activation fails
 

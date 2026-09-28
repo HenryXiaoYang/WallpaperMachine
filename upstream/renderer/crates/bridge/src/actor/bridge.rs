@@ -1184,7 +1184,16 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
 
     fn lock_screen_scenes(&self) -> Result<Vec<BridgeLockScreenScene>, BridgeError> {
         let displays = self.engine.display_snapshot();
-        let scenes = self.activation_inputs(&displays, self.state.playback_state == BridgePlaybackState::Paused).build()?;
+        // Only the user's Play/Pause and power policy carry over. Locking
+        // covers the desktop and suspends its display, and the extension
+        // applies its own sleep and visibility rules, so a desktop suspension
+        // here would hold the lock screen on a still frame.
+        let no_suspended_displays = BTreeSet::new();
+        let scenes = ActivationInputs {
+            suspended_displays: &no_suspended_displays,
+            ..self.activation_inputs(&displays, self.state.playback_state == BridgePlaybackState::Paused)
+        }
+        .build()?;
 
         scenes
             .into_iter()

@@ -1428,6 +1428,36 @@ async fn lock_screen_export_ignores_presentation_suspension_but_preserves_playba
 }
 
 #[tokio::test]
+async fn lock_screen_export_ignores_the_desktop_display_being_covered() {
+    // Locking covers the desktop wallpaper, and its display is suspended for
+    // that. The lock screen is what is on screen then, so it must not take
+    // the covered desktop's suspension as a pause and hold a still frame.
+    let engine = FakeEngineFacade::default();
+    engine.set_snapshot(vec![display_snapshot(7, 75)]);
+    let bridge = BridgeBuilder::new(engine.clone())
+        .with_state(crate::actor::state::BridgeActorState::default())
+        .build()
+        .unwrap();
+    bridge
+        .inject_scene_wallpaper_config_for_test("100", "Scene")
+        .await;
+    bridge
+        .set_display_config_enabled("100".into(), "7".into(), true)
+        .await
+        .unwrap();
+    bridge.apply_wallpaper_options("100".into()).await.unwrap();
+
+    bridge
+        .set_display_presentation_suspended("7".into(), true)
+        .await
+        .unwrap();
+    assert!(engine.rendered_scenes()[0].paused);
+    assert!(!bridge.lock_screen_scenes().await.unwrap()[0].paused);
+    bridge.pause_all().await.unwrap();
+    assert!(bridge.lock_screen_scenes().await.unwrap()[0].paused);
+}
+
+#[tokio::test]
 async fn presentation_transitions_repair_in_flight_reconcile_pause_state() {
     for initially_suspended in [false, true] {
         let engine = FakeEngineFacade::default();

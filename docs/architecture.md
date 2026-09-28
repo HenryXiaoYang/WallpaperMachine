@@ -266,7 +266,9 @@ preview or lock-screen instance cannot render for nobody), and
 extension's Documents directory) into the extension container, then posts
 `LockScreenConfiguration.changedNotification`; the extension reloads and writes
 `LockScreenReadiness` back once a GPU-ready non-preview surface exists, or with the error when
-acquiring or replacing that surface's renderer failed. The extension
+acquiring or replacing that surface's renderer failed. A scene's `paused` carries only the
+user's Play/Pause and power policy: the desktop display being suspended, which locking causes by
+covering it, is not a reason for the lock screen to hold still. The extension
 never reads draft options or the app's private configuration files, and it publishes no
 external URLs. `Extension/WallpaperExtension.entitlements` enables the App Sandbox with a single
 read-only exception for `/opt/homebrew/`, which is what lets the sandboxed process load the
