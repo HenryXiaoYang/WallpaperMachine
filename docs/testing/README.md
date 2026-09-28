@@ -53,6 +53,11 @@ scheme excludes UI tests.
 
 ## Test layers
 
+Use Python 3.10 or newer for the routine gate: `test_brand.py` uses
+`zip(strict=True)`, which the Python 3.9 shipped with some Xcode installations
+does not support. If `python3 --version` reports 3.9, run the commands below
+with an installed newer interpreter (for example, `python3.12`).
+
 | Layer | Location | Command |
 | --- | --- | --- |
 | Python script tests | `scripts/tests/` | `python3 scripts/test.py` (runs first, before Xcode) |

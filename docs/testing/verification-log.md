@@ -25,6 +25,18 @@ move the oldest entries verbatim into
 (or a new dated archive file) first, and promote anything durable before it
 goes. Trimming is allowed; editing an entry's recorded result is not.
 
+## 2026-09-28 — Reduce invisible preview retention and repeated storage scans
+
+- `scripts/test.py` with installed CPython 3.12.14 — exit 0; 190 Python tests passed; 660 native passed, 11 skipped, 0 failed. Initial Python 3.9 attempt stopped in unchanged brand tests (`zip(strict=True)`); the interpreter requirement is now in the testing guide.
+- `python3 scripts/test.py --only ControlPanelDiscoverTests` — exit 0; 6 passed. Extended regression covers hidden loading, offscreen source release, scrolling/visibility resume, Settings retirement, still fallback and one download per URL.
+- New Discover regression against unmodified upstream `panel.js` — failed as expected because hidden animations retained sources; modified code passes in the full gate.
+- `cargo test --release -p wallpaper-bridge --lib` with the build environment — exit 0; 360 passed. A burst of 1,001 size requests performs one walk; expiry and explicit invalidation remeasure. Actor test covers immediate cache growth and clearing.
+- `python3 scripts/build.py --renderer-only` — exit 0; rebuilt the bridge and regenerated bindings; no interface changes.
+- `python3 scripts/check_renderer.py` — exit 0; 23 test binaries, 10 generated scenes with matching pooled/isolated pixels and no diagnostics, and 8 synthetic projects reloaded twice. Three asset-dependent cases skipped (two text scenes and native local-project coverage).
+- Synthetic Rust 2024 optimized probe using production directory-size/cache methods: 1,000 queries over 256 files of 1 KiB, five runs per variant. Median elapsed 239.714 ms before vs 0.449 ms cached; ranges 237.600–251.058 ms vs 0.418–0.523 ms. Workload timing only; tiny RSS differences and rounded CPU-time samples do not establish app memory/CPU savings.
+- Reviewed frame scheduling, bounded video queues, shared-decoder ownership, native-video teardown, web-audio subscription loops and extension surface release; no additional renderer/quality/default changes were justified.
+- Headless only: desktop CPU/RAM, visual behavior, live Steam and opt-in media tests unverified. No wallpaper changes, desktop capture, app launch/restart or Release app delivery build.
+
 ## 2026-09-28 — Reconcile keeps unchanged scenes; launch-at-login read once per burst
 
 Follow-up to 4ee91e5: full reconciles (Apply, display edits, backend switch, repair) now hand the engine live descriptors (frame-rate ceiling and transient mute applied), and the launch-at-login status is read from SMAppService at most every two seconds.
@@ -110,8 +122,3 @@ R25 PowerWatcher restored to its original 5 s run_in_mode loop and its drop test
 - python3 scripts/test.py: 648 passed, 0 failed, 11 skipped.
 - Not exercised: a real CI release run, launching a certificate-signed app, lock-screen extension loading under the new signature, TCC persistence across an actual update (no desktop run authorized); no Release build.
 - 1.0.1 -> 1.0.2 still uses 1.0.1's installer and ad-hoc grants; fixes apply from 1.0.2 onward.
-
-## 2026-09-27 — Release build
-
-- python3 scripts/test.py: 648 passed, 0 failed, 11 skipped
-- python3 scripts/build.py --configuration Release: OK; bundled WebUI matches WebUI/

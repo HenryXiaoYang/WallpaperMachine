@@ -271,6 +271,10 @@ render scale, animation speed or audio-response subscription:
   releases its animation source; returning loads from the existing disk cache.
   Stills and brightness-based fade handling are preserved. Failed or single-frame
   previews are not retried just because the user scrolls.
+- Bridge snapshot bursts reuse one shader-cache size measurement for up to two
+  seconds instead of walking its directory for every property or playback update.
+  Explicit settings-snapshot requests and cache clearing force a fresh measurement.
+  This affects storage statistics only, not shader loading or rendering.
 
 Fewer allocations, queue moves or conversions are workload evidence, not a
 measurement of watts. Draw-call CPU timing excludes simulation and is not

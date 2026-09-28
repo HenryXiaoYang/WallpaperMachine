@@ -1,4 +1,10 @@
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::Path,
+    sync::PoisonError,
+    time::{Duration, Instant},
+};
 
 use wallpaper_core::{
     DisplaySnapshotEntry, SceneBackend, SceneUpdateMode, WallpaperAssignment, project::ScalingMode,
@@ -88,6 +94,27 @@ fn directory_size(path: &Path) -> u64 {
 }
 
 impl BridgeActorState {
+    pub(crate) fn invalidate_shader_cache_size(&self) {
+        *self.shader_cache_size.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    }
+
+    // Snapshot bursts (including property edits) must not walk the shader tree each time.
+    // Explicit settings reads and cache clearing invalidate this bounded-age measurement.
+    fn shader_cache_size_at(&self, now: Instant, measure: impl FnOnce() -> u64) -> u64 {
+        let mut cached = self
+            .shader_cache_size
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some((read_at, bytes)) = *cached
+            && now.saturating_duration_since(read_at) < Duration::from_secs(2)
+        {
+            return bytes;
+        }
+        let bytes = measure();
+        *cached = Some((now, bytes));
+        bytes
+    }
+
     #[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
     pub fn options(
         &self,
@@ -689,7 +716,9 @@ impl BridgeActorState {
             core_version: wallpaper_core::VERSION.to_string(),
             shader_pipeline_version: SHADER_PIPELINE_VERSION.to_string(),
             storage: BridgeStorageStatus {
-                shader_cache_size_bytes: directory_size(&paths.shader_cache_root()),
+                shader_cache_size_bytes: self.shader_cache_size_at(Instant::now(), || {
+                    directory_size(&paths.shader_cache_root())
+                }),
                 logs: ApplicationLogger::status().map_or_else(
                     || {
                         bridge_log_status(LogStatus {
@@ -745,6 +774,33 @@ mod tests {
 
     use super::directory_size;
     use crate::{login::LaunchAtLoginStatus, paths::BridgePaths};
+
+    #[test]
+    fn shader_cache_size_reuses_bursts_and_refreshes_after_expiry_or_invalidation() {
+        use std::{cell::Cell, time::{Duration, Instant}};
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("shader.bin");
+        fs::write(&file, [1, 2, 3]).unwrap();
+        let state = crate::actor::state::BridgeActorState::default();
+        let reads = Cell::new(0);
+        let measure = || {
+            reads.set(reads.get() + 1);
+            directory_size(root.path())
+        };
+        let now = Instant::now();
+        assert_eq!(state.shader_cache_size_at(now, measure), 3);
+        fs::write(&file, [1, 2, 3, 4]).unwrap();
+        for _ in 0..1000 {
+            assert_eq!(state.shader_cache_size_at(now + Duration::from_secs(1), measure), 3);
+        }
+        assert_eq!(reads.get(), 1, "a snapshot burst walks the directory only once");
+        assert_eq!(state.shader_cache_size_at(now + Duration::from_secs(2), measure), 4);
+        assert_eq!(reads.get(), 2);
+        fs::remove_file(file).unwrap();
+        state.invalidate_shader_cache_size();
+        assert_eq!(state.shader_cache_size_at(now + Duration::from_secs(2), measure), 0);
+        assert_eq!(reads.get(), 3);
+    }
 
     #[test]
     fn directory_size_sums_nested_files() {

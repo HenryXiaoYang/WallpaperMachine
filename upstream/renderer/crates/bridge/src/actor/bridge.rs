@@ -2159,6 +2159,7 @@ impl<E: EngineFacade + Clone> Message<GetSettingsSnapshot> for BridgeActor<E> {
         _msg: GetSettingsSnapshot,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        self.state.invalidate_shader_cache_size();
         let displays = self.engine.display_snapshot();
         Ok(self
             .state
@@ -2192,6 +2193,7 @@ impl<E: EngineFacade + Clone> Message<ClearShaderCache> for BridgeActor<E> {
         _msg: ClearShaderCache,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        self.state.invalidate_shader_cache_size();
         let cache_root = self.paths.shader_cache_root();
         match fs::remove_dir_all(&cache_root) {
             Ok(()) => {}

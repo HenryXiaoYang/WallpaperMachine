@@ -15,6 +15,11 @@ renderer behaviour and known-failing tests into
 [../renderer.md](../renderer.md), build and code-signing traps into
 [../../build.md](../../build.md).
 
+## 2026-09-27 — Release build
+
+- python3 scripts/test.py: 648 passed, 0 failed, 11 skipped
+- python3 scripts/build.py --configuration Release: OK; bundled WebUI matches WebUI/
+
 ## 2026-09-27 — Deferred Metal layer lifetime on upstream 1.0.1
 
 - Based on upstream main 5286e70 (1.0.1). Kept a97e1e1 CopyPass teardown and its regression unchanged; this patch only retains the layer during deferred backend selection and adds ownership coverage.
