@@ -453,7 +453,7 @@ extension WebPanelController {
       "savedAccount": workshop.downloader.savedAccount as Any? ?? null,
       "rememberSession": workshop.downloader.rememberSessionWhileRunning ?? remembersSession,
       "downloadError": downloadError as Any? ?? null,
-      "update": Self.update(updater.state, notes: updater.releaseNotes),
+      "update": Self.update(updater.state, notes: updater.releaseNotes, rateLimitedUntil: updater.rateLimitedUntil),
       "import": [
         "busy": importTask != nil, "status": importStatus,
         "report": importReport.map { report -> [String: Any] in
@@ -466,7 +466,7 @@ extension WebPanelController {
     ]
   }
 
-  static func update(_ state: AppUpdateState, notes: ReleaseNotes? = nil) -> [String: Any] {
+  static func update(_ state: AppUpdateState, notes: ReleaseNotes? = nil, rateLimitedUntil: Date? = nil) -> [String: Any] {
     let null = NSNull()
     let status: String
     let statusText: String
@@ -507,7 +507,7 @@ extension WebPanelController {
       statusText = String(localized: "Version \(version) is ready. Restart the app to install it.")
     case .error(_, _, let code, _):
       status = "error"
-      statusText = updateErrorText(code)
+      statusText = updateErrorText(code, rateLimitedUntil: rateLimitedUntil)
     }
     let action: Any
     let actionLabel: String
@@ -571,10 +571,21 @@ extension WebPanelController {
     ]
   }
 
-  static func updateErrorText(_ code: AppUpdateErrorCode) -> String {
+  static func updateErrorText(_ code: AppUpdateErrorCode, rateLimitedUntil: Date? = nil) -> String {
     switch code {
     case .network:
       String(localized: "Couldn't reach GitHub Releases. Check your connection and try again.")
+    case .rateLimited:
+      if let rateLimitedUntil {
+        String(
+          localized:
+            "GitHub's hourly limit for anonymous update checks is used up on this network (60 requests an hour, shared by every app and device on the same public IP). Try again after \(rateLimitedUntil.formatted(date: .omitted, time: .shortened))."
+        )
+      } else {
+        String(
+          localized:
+            "GitHub's hourly limit for anonymous update checks is used up on this network (60 requests an hour, shared by every app and device on the same public IP). Try again later.")
+      }
     case .configuration:
       String(localized: "The GitHub Release update metadata is unavailable.")
     case .verification:

@@ -435,6 +435,16 @@ valid repository response before treating the release as absent. Repository
 reported as **Up to date**. These paths are covered with isolated URLSession
 fixtures, without contacting GitHub.
 
+Update checks are anonymous, so they share GitHub's limit of 60 API requests an
+hour per public IP with every other app and device behind that address (a NAT,
+VPN or proxy exit can use it up without this app). The app itself sends one
+request per check (two when `/releases/latest` is 404): at launch, every six
+hours and on **Check for Updates**. A 403 with `x-ratelimit-remaining: 0`, or a
+429, is a distinct `rateLimited` error, not a network failure: About says the
+hourly limit is used up and shows the reset time from `x-ratelimit-reset` (or
+`retry-after`). Until that time every check, automatic or **Retry**, fails
+locally without a request, so retrying can't keep the shared quota exhausted.
+
 With no matching asset the app falls back to opening GitHub Releases for a manual
 update. Renaming the image, publishing a prerelease, or attaching only a zip
 silently breaks automatic updates; `Tests/Unit/GitHub/AppUpdateTests.swift`

@@ -9,6 +9,9 @@ final class AppUpdateStore {
     /// What the newest published release says it changed, for the About card. Present
     /// whether or not that release is newer than the running build.
     private(set) var releaseNotes: ReleaseNotes?
+    /// When the last check was refused by GitHub's anonymous rate limit, the time it lifts.
+    /// Checks before then fail locally, so retries can't keep the shared quota exhausted.
+    private(set) var rateLimitedUntil: Date?
     @ObservationIgnored private let currentVersion: String
     @ObservationIgnored private let client: any AppUpdateClient
     @ObservationIgnored private let installer: any AppUpdateInstalling
@@ -16,6 +19,7 @@ final class AppUpdateStore {
     @ObservationIgnored private let scheduleInstall: (@escaping () -> Void) -> Void
     @ObservationIgnored private let terminate: () -> Void
     @ObservationIgnored private let installTimeout: Duration
+    @ObservationIgnored private let now: () -> Date
     @ObservationIgnored private var checkTask: Task<AppUpdateState, Never>?
     @ObservationIgnored private var downloadTask: Task<AppUpdateState, Never>?
     @ObservationIgnored private var available: GitHubRelease?
@@ -31,7 +35,8 @@ final class AppUpdateStore {
          workspace: AppUpdateWorkspace = .live,
          scheduleInstall: ((@escaping () -> Void) -> Void)? = nil,
          terminate: (() -> Void)? = nil,
-         installTimeout: Duration = .seconds(45)) {
+         installTimeout: Duration = .seconds(45),
+         now: @escaping () -> Date = Date.init) {
         self.currentVersion = currentVersion
         self.client = client
         self.installer = installer
@@ -39,6 +44,7 @@ final class AppUpdateStore {
         self.scheduleInstall = scheduleInstall ?? Self.performOnMainRunLoop
         self.terminate = terminate ?? { NSApp.terminate(nil) }
         self.installTimeout = installTimeout
+        self.now = now
         state = .idle(currentVersion: currentVersion)
     }
 
@@ -136,13 +142,17 @@ final class AppUpdateStore {
     }
 
     private func performCheck() async -> AppUpdateState {
+        defer { checkTask = nil }
+        if let rateLimitedUntil, rateLimitedUntil > now() {
+            return fail(.check, AppUpdateIssue(code: .rateLimited, detail: "", retryAfter: rateLimitedUntil))
+        }
+        rateLimitedUntil = nil
         available = nil
         releaseNotes = nil
         activeOperation = .check
         state = .checking(currentVersion: currentVersion)
         defer {
             if activeOperation == .check { activeOperation = nil }
-            checkTask = nil
         }
         do {
             let release = try await client.fetchLatestRelease()
@@ -232,6 +242,7 @@ final class AppUpdateStore {
     private func fail(_ operation: AppUpdateOperation, _ error: Error) -> AppUpdateState {
         if error is CancellationError { return state }
         let code = AppUpdateErrorClassifier.classify(error)
+        if code == .rateLimited { rateLimitedUntil = (error as? AppUpdateIssue)?.retryAfter }
         if case .error(_, let existingOperation, let existingCode, _) = state,
            existingOperation == operation, existingCode == code {
             return state

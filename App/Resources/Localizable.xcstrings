@@ -650,6 +650,57 @@
         }
       }
     },
+    "GitHub's hourly limit for anonymous update checks is used up." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "GitHub's hourly limit for anonymous update checks is used up."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "GitHub 免登录检查更新的每小时额度已用完。"
+          }
+        }
+      }
+    },
+    "GitHub's hourly limit for anonymous update checks is used up on this network (60 requests an hour, shared by every app and device on the same public IP). Try again after %@." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "GitHub's hourly limit for anonymous update checks is used up on this network (60 requests an hour, shared by every app and device on the same public IP). Try again after %@."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "当前网络的 GitHub 免登录每小时访问额度已用完（同一公网 IP 下的所有设备和应用共享 60 次/小时）。请在 %@ 之后重试。"
+          }
+        }
+      }
+    },
+    "GitHub's hourly limit for anonymous update checks is used up on this network (60 requests an hour, shared by every app and device on the same public IP). Try again later." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "GitHub's hourly limit for anonymous update checks is used up on this network (60 requests an hour, shared by every app and device on the same public IP). Try again later."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "当前网络的 GitHub 免登录每小时访问额度已用完（同一公网 IP 下的所有设备和应用共享 60 次/小时）。请稍后重试。"
+          }
+        }
+      }
+    },
     "Pause" : {
       "localizations" : {
         "en" : {

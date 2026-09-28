@@ -303,6 +303,55 @@ final class AppUpdateTests: XCTestCase {
         await expect(store.checkForUpdates(), equals: .error(currentVersion: "1.0.0", operation: .check, code: .configuration, availableVersion: nil))
     }
 
+    func testExhaustedAnonymousRateLimitIsReportedWithItsResetTime() async {
+        let reset = Date(timeIntervalSince1970: 1_900_000_000)
+        let http = UpdateHTTPFixture()
+        http.respond(latest: .init(status: 403, body: Data(#"{"message":"API rate limit exceeded"}"#.utf8),
+                                   headers: ["x-ratelimit-remaining": "0", "x-ratelimit-reset": "1900000000"]))
+        var clock = reset.addingTimeInterval(-600)
+        let store = AppUpdateStore(currentVersion: "1.0.0", client: http.client, now: { clock })
+        await expect(store.checkForUpdates(), equals: .error(currentVersion: "1.0.0", operation: .check, code: .rateLimited, availableVersion: nil))
+        XCTAssertEqual(store.rateLimitedUntil, reset)
+        let snapshot = WebPanelController.update(store.state, rateLimitedUntil: store.rateLimitedUntil)
+        XCTAssertEqual(snapshot["statusText"] as? String,
+                       WebPanelController.updateErrorText(.rateLimited, rateLimitedUntil: reset))
+        XCTAssertNotEqual(snapshot["statusText"] as? String, WebPanelController.updateErrorText(.network))
+
+        // A plain 403 (no limit headers) is still an ordinary failure.
+        http.respond(latest: .init(status: 403, body: Data()))
+        clock = reset.addingTimeInterval(1)
+        await expect(store.checkForUpdates(), equals: .error(currentVersion: "1.0.0", operation: .check, code: .network, availableVersion: nil))
+        XCTAssertNil(store.rateLimitedUntil)
+    }
+
+    func testSecondaryRateLimitUsesRetryAfter() throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let url = URL(string: "https://api.github.com/repos/o/r/releases/latest")!
+        let secondary = try XCTUnwrap(HTTPURLResponse(url: url, statusCode: 429, httpVersion: nil, headerFields: ["retry-after": "90"]))
+        XCTAssertEqual(GitHubReleaseClient.rateLimitIssue(secondary, now: now)?.retryAfter, now.addingTimeInterval(90))
+        let forbidden = try XCTUnwrap(HTTPURLResponse(url: url, statusCode: 403, httpVersion: nil, headerFields: ["x-ratelimit-remaining": "12"]))
+        XCTAssertNil(GitHubReleaseClient.rateLimitIssue(forbidden, now: now))
+    }
+
+    func testChecksWaitOutTheRateLimitWithoutSpendingRequests() async {
+        let reset = Date(timeIntervalSince1970: 1_900_000_000)
+        var clock = reset.addingTimeInterval(-600)
+        let client = FakeAppUpdateClient()
+        client.fetchError = AppUpdateIssue(code: .rateLimited, detail: "", retryAfter: reset)
+        let store = AppUpdateStore(currentVersion: "1.0.0", client: client, now: { clock })
+        _ = await store.checkForUpdates()
+        _ = await store.checkAndDownloadInBackground()
+        await expect(store.checkForUpdates(), equals: .error(currentVersion: "1.0.0", operation: .check, code: .rateLimited, availableVersion: nil))
+        XCTAssertEqual(client.fetchCalls, 1)
+
+        client.fetchError = nil
+        client.release = nil
+        clock = reset
+        await expect(store.checkForUpdates(), equals: .noRelease(currentVersion: "1.0.0"))
+        XCTAssertEqual(client.fetchCalls, 2)
+        XCTAssertNil(store.rateLimitedUntil)
+    }
+
     func testConcurrentChecksShareOneRequestAndHideDownloadPaths() async {
         let fixture = Fixture()
         fixture.client.release = fixture.release(version: "1.1.0")
@@ -678,6 +727,7 @@ private final class UpdateHTTPProtocol: URLProtocol, @unchecked Sendable {
         let status: Int
         let body: Data
         var error: URLError.Code? = nil
+        var headers: [String: String] = [:]
     }
     private static let lock = NSLock()
     nonisolated(unsafe) private static var responses: [String: (latest: Response, repository: Response)] = [:]
@@ -704,7 +754,8 @@ private final class UpdateHTTPProtocol: URLProtocol, @unchecked Sendable {
             client?.urlProtocol(self, didFailWithError: URLError(error))
             return
         }
-        client?.urlProtocol(self, didReceive: HTTPURLResponse(url: url, statusCode: response.status, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!, cacheStoragePolicy: .notAllowed)
+        let headers = response.headers.merging(["Content-Type": "application/json"]) { value, _ in value }
+        client?.urlProtocol(self, didReceive: HTTPURLResponse(url: url, statusCode: response.status, httpVersion: "HTTP/1.1", headerFields: headers)!, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: response.body)
         client?.urlProtocolDidFinishLoading(self)
     }

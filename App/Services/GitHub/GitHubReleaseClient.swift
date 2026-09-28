@@ -54,6 +54,7 @@ struct GitHubReleaseClient: AppUpdateClient {
             guard let http = response as? HTTPURLResponse else {
                 throw AppUpdateIssue(code: .network, detail: String(localized: "GitHub did not return a successful update response."))
             }
+            if let limited = Self.rateLimitIssue(http) { throw limited }
             if http.statusCode == 404 {
                 // GitHub also returns 404 for inaccessible repositories. Only a
                 // reachable repository can turn a missing latest release into an empty result.
@@ -62,6 +63,7 @@ struct GitHubReleaseClient: AppUpdateClient {
                 guard let repositoryHTTP = repositoryResponse as? HTTPURLResponse else {
                     throw AppUpdateIssue(code: .network, detail: String(localized: "GitHub did not return a successful update response."))
                 }
+                if let limited = Self.rateLimitIssue(repositoryHTTP) { throw limited }
                 guard (200..<300).contains(repositoryHTTP.statusCode) else {
                     throw AppUpdateIssue(code: repositoryHTTP.statusCode == 404 ? .configuration : .network,
                                          detail: String(localized: "GitHub did not return a successful update response."))
@@ -80,6 +82,29 @@ struct GitHubReleaseClient: AppUpdateClient {
         } catch {
             throw AppUpdateIssue(code: AppUpdateErrorClassifier.classify(error), detail: error.localizedDescription)
         }
+    }
+
+    /// GitHub allows 60 unauthenticated API requests per hour per public IP address, shared by
+    /// every app and device behind it. Exhaustion answers 403 or 429 with
+    /// `x-ratelimit-remaining: 0` and an epoch `x-ratelimit-reset`; secondary limits send
+    /// `retry-after` seconds instead.
+    static func rateLimitIssue(_ response: HTTPURLResponse, now: Date = Date()) -> AppUpdateIssue? {
+        let retryAfter = response.value(forHTTPHeaderField: "retry-after").flatMap(TimeInterval.init)
+        let exhausted = response.value(forHTTPHeaderField: "x-ratelimit-remaining") == "0"
+        guard response.statusCode == 429 || (response.statusCode == 403 && (exhausted || retryAfter != nil)) else {
+            return nil
+        }
+        let reset: Date?
+        if let retryAfter, retryAfter >= 0 {
+            reset = now.addingTimeInterval(retryAfter)
+        } else if let epoch = response.value(forHTTPHeaderField: "x-ratelimit-reset").flatMap(TimeInterval.init), epoch > 0 {
+            reset = Date(timeIntervalSince1970: epoch)
+        } else {
+            reset = nil
+        }
+        return AppUpdateIssue(code: .rateLimited,
+                              detail: String(localized: "GitHub's hourly limit for anonymous update checks is used up."),
+                              retryAfter: reset)
     }
 
     func download(_ asset: GitHubReleaseAsset, to destination: URL,

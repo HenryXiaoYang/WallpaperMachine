@@ -27,7 +27,7 @@ enum AppUpdateConfiguration {
 }
 
 enum AppUpdateErrorCode: String, Equatable, Sendable {
-    case network, configuration, verification, permission, unknown
+    case network, rateLimited, configuration, verification, permission, unknown
 }
 
 enum AppUpdateOperation: String, Equatable, Sendable {
@@ -199,6 +199,8 @@ enum AppUpdateState: Equatable, Sendable {
 struct AppUpdateIssue: Error, Equatable {
     let code: AppUpdateErrorCode
     let detail: String
+    /// When GitHub accepts anonymous API requests again; set only for `.rateLimited`.
+    var retryAfter: Date? = nil
 }
 
 enum AppUpdateProgress {
