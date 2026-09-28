@@ -371,7 +371,12 @@ Available…**) until the app restarts. This path ships from 1.0.1; 1.0.0 only
 checks silently at launch and shows the result in About. The install runs the
 *running* version's code, so the staged replacement and the writability check below
 apply from 1.0.2 on: 1.0.1 still deletes the old app before copying the new one and
-offers in-place installs to any copy under an Applications folder.
+offers in-place installs to any copy under an Applications folder. Up to 1.0.2,
+**Restart to Update** (alert, status menu or About) also hangs: it quits from inside
+a main-queue job, where AppKit's `.terminateLater` wait never runs the main-actor
+shutdown task, so the window closes and nothing happens until the user quits from
+the status menu, after which the new version installs and opens. Later versions
+quit and show the alert from the main run loop (`AppUpdateStore.performOnMainRunLoop`).
 
 The contract it relies on:
 

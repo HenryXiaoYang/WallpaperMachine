@@ -429,6 +429,23 @@ final class AppUpdateTests: XCTestCase {
         XCTAssertEqual(fixture.store.state, .error(currentVersion: "1.0.0", operation: .install, code: .unknown, availableVersion: "1.1.0"))
     }
 
+    /// `installUpdate()` schedules the restart from a main-actor task. The quit that follows
+    /// waits in a nested run loop for the main-actor shutdown task; that task must get to run.
+    func testScheduledRestartLetsTheQuitWaitRunMainActorWork() async {
+        final class Flag { var raised = false }
+        let drained = expectation(description: "main-actor work ran inside the nested run loop")
+        AppUpdateStore.performOnMainRunLoop {
+            let shutdown = Flag()
+            Task { @MainActor in shutdown.raised = true }
+            let deadline = Date().addingTimeInterval(2)
+            while !shutdown.raised, Date() < deadline {
+                _ = RunLoop.current.run(mode: .default, before: deadline)
+            }
+            if shutdown.raised { drained.fulfill() }
+        }
+        await fulfillment(of: [drained], timeout: 5)
+    }
+
     private func expect(_ state: AppUpdateState, equals expected: AppUpdateState) {
         XCTAssertEqual(state, expected)
     }

@@ -36,10 +36,19 @@ final class AppUpdateStore {
         self.client = client
         self.installer = installer
         self.workspace = workspace
-        self.scheduleInstall = scheduleInstall ?? { work in DispatchQueue.main.async(execute: work) }
+        self.scheduleInstall = scheduleInstall ?? Self.performOnMainRunLoop
         self.terminate = terminate ?? { NSApp.terminate(nil) }
         self.installTimeout = installTimeout
         state = .idle(currentVersion: currentVersion)
+    }
+
+    /// Runs `work` from the main run loop rather than as a main-queue job. AppKit waits out
+    /// `.terminateLater` and `NSAlert.runModal()` in a nested run loop, and a nested run loop
+    /// entered from inside a main-queue job (`DispatchQueue.main.async` or any `@MainActor`
+    /// task) never drains the main queue: quitting would hang because the shutdown task never
+    /// runs, and every main-actor task would stall while an alert is open.
+    nonisolated static func performOnMainRunLoop(_ work: @escaping () -> Void) {
+        RunLoop.main.perform(work)
     }
 
     func checkForUpdates() async -> AppUpdateState {

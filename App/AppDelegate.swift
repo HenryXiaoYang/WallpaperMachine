@@ -760,15 +760,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
     }
 
-    private func promptUpdate(title: String, detail: String, confirm: String, confirmed: () -> Void) {
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = detail
-        alert.addButton(withTitle: confirm)
-        alert.addButton(withTitle: String(localized: "Later"))
-        NSApp.activate(ignoringOtherApps: true)
-        guard alert.runModal() == .alertFirstButtonReturn, !shutdownInProgress else { return }
-        confirmed()
+    /// Shown from the main run loop, not this task: a modal run inside a main-actor task would
+    /// stall every other main-actor task until the alert closes.
+    private func promptUpdate(title: String, detail: String, confirm: String, confirmed: @escaping () -> Void) {
+        AppUpdateStore.performOnMainRunLoop { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, !self.shutdownInProgress, !self.shutdownComplete else { return }
+                let alert = NSAlert()
+                alert.messageText = title
+                alert.informativeText = detail
+                alert.addButton(withTitle: confirm)
+                alert.addButton(withTitle: String(localized: "Later"))
+                NSApp.activate(ignoringOtherApps: true)
+                guard alert.runModal() == .alertFirstButtonReturn, !self.shutdownInProgress else { return }
+                confirmed()
+            }
+        }
     }
 
     /// "Later" leaves the update one click away in the status menu.
