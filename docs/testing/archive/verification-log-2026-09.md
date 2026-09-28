@@ -15,6 +15,12 @@ renderer behaviour and known-failing tests into
 [../renderer.md](../renderer.md), build and code-signing traps into
 [../../build.md](../../build.md).
 
+## 2026-09-27 — Installed: hold-and-drag multi-select with in-context tip
+
+- python3 scripts/test.py --only ControlPanelLibraryTests: 9 passed (new testHoldAndDragSelectsARunOfTilesWithoutWindow: stray drag ignored, hold checks, range sweep + sweep-back, ending click swallowed, sweep from checked tile clears, dragSelectLearned stored in defaults + snapshot).
+- python3 scripts/test.py: 649 passed, 0 failed, 11 skipped; panel localization tests pass with the new zh-Hans strings.
+- Not exercised: real mouse sweep on a desktop, edge auto-scroll (rAF does not run in the offscreen test web view), hold animation visuals, reduced-motion appearance. No Release build.
+
 ## 2026-09-27 — Updater: staged restart-install, writability gate, release certificate signing
 
 - Fix 1: AppUpdateInstaller.canReplace requires a writable bundle and folder; startReplacement stages the new app beside the old, swaps by rename, restores and reopens the previous app on any failure.

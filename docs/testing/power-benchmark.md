@@ -104,6 +104,27 @@ about 1 W between repeats; the app's own CPU and GPU percentages were the
 steadier signal, and system power needs a baseline taken minutes from the run it
 is set against.
 
+## App-process CPU and memory comparisons
+
+For an app-level comparison, identify the exact executable PID and sum only its
+resource coalition (the app and its XPC/WebKit helpers), not every WebContent
+process on the machine. Reject windows containing another WallpaperMachine
+instance or a change in the tested presentation state. A closed-panel sample
+must remain without an on-screen panel throughout; it is not a playback test.
+
+`proc_pid_rusage` supplies resident bytes and physical-footprint bytes. Report
+these separately: adding process RSS can double-count shared pages, while
+physical footprint is the kernel's memory charge, not free system RAM. Normalize
+its Mach-absolute CPU counters with `mach_timebase_info` and cross-check totals
+against `ps -o time`; assuming nanoseconds directly undercounted this Apple
+Silicon machine by 125/3. CPU percentages use one logical core as 100%.
+
+Record window lengths, warm-up, content/cache identity, and per-build ranges.
+Several windows from one app session are not independent launch repetitions.
+Live Workshop prefetch can change even if the displayed page matches; disclose
+that difference and avoid generalizing a single browsing comparison to playback
+or claiming a CPU improvement when the observed ranges overlap.
+
 ## Per-app energy without root
 
 Findings from 2026-09 on an M5 Pro, macOS 26.6, checked against `powermetrics`:
