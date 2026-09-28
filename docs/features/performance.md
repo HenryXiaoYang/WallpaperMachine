@@ -266,6 +266,12 @@ render scale, animation speed or audio-response subscription:
   wallpaper audio demuxer discards the video bitstream. The decoded picture,
   the PCM and the loop seam are unchanged.
 
+- Discover retains animation sources only for visible tiles in a visible document.
+  Scrolling a tile out of view, hiding the panel document or leaving Discover
+  releases its animation source; returning loads from the existing disk cache.
+  Stills and brightness-based fade handling are preserved. Failed or single-frame
+  previews are not retried just because the user scrolls.
+
 Fewer allocations, queue moves or conversions are workload evidence, not a
 measurement of watts. Draw-call CPU timing excludes simulation and is not
 displayed FPS; a power claim still requires the matched conditions described in
