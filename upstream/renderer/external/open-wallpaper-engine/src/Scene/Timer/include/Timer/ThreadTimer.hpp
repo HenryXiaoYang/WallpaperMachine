@@ -35,7 +35,13 @@ public:
     /// request, an appointment, an appointment already past — had nothing to
     /// clamp it and could drive the scene as fast as events arrived. This is
     /// that ceiling, expressed where every path has to pass it: the earliest
-    /// moment a callback may run is always `last callback + min interval`.
+    /// moment a callback may run is always `last tick + min interval`, where the
+    /// last tick is the moment that callback was due. A callback that woke late
+    /// is followed by one sooner by at most that lateness, which is what keeps
+    /// the average at the ceiling; measuring from the late wake instead added
+    /// every wake's slack to the period (a 60 fps ceiling delivered about 50).
+    /// `FireNow` follows a tick that was itself due a whole period after the
+    /// last callback, so it is bounded the same way.
     ///
     /// Zero disables the floor, which is the behaviour of a timer whose owner
     /// never states a ceiling.
@@ -75,6 +81,15 @@ public:
     /// full frame period after a tick — an owed frame is not a licence to spin.
     void WakeAt(std::chrono::steady_clock::time_point when);
 
+    /// Runs the callback now and restarts the cadence from this tick.
+    ///
+    /// For a tick the owner had to drop because its previous frame was still
+    /// running and finished just after: the owner calls this only when that
+    /// frame ended within a small fraction of an interval of the dropped tick,
+    /// which already lies a whole ceiling after the last frame that ran, so it
+    /// cannot drive the scene faster than the ceiling.
+    void FireNow();
+
 private:
     std::function<void()> m_callback;
 
@@ -93,6 +108,7 @@ private:
     /// miss a request made while it was between checks.
     bool                                   m_idle { false };
     bool                                   m_wake_once { false };
+    bool                                   m_fire_now { false };
     /// Set when leaving idle so the thread restarts its cadence from now.
     bool                                   m_rebase { false };
     /// One-shot appointment honoured while idle; unset means no deadline.
