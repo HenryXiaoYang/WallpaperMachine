@@ -7,6 +7,35 @@ sections list the commits. The GitHub Release body and the app's What's new card
 repeat the section, so the three always say the same thing. See
 [docs/release.md](docs/release.md) for how a version is cut.
 
+## 1.0.3 — 2026-09-28
+
+This release stops wallpapers from flashing and restarting after unlocking, makes Restart to Update work again, and keeps the control panel open after you apply a wallpaper.
+
+### Breaking changes
+
+- Applying a wallpaper no longer hides the control panel by default; a choice already made in Settings → General → Hide window after applying a wallpaper is kept
+
+### New
+
+- File → Close (Command-W) now closes the control panel, like its close button, while the app keeps running in the menu bar
+
+### Improved
+
+- Apply and Quit respond promptly even while the app is handling a burst of updates, such as after unlocking the Mac
+- Update checks no longer use up GitHub's hourly limit on anonymous requests, which is shared by every device on the same network
+
+### Fixed
+
+- Wallpapers no longer flash white and restart their opening animation again and again after unlocking the Mac, a problem introduced in 1.0.2
+- Restart to Update now quits and reopens on the new version instead of closing the window and doing nothing
+- With the experimental Animate Lock Screen on, macOS 15 and later no longer asks at every launch to allow access to data from other apps
+- The experimental animated lock screen keeps moving when you lock the Mac instead of showing a still frame
+- Applying a wallpaper, changing a display setting or switching the video backend no longer reloads unchanged wallpapers on other displays, which made them flash white
+- A wallpaper applied while a frame-rate cap is on now starts at the capped rate
+- About no longer reports a connection failure when GitHub's hourly update-check limit runs out; it says when the limit resets and waits until then
+
+**Full changelog**: https://github.com/WallpaperMachine/WallpaperMachine/compare/v1.0.2...v1.0.3
+
 ## 1.0.2 — 2026-09-27
 
 WallpaperMachine 1.0.2 adds drag selection in Installed, makes in-app updates safer and keeps macOS privacy permissions across updates. Wallpapers and the control panel also do less repeated and background work.
