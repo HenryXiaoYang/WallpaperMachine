@@ -25,6 +25,18 @@ move the oldest entries verbatim into
 (or a new dated archive file) first, and promote anything durable before it
 goes. Trimming is allowed; editing an entry's recorded result is not.
 
+## 2026-09-28 — Trim idle reservations and share lock-screen poster storage
+
+- scripts/check_renderer.py passed: 23 binaries, ten generated pixel comparisons, eight projects x2 reloads; three asset-dependent skips.
+- Full scripts/test.py with CPython 3.12.14 passed once: 190 Python; 664 native passed, 11 skipped. LockScreenPosterTests passed independently and verifies retained pixels plus eventual release.
+- Apple VMA preference 32 to 8 MiB: same-scene reservation 231.4 to 203.4 MiB, active allocations unchanged at 198.1 MiB, blocks 8 to 10; three comparison frames identical.
+- Previous texture policy checked across a complete 15-second crossfade: all 17 frames byte-identical against full-source rendering; visible changed-layer frames differ from startup by over 13 million bytes. The earlier two-second test missed these layers.
+- Poster now retains its read-locked snapshot through a no-copy Data provider. The explicit 3024x1964 BGRA copy (22.7 MiB) is removed; extension footprint remained around 38 MiB, so an equal footprint saving is not claimed.
+- Renderer/bindings and Release builds passed. Signed bundle installed in /Applications with backup and restarted using Codex computer use; saved configuration identical.
+- Live logs show desktop first-frame readiness and extension poster readiness/unload at 3024x1964. Only installed extension registered; intermediate registration-contaminated samples excluded.
+- Live app-plus-extension totals after settling varied around 402–509 MiB, later 504.9 MiB. WebKit lifetimes and GPU accounting prevent attributing another large whole-app reduction; component reservation is the controlled evidence.
+- Real user-operated lock/unlock still pending. A closed-window lifetime hypothesis was tested but not reproduced; its experimental code was removed. No new quality or buffering tradeoff introduced.
+
 ## 2026-09-28 — Display-sized packaged texture residency
 
 - scripts/test.py with CPython 3.12.14: 190 Python passed; 663 native passed, 11 skipped. Full gate run once for this feature.
@@ -121,14 +133,3 @@ Follow-up to 4ee91e5: full reconciles (Apply, display edits, backend switch, rep
 - python3 scripts/test.py: 651 passed, 0 failed, 11 skipped.
 - Sandbox smoke: ad-hoc CLI signed with Extension entitlements resolved real home, read/wrote exchange, denied writes outside and reads of app-private LockScreen/.
 - Not run: live lock-screen activation on desktop (no desktop authorization); Release not rebuilt.
-
-## 2026-09-28 — Display refresh no longer reloads an unchanged scene; lock screen ignores the covered desktop
-
-User report on 1.0.2 (Workshop 3521337568, Lucy): lock screen held a still frame, and after unlocking the desktop flashed white and restarted the opening animation. App logs showed 107-425 scene loads per session, one per queued display refresh; the extension log showed the lock-screen scene exported as paused (reasons=1) right after the desktop display was suspended by occlusion.
-
-- Bridge tests written first and failing on HEAD: settings_intents::a_display_refresh_does_not_reload_a_scene_{whose_audio_response_has_nothing_to_read,held_to_the_battery_frame_rate,muted_for_other_audio,paused_by_a_lock_or_a_covered_display} and apply_options::lock_screen_export_ignores_the_desktop_display_being_covered (5 failed before the fix).
-- `cargo test --release -p wallpaper-bridge --lib` (build.py cargo environment) — exit 0; 354 passed, 0 failed.
-- `python3 scripts/test.py --only DisplayRefreshCoalescerTests` — 2 passed (first attempt stopped at the known CodeSign xattr detritus; cleared with xattr -cr on the Debug app).
-- `python3 scripts/test.py` — exit 0; 652 passed, 0 failed, 11 skipped of 663.
-- `python3 scripts/check_renderer.py` — exit 0; 23 test binaries passed, 10 generated fixtures pixel-equal pooled vs isolated, reload cycles 0 failures.
-- Not verified: the lock/unlock and display-wake behaviour on the desktop (no desktop run authorised), and no Release build was made. Apply, display edits and repair reconciles still compare saved values, so they can still reopen a scene held to a frame-rate ceiling or transient mute, as in 1.0.1.

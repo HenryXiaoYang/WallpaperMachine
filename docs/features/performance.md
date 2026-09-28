@@ -218,7 +218,7 @@ content pacing, shared video decode and direct video plane sampling.
 ## Renderer memory
 
 On Apple platforms, the Compatibility renderer grows its Vulkan allocator in
-32 MiB preferred blocks rather than the library's 256 MiB default. This reduces
+8 MiB preferred blocks rather than the library's 256 MiB default. This reduces
 unused reservations in unified memory; it is not a cap on wallpaper size, and
 larger resources still allocate normally. The offscreen probe prints allocator reserved
 and used bytes separately from process memory.

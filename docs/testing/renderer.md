@@ -602,6 +602,9 @@ desktop, or modify the imported wallpaper.
 
 ### Textures, allocation and composition
 
+- Texture residency comparisons must cover the scene's full visibility/crossfade
+  cycle, including the moments when each affected image is actually visible.
+  Matching startup frames can miss large animated layers whose opacity is still zero.
 - Texture lifetime tests check 32 generated multi-version graphs against a
   last-access oracle, plus nested composites with aliases, three sizes, visible
   and hidden parents, and background-copy enabled/disabled. Alias clears and
