@@ -21,7 +21,7 @@ final class LockScreenWallpaperService {
   /// leaving the user waiting for something that will never arrive.
   @ObservationIgnored private let webWallpapersApplied: () async -> Bool
   @ObservationIgnored private let selection: LockScreenWallpaperSelection
-  @ObservationIgnored private let documents: URL
+  @ObservationIgnored private let exchange: URL
   @ObservationIgnored private let defaults: UserDefaults
   @ObservationIgnored private let scheduleMonitor: (@escaping @MainActor () -> Void) -> Timer
   @ObservationIgnored private var work: Task<Void, Never>?
@@ -39,15 +39,13 @@ final class LockScreenWallpaperService {
       webWallpapersApplied: { ((try? await bridge.webWallpapers()) ?? []).isEmpty == false },
       selection: LockScreenWallpaperSelection(
         folder: ClientPaths.supportURL.appendingPathComponent("LockScreen")),
-      documents: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(
-        "Library/Containers/\(LockScreenConfiguration.extensionIdentifier)/Data/Documents",
-        isDirectory: true))
+      exchange: LockScreenConfiguration.exchangeDirectory)
   }
 
   init(
     scenes: @escaping () async throws -> [BridgeLockScreenScene],
     webWallpapersApplied: @escaping () async -> Bool = { false },
-    selection: LockScreenWallpaperSelection, documents: URL,
+    selection: LockScreenWallpaperSelection, exchange: URL,
     defaults: UserDefaults = .standard,
     scheduleMonitor: @escaping (@escaping @MainActor () -> Void) -> Timer =
       LockScreenWallpaperService.scheduleMonitorTimer
@@ -55,7 +53,7 @@ final class LockScreenWallpaperService {
     self.scenes = scenes
     self.webWallpapersApplied = webWallpapersApplied
     self.selection = selection
-    self.documents = documents
+    self.exchange = exchange
     self.defaults = defaults
     self.scheduleMonitor = scheduleMonitor
   }
@@ -217,11 +215,11 @@ final class LockScreenWallpaperService {
         isEnabled = false
       }
       try selection.checkCompatibility()
-      let root = documents
+      let root = exchange
       let userAssets = UserAssetStorage.managedRootURL
       let staging = Task.detached(priority: .utility) {
         try LockScreenAssetPublisher.prepare(
-          inputs: inputs, documents: root, userAssets: userAssets)
+          inputs: inputs, exchange: root, userAssets: userAssets)
       }
       let prepared = try await withTaskCancellationHandler {
         try await staging.value
@@ -239,7 +237,7 @@ final class LockScreenWallpaperService {
       // After the configuration naming the new revisions is on disk, never before:
       // a revision is only unreferenced once nothing published points at it.
       LockScreenAssetPublisher.collectGarbage(
-        documents: root, keeping: prepared.referencedRevisions)
+        exchange: root, keeping: prepared.referencedRevisions)
       try selection.synchronize(
         displays: Set(inputs.map(\.displayUUID)), revision: configuration.revision)
       status = String(localized: "Waiting for the system wallpaper renderer…")
@@ -286,7 +284,7 @@ final class LockScreenWallpaperService {
       try Task.checkCancellation()
       var ready = true
       for scene in configuration.scenes {
-        let file = documents.appendingPathComponent("ready-\(scene.displayID).json")
+        let file = exchange.appendingPathComponent("ready-\(scene.displayID).json")
         guard let data = try? Data(contentsOf: file),
           let state = try? JSONDecoder().decode(LockScreenReadiness.self, from: data),
           state.revision == configuration.revision, state.displayID == scene.displayID
@@ -308,7 +306,7 @@ final class LockScreenWallpaperService {
   private func restoreNativeSelection() throws {
     var manifestError: Error?
     do { try clearManifest() } catch { manifestError = error }
-    // A full disk or inaccessible container must never prevent restoring the
+    // A full disk or inaccessible exchange directory must never prevent restoring the
     // user's native selections. Preserve both errors when recovery also fails.
     do { try selection.synchronize(displays: []) } catch {
       if let manifestError {
@@ -323,10 +321,10 @@ final class LockScreenWallpaperService {
   }
 
   private func clearManifest() throws {
-    // Do not create a sandbox container merely because the feature is off.
+    // Do not create the exchange directory merely because the feature is off.
     guard
       FileManager.default.fileExists(
-        atPath: documents.appendingPathComponent(LockScreenConfiguration.fileName).path)
+        atPath: exchange.appendingPathComponent(LockScreenConfiguration.fileName).path)
     else {
       published = nil
       return
@@ -336,11 +334,11 @@ final class LockScreenWallpaperService {
 
   private func publish(_ configuration: LockScreenConfiguration) throws {
     guard configuration != published else { return }
-    try FileManager.default.createDirectory(at: documents, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: exchange, withIntermediateDirectories: true)
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.sortedKeys]
     try encoder.encode(configuration).write(
-      to: documents.appendingPathComponent(LockScreenConfiguration.fileName), options: .atomic)
+      to: exchange.appendingPathComponent(LockScreenConfiguration.fileName), options: .atomic)
     published = configuration
     CFNotificationCenterPostNotification(
       CFNotificationCenterGetDarwinNotifyCenter(),
@@ -380,7 +378,7 @@ private enum LockScreenAssetPublisher {
   }
 
   static func prepare(
-    inputs: [LockScreenPublishInput], documents: URL, userAssets: URL
+    inputs: [LockScreenPublishInput], exchange: URL, userAssets: URL
   ) throws -> Prepared {
     var sources: [String: String] = [:]
     var scenes: [LockScreenScene] = []
@@ -407,18 +405,18 @@ private enum LockScreenAssetPublisher {
         throw LockScreenWallpaperFailure(
           message: String(localized: "Only committed video and live scene projects support Animate Lock Screen."))
       }
-      let projectRevision = try snapshot(source: source, documents: documents, reused: &sources)
+      let projectRevision = try snapshot(source: source, exchange: exchange, reused: &sources)
       let assetsRevision: String
       if type.lowercased() == "scene" {
         assetsRevision = try snapshot(
           source: URL(fileURLWithPath: input.assetsPath, isDirectory: true),
-          documents: documents, reused: &sources)
+          exchange: exchange, reused: &sources)
       } else {
         // Video rendering does not consume shared scene assets.
         assetsRevision = projectRevision
       }
       let properties = try publishUserAssets(
-        input: input, documents: documents, userAssets: userAssets, reused: &sources)
+        input: input, exchange: exchange, userAssets: userAssets, reused: &sources)
       scenes.append(
         LockScreenScene(
           displayID: input.displayID, title: input.title,
@@ -433,7 +431,7 @@ private enum LockScreenAssetPublisher {
   }
 
   /// Copies the managed user assets this wallpaper actually references into the
-  /// extension container and rewrites the property values to point at the copy.
+  /// exchange directory and rewrites the property values to point at the copy.
   ///
   /// Only the referenced assets travel: the store may hold imports for every wallpaper
   /// in the library, and the extension has no business seeing any of them. The copy
@@ -444,7 +442,7 @@ private enum LockScreenAssetPublisher {
   /// Returns the property payload the extension should receive, unchanged when the
   /// wallpaper references no managed asset.
   private static func publishUserAssets(
-    input: LockScreenPublishInput, documents: URL, userAssets: URL,
+    input: LockScreenPublishInput, exchange: URL, userAssets: URL,
     reused: inout [String: String]
   ) throws -> String? {
     guard let json = input.propertiesJSON, !input.wallpaperID.isEmpty else {
@@ -488,9 +486,9 @@ private enum LockScreenAssetPublisher {
       }
     }
     let relative = "revisions/" + hash.finalize().map { String(format: "%02x", $0) }.joined()
-    let published = documents.appendingPathComponent(relative, isDirectory: true)
+    let published = exchange.appendingPathComponent(relative, isDirectory: true)
     if !manager.fileExists(atPath: published.path) {
-      let revisions = documents.appendingPathComponent("revisions", isDirectory: true)
+      let revisions = exchange.appendingPathComponent("revisions", isDirectory: true)
       try manager.createDirectory(at: revisions, withIntermediateDirectories: true)
       let pending = revisions.appendingPathComponent(
         ".pending-\(UUID().uuidString)", isDirectory: true)
@@ -524,12 +522,12 @@ private enum LockScreenAssetPublisher {
   /// Removes revision trees the published configuration no longer names.
   ///
   /// Nothing collected this before, so every asset revision the user ever activated
-  /// stayed in the container for good. Only the revisions the caller passes are kept,
+  /// stayed there for good. Only the revisions the caller passes are kept,
   /// and only complete fingerprint directories are candidates: a `.pending-` tree
   /// belongs to a publish that is still running.
-  static func collectGarbage(documents: URL, keeping referenced: Set<String>) {
+  static func collectGarbage(exchange: URL, keeping referenced: Set<String>) {
     let manager = FileManager.default
-    let revisions = documents.appendingPathComponent("revisions", isDirectory: true)
+    let revisions = exchange.appendingPathComponent("revisions", isDirectory: true)
     guard let entries = try? manager.contentsOfDirectory(
       at: revisions, includingPropertiesForKeys: [.isDirectoryKey], options: []) else { return }
     let live = Set(referenced.map { URL(fileURLWithPath: $0).lastPathComponent })
@@ -547,7 +545,7 @@ private enum LockScreenAssetPublisher {
     }
   }
 
-  private static func snapshot(source: URL, documents: URL, reused: inout [String: String]) throws
+  private static func snapshot(source: URL, exchange: URL, reused: inout [String: String]) throws
     -> String
   {
     let source = source.standardizedFileURL
@@ -555,10 +553,10 @@ private enum LockScreenAssetPublisher {
     let items = try inventory(source)
     let fingerprint = digest(source: source, items: items)
     let relative = "revisions/\(fingerprint)"
-    let destination = documents.appendingPathComponent(relative, isDirectory: true)
+    let destination = exchange.appendingPathComponent(relative, isDirectory: true)
     let manager = FileManager.default
     if !manager.fileExists(atPath: destination.path) {
-      let revisions = documents.appendingPathComponent("revisions", isDirectory: true)
+      let revisions = exchange.appendingPathComponent("revisions", isDirectory: true)
       try manager.createDirectory(at: revisions, withIntermediateDirectories: true)
       let pending = revisions.appendingPathComponent(
         ".pending-\(UUID().uuidString)", isDirectory: true)

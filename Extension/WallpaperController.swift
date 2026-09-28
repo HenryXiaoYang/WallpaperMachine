@@ -13,6 +13,7 @@ final class WallpaperController {
   func start() {
     guard !started else { return }
     started = true
+    WallpaperRuntime.removeLegacyExchange()
     reload()
     let workspace = NSWorkspace.shared.notificationCenter
     for (name, asleep) in [
@@ -108,7 +109,7 @@ final class WallpaperController {
     do {
       let data = try JSONEncoder().encode(readiness)
       try data.write(
-        to: WallpaperRuntime.documents.appendingPathComponent("ready-\(readiness.displayID).json"),
+        to: WallpaperRuntime.exchange.appendingPathComponent("ready-\(readiness.displayID).json"),
         options: .atomic)
     } catch {
       WallpaperRuntime.log("Readiness acknowledgement failed: \(error.localizedDescription)")

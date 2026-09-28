@@ -263,14 +263,17 @@ power work, off by default — see [testing/power-benchmark.md](testing/power-be
 preview or lock-screen instance cannot render for nobody), and
 `LockScreenConfiguration`, which defines the published contract: the app writes a complete immutable
 `LockScreenConfiguration` (version, revision, `[LockScreenScene]` with paths relative to the
-extension's Documents directory) into the extension container, then posts
-`LockScreenConfiguration.changedNotification`; the extension reloads and writes
+exchange directory) into `~/Library/Application Support/WallpaperMachine/LockScreenExchange/`,
+then posts `LockScreenConfiguration.changedNotification`; the extension reloads and writes
 `LockScreenReadiness` back once a GPU-ready non-preview surface exists, or with the error when
-acquiring or replacing that surface's renderer failed. The extension
+acquiring or replacing that surface's renderer failed. The app never touches the extension's
+sandbox container: on macOS 15+ an ad-hoc-signed app reaching into another app's container
+triggers the "would like to access data from other apps" prompt on every launch. The extension
 never reads draft options or the app's private configuration files, and it publishes no
-external URLs. `Extension/WallpaperExtension.entitlements` enables the App Sandbox with a single
+external URLs. `Extension/WallpaperExtension.entitlements` enables the App Sandbox with a
 read-only exception for `/opt/homebrew/`, which is what lets the sandboxed process load the
-Homebrew-provided renderer dylibs.
+Homebrew-provided renderer dylibs, and a read-write home-relative exception for the exchange
+directory only (`LockScreenConfiguration.exchangeRelativePath` must match it).
 
 See [features/lock-screen.md](features/lock-screen.md) for the user-facing behaviour.
 
@@ -385,8 +388,8 @@ flowchart TD
 - `Shared/` compiles into both targets, so it must build under `APPLICATION_EXTENSION_API_ONLY`
   and must contain only the app/extension contract.
 - The extension is sandboxed and API-extension-only. Its only inputs are the published
-  `configuration.json`, the assets it can read under its own Documents directory, and its single
-  read-only Homebrew exception. It never reads draft state or app-private files.
+  `configuration.json` and assets in the exchange directory, and its read-only Homebrew
+  exception. It never reads draft state or app-private files.
 - The extension accepts an XPC connection only after verifying the caller's code signature, and
   every private-ABI assumption is checked against the loaded system classes — no fallback
   offsets, no process injection, no lock-screen window impersonation.

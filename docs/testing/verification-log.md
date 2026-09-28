@@ -25,6 +25,15 @@ move the oldest entries verbatim into
 (or a new dated archive file) first, and promote anything durable before it
 goes. Trimming is allowed; editing an entry's recorded result is not.
 
+## 2026-09-28 — Lock-screen exchange directory (no App Data prompt)
+
+- Cause: tccd log showed kTCCServiceSystemPolicyAppData AUTHREQ_PROMPTING on every launch; app wrote/read ~/Library/Containers/app.wallpapermachine.wallpaper-extension (ad-hoc signed, grant not persisted).
+- Fix: app and extension exchange via ~/Library/Application Support/WallpaperMachine/LockScreenExchange; extension gets home-relative read-write exception; extension removes legacy container files.
+- python3 scripts/test.py --only LockScreenWallpaperServiceTests --only DiagnosticsBundleTests: 20 passed.
+- python3 scripts/test.py: 651 passed, 0 failed, 11 skipped.
+- Sandbox smoke: ad-hoc CLI signed with Extension entitlements resolved real home, read/wrote exchange, denied writes outside and reads of app-private LockScreen/.
+- Not run: live lock-screen activation on desktop (no desktop authorization); Release not rebuilt.
+
 ## 2026-09-28 — Panel stays open after applying; Command-W closes it
 
 Settings → General → Hide window after applying a wallpaper now defaults to off (a stored choice is kept). The main menu gains File → Close (Command-W), which goes through the panel's windowShouldClose like the close button.
@@ -102,15 +111,3 @@ R25 PowerWatcher restored to its original 5 s run_in_mode loop and its drop test
 - python3 scripts/test.py --only AppUpdateTests: 30 passed (new testBackgroundUpdateDownloadsOnlyWhatItCanInstallInPlace).
 - python3 scripts/test.py: 645 passed, 0 failed, 11 skipped.
 - Not exercised: the NSAlert prompt, status-menu item and 6-hour schedule in the running app (no desktop run authorized); no Release build.
-
-## 2026-09-27 — Renderer and app power work: batch 1, sibling renderer items, app side, Rust gate
-
-- Batch 1: R1+R4 with Scene render optimisation on, a frame that would repeat the picture on the surface is not drawn, submitted or presented; unchanged_present_test 3/3 (plain video submissions track video_frames_selected, other ticks count presents_skipped_unchanged; a static scene submits 0 once every pass is reused, and its poster matches the reuse-off baseline).
-- Batch 1: R2 sound output starts only while mounted, playing and unmuted; R3 system-audio tap only for scenes that read audio (or a subscribed web page); R5/R6 pointer sampling is event-armed and a paused scene is not a consumer.
-- Batch 1: R21 sound worker wakes and per-chunk allocations reduced; R23 global resume never un-pauses a still-covered display; R24 no frame clock without a loaded scene.
-- Other worker's renderer items: R12 decode-thread notify gating + AVDISCARD_ALL on unused streams; R13 ThreadTimer::WakeOnce latch at the ceiling; R17 audio demuxer AVDISCARD + reused convert buffer; R27 software-decode import failure logged once per failure run; R28 transparent map find, three-bucket rope sort, per-subsystem overflow log latches.
-- Other worker's R16: hidden particle layers skip geometry and RebuildVisibleMeshes runs after Tick, before drawFrame; particle dumps (spritetrail/ropetrail/rope, shown and hidden) byte-identical to HEAD. R25: power watcher stops through a signalled run-loop source.
-- App side: panel WKWebView uses inactiveSchedulingPolicy .suspend and keeps a pending snapshot for reveal; Discover luminance sampler runs only while visible; web-wallpaper pointer monitor only while a page is live; lock-screen unchanged path skips the compatibility check.
-- Cargo, default target dir: cargo test --release -p wallpaper-core --lib 220 passed; cargo test --release -p wallpaper-bridge 351 passed (lib incl. api_smoke, playback, display_presentation, power_settings), 0 failed in either.
-- Not changed: R11 (frame-clock drift), R19, R20, N1-N6.
-- No desktop, visual or power verification; no Release build. Evidence is workload only; no energy saving is claimed.

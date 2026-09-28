@@ -251,8 +251,8 @@ the design.
 - The lock-screen extension is sandboxed
   (`Extension/WallpaperExtension.entitlements`) and cannot read either the store or the
   bridge. For a committed **video or scene** wallpaper, the assets that wallpaper
-  actually references are republished into the extension container as their own
-  `Documents/revisions/<fingerprint>/` tree and the property values are rewritten to
+  actually references are republished into the lock-screen exchange directory as their own
+  `revisions/<fingerprint>/` tree and the property values are rewritten to
   point at that copy; the fingerprint is taken over the recorded content digests, so an
   unchanged selection is recognised and nothing is copied again. Revisions the published
   configuration no longer names are collected after each successful publish.

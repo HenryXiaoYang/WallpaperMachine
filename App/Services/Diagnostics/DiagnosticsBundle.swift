@@ -32,7 +32,7 @@ struct DiagnosticsBundle {
     static func sources(logsRoot: URL, home: URL = FileManager.default.homeDirectoryForCurrentUser) -> Sources {
         Sources(
             logsRoot: logsRoot,
-            extensionLog: home.appending(path: "Library/Containers/\(LockScreenConfiguration.extensionIdentifier)/Data/Documents/extension.log"),
+            extensionLog: home.appending(path: LockScreenConfiguration.exchangeRelativePath).appending(path: "extension.log"),
             crashReports: home.appending(path: "Library/Logs/DiagnosticReports"))
     }
 

@@ -13,7 +13,7 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
   private let preference = "WallpaperMachineAnimateLockScreen"
   private var store: URL { root.appendingPathComponent("Index.plist") }
   private var journal: URL { root.appendingPathComponent("journal.plist") }
-  private var documents: URL { root.appendingPathComponent("Documents") }
+  private var exchange: URL { root.appendingPathComponent("Exchange") }
   private var project: URL { root.appendingPathComponent("Project") }
   private var home: URL { root.appendingPathComponent("Home") }
   private var previousHome: String?
@@ -28,7 +28,7 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
     root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(
       "Library/Caches/lock-screen-service-tests-" + UUID().uuidString, isDirectory: true)
     try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
-    try FileManager.default.createDirectory(at: documents, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: exchange, withIntermediateDirectories: true)
     // The managed user-asset store lives under the support root; every test that
     // publishes one has to land in a throwaway home, not the user's own.
     previousHome = ProcessInfo.processInfo.environment["WALLPAPER_MACHINE_HOME"]
@@ -138,10 +138,10 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
 
   /// Answers the extension's readiness files like the real lock-screen renderer.
   private func readinessResponder() -> Task<Void, Never> {
-    let documents = self.documents
+    let exchange = self.exchange
     return Task.detached {
       while !Task.isCancelled {
-        let file = documents.appendingPathComponent(LockScreenConfiguration.fileName)
+        let file = exchange.appendingPathComponent(LockScreenConfiguration.fileName)
         if let data = try? Data(contentsOf: file),
           let configuration = try? JSONDecoder().decode(LockScreenConfiguration.self, from: data)
         {
@@ -149,7 +149,7 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
             let readiness = LockScreenReadiness(
               revision: configuration.revision, displayID: scene.displayID, error: nil)
             try? JSONEncoder().encode(readiness).write(
-              to: documents.appendingPathComponent("ready-\(scene.displayID).json"),
+              to: exchange.appendingPathComponent("ready-\(scene.displayID).json"),
               options: .atomic)
           }
         }
@@ -166,7 +166,7 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
       selection: LockScreenWallpaperSelection(
         storeURL: store, journalURL: journal,
         reload: { throw LockScreenWallpaperFailure(message: "agent missing") }),
-      documents: documents, defaults: defaults, scheduleMonitor: scheduleMonitor)
+      exchange: exchange, defaults: defaults, scheduleMonitor: scheduleMonitor)
     var before = 0
     var after = 0
     service.beforeActivation = { before += 1 }
@@ -192,7 +192,7 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
         reload: {
           if failReload { throw LockScreenWallpaperFailure(message: "agent missing") }
         }),
-      documents: documents, defaults: defaults, scheduleMonitor: scheduleMonitor)
+      exchange: exchange, defaults: defaults, scheduleMonitor: scheduleMonitor)
     var before = 0
     var after = 0
     service.beforeActivation = { before += 1 }
@@ -220,7 +220,7 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
       scenes: { scenes },
       selection: LockScreenWallpaperSelection(
         storeURL: store, journalURL: journal, reload: {}),
-      documents: documents, defaults: defaults, scheduleMonitor: scheduleMonitor)
+      exchange: exchange, defaults: defaults, scheduleMonitor: scheduleMonitor)
     var after = 0
     service.beforeActivation = {}
     service.afterDeactivation = { after += 1 }
@@ -251,7 +251,7 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
       },
       selection: LockScreenWallpaperSelection(
         storeURL: store, journalURL: journal, reload: {}),
-      documents: documents, defaults: defaults, scheduleMonitor: scheduleMonitor)
+      exchange: exchange, defaults: defaults, scheduleMonitor: scheduleMonitor)
     try service.start()
     XCTAssertTrue(timers.isEmpty)
     service.refresh()
@@ -305,7 +305,7 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
       },
       selection: LockScreenWallpaperSelection(
         storeURL: store, journalURL: journal, reload: {}),
-      documents: documents, defaults: defaults, scheduleMonitor: scheduleMonitor)
+      exchange: exchange, defaults: defaults, scheduleMonitor: scheduleMonitor)
     try service.start()
     XCTAssertTrue(service.isRequested)
     XCTAssertEqual(timers.count, 1)
@@ -333,7 +333,7 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
       scenes: { [] },
       selection: LockScreenWallpaperSelection(
         storeURL: store, journalURL: journal, reload: {}),
-      documents: documents, defaults: defaults, scheduleMonitor: scheduleMonitor)
+      exchange: exchange, defaults: defaults, scheduleMonitor: scheduleMonitor)
     XCTAssertThrowsError(try service.start())
     XCTAssertTrue(timers.isEmpty)
     XCTAssertNotNil(service.errorMessage)
@@ -352,7 +352,7 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
       scenes: { [self.scene()] },
       selection: LockScreenWallpaperSelection(
         storeURL: store, journalURL: journal, reload: {}),
-      documents: documents, defaults: defaults, scheduleMonitor: scheduleMonitor)
+      exchange: exchange, defaults: defaults, scheduleMonitor: scheduleMonitor)
     try service.start()
     service.setEnabled(true)
     await waitFor("published scene awaiting readiness") {
@@ -382,7 +382,7 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
       scenes: { records },
       selection: LockScreenWallpaperSelection(
         storeURL: store, journalURL: journal, reload: {}),
-      documents: documents, defaults: defaults, scheduleMonitor: scheduleMonitor)
+      exchange: exchange, defaults: defaults, scheduleMonitor: scheduleMonitor)
     try service.start()
     service.setEnabled(true)
     await waitFor("first generation awaiting readiness") {
@@ -412,7 +412,7 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
         reload: {
           if failReload { throw LockScreenWallpaperFailure(message: "restoration failed") }
         }),
-      documents: documents, defaults: defaults, scheduleMonitor: scheduleMonitor)
+      exchange: exchange, defaults: defaults, scheduleMonitor: scheduleMonitor)
     try service.start()
     service.setEnabled(true)
     await waitFor("activation waiting for readiness") {
@@ -441,14 +441,14 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
 
   // MARK: - Managed user assets
 
-  /// The extension can only read its own container, so a property pointing at the
-  /// app's managed store has to be republished into the container and the value
+  /// The extension can only read the exchange directory, so a property pointing at the
+  /// app's managed store has to be republished there and the value
   /// rewritten. Only the assets this wallpaper references may travel.
   @MainActor
-  func testReferencedUserAssetsArePublishedIntoTheContainerAndNothingElseIs() async throws {
+  func testReferencedUserAssetsArePublishedIntoTheExchangeAndNothingElseIs() async throws {
     try XCTSkipIf(CGDisplayIsOnline(CGMainDisplayID()) == 0, "No online main display")
     try writeManagedAsset(propertyId: "cover", fileName: "a b+c.png", bytes: "cover-bytes")
-    // A second wallpaper's import, which this one must not carry into the container.
+    // A second wallpaper's import, which this one must not carry into the exchange.
     let other = ClientPaths.userAssetsURL.appendingPathComponent(
       "9999/cover/abc", isDirectory: true)
     try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
@@ -458,7 +458,7 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
       scenes: { [self.scene(propertiesJSON: #"{"cover":"/Users/someone/a b+c.png"}"#)] },
       selection: LockScreenWallpaperSelection(
         storeURL: store, journalURL: journal, reload: {}),
-      documents: documents, defaults: defaults, scheduleMonitor: scheduleMonitor)
+      exchange: exchange, defaults: defaults, scheduleMonitor: scheduleMonitor)
     let responder = readinessResponder()
     defer { responder.cancel() }
     try service.start()
@@ -467,17 +467,17 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
 
     let configuration = try JSONDecoder().decode(
       LockScreenConfiguration.self,
-      from: Data(contentsOf: documents.appendingPathComponent(LockScreenConfiguration.fileName)))
+      from: Data(contentsOf: exchange.appendingPathComponent(LockScreenConfiguration.fileName)))
     let json = try XCTUnwrap(XCTUnwrap(configuration.scenes.first).propertiesJSON)
     let root = try XCTUnwrap(
       try JSONSerialization.jsonObject(with: XCTUnwrap(json.data(using: .utf8))) as? [String: Any])
     let value = try XCTUnwrap(root["cover"] as? String)
 
     XCTAssertTrue(
-      value.hasPrefix(documents.path + "/revisions/"),
-      "the extension cannot read the app's own store, so the value must name the container copy")
+      value.hasPrefix(exchange.path + "/revisions/"),
+      "the extension cannot read the app's own store, so the value must name the exchange copy")
     XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: value)), Data("cover-bytes".utf8))
-    let published = try FileManager.default.subpathsOfDirectory(atPath: documents.path)
+    let published = try FileManager.default.subpathsOfDirectory(atPath: exchange.path)
     XCTAssertFalse(
       published.contains { $0.hasSuffix("other.png") },
       "another wallpaper's imports are not this wallpaper's to publish")
@@ -496,14 +496,14 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
       scenes: { [self.scene(propertiesJSON: properties)] },
       selection: LockScreenWallpaperSelection(
         storeURL: store, journalURL: journal, reload: {}),
-      documents: documents, defaults: defaults, scheduleMonitor: scheduleMonitor)
+      exchange: exchange, defaults: defaults, scheduleMonitor: scheduleMonitor)
     let responder = readinessResponder()
     defer { responder.cancel() }
     try service.start()
     service.setEnabled(true)
     await waitFor("first publication") { service.isEnabled }
 
-    let revisions = documents.appendingPathComponent("revisions", isDirectory: true)
+    let revisions = exchange.appendingPathComponent("revisions", isDirectory: true)
     let firstNames = try Set(FileManager.default.contentsOfDirectory(atPath: revisions.path))
     let assetRevision = try XCTUnwrap(
       publishedAssetRevision(), "the first publication must name an asset revision")
@@ -559,7 +559,7 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
       scenes: { [] }, webWallpapersApplied: { true },
       selection: LockScreenWallpaperSelection(
         storeURL: store, journalURL: journal, reload: {}),
-      documents: documents, defaults: defaults, scheduleMonitor: scheduleMonitor)
+      exchange: exchange, defaults: defaults, scheduleMonitor: scheduleMonitor)
     try service.start()
     service.setEnabled(true)
     await waitFor("settled status") { !service.isBusy }
@@ -576,7 +576,7 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
   /// The asset revision is the one holding a `cover` directory; the project payload
   /// revision holds `project.json`.
   private func publishedAssetRevision() throws -> URL? {
-    let revisions = documents.appendingPathComponent("revisions", isDirectory: true)
+    let revisions = exchange.appendingPathComponent("revisions", isDirectory: true)
     let names = (try? FileManager.default.contentsOfDirectory(atPath: revisions.path)) ?? []
     return names.map { revisions.appendingPathComponent($0, isDirectory: true) }
       .first { FileManager.default.fileExists(atPath: $0.appendingPathComponent("cover").path) }
@@ -585,12 +585,12 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
   private func answerPublishedReadiness() throws {
     let configuration = try JSONDecoder().decode(
       LockScreenConfiguration.self,
-      from: Data(contentsOf: documents.appendingPathComponent(LockScreenConfiguration.fileName)))
+      from: Data(contentsOf: exchange.appendingPathComponent(LockScreenConfiguration.fileName)))
     for scene in configuration.scenes {
       let readiness = LockScreenReadiness(
         revision: configuration.revision, displayID: scene.displayID, error: nil)
       try JSONEncoder().encode(readiness).write(
-        to: documents.appendingPathComponent("ready-\(scene.displayID).json"), options: .atomic)
+        to: exchange.appendingPathComponent("ready-\(scene.displayID).json"), options: .atomic)
     }
   }
 }

@@ -130,14 +130,16 @@ final class DiagnosticsBundleTests: XCTestCase {
         XCTAssertEqual(String(stamp), formatter.string(from: exportedAt))
     }
 
-    func testSourcesUseTheExtensionContainerAndDiagnosticReports() {
+    /// Reading the extension's own container would make macOS ask for access to
+    /// another app's data; its log lives in the shared exchange directory instead.
+    func testSourcesUseTheLockScreenExchangeAndDiagnosticReports() {
         let home = root.appendingPathComponent("home")
         let logs = root.appendingPathComponent("logs")
         let sources = DiagnosticsBundle.sources(logsRoot: logs, home: home)
         XCTAssertEqual(sources.logsRoot.standardizedFileURL, logs.standardizedFileURL)
         XCTAssertEqual(
             sources.extensionLog.standardizedFileURL,
-            home.appending(path: "Library/Containers/\(LockScreenConfiguration.extensionIdentifier)/Data/Documents/extension.log").standardizedFileURL)
+            home.appending(path: "Library/Application Support/WallpaperMachine/LockScreenExchange/extension.log").standardizedFileURL)
         XCTAssertEqual(
             sources.crashReports.standardizedFileURL,
             home.appending(path: "Library/Logs/DiagnosticReports").standardizedFileURL)

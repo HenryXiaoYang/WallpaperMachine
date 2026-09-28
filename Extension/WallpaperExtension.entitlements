@@ -8,5 +8,9 @@
     <array>
         <string>/opt/homebrew/</string>
     </array>
+    <key>com.apple.security.temporary-exception.files.home-relative-path.read-write</key>
+    <array>
+        <string>/Library/Application Support/WallpaperMachine/LockScreenExchange/</string>
+    </array>
 </dict>
 </plist>

@@ -48,8 +48,11 @@ well inside that; see
 If the renderer fails, or misses the extension's own 30-second first-frame
 deadline, the extension writes the reason to its readiness file and the status
 row shows it. The generic "macOS did not load the lock-screen renderer" message
-means no answer arrived at all. The extension's container keeps a bounded log at
-`~/Library/Containers/app.wallpapermachine.wallpaper-extension/Data/Documents/extension.log`.
+means no answer arrived at all. The extension keeps a bounded log at
+`~/Library/Application Support/WallpaperMachine/LockScreenExchange/extension.log`.
+The app and extension exchange files only there, never through the extension's
+sandbox container, so macOS does not ask the app for access to another app's
+data. Files earlier releases left in that container are removed by the extension.
 
 Every copy of the app on disk registers the same extension identifier, and
 macOS may launch any of them — including the Debug build `scripts/test.py`

@@ -5,7 +5,11 @@ import Security
 /// All private ABI assumptions are checked against the loaded system classes.
 /// No fallback offsets, process injection, or lock-screen window impersonation.
 enum WallpaperRuntime {
+  /// The extension's own container; holds only its shader cache.
   static let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+  /// Where the app publishes and this extension acknowledges; see
+  /// `LockScreenConfiguration.exchangeDirectory`.
+  static let exchange = LockScreenConfiguration.exchangeDirectory
   private static var handle: UnsafeMutableRawPointer?
 
   static func load() throws {
@@ -148,7 +152,7 @@ enum WallpaperRuntime {
   }
 
   static func configuration() throws -> LockScreenConfiguration {
-    let url = documents.appendingPathComponent(LockScreenConfiguration.fileName)
+    let url = exchange.appendingPathComponent(LockScreenConfiguration.fileName)
     let configuration = try JSONDecoder().decode(
       LockScreenConfiguration.self, from: Data(contentsOf: url))
     guard configuration.version == LockScreenConfiguration.supportedVersion else {
@@ -164,7 +168,7 @@ enum WallpaperRuntime {
     else {
       throw failure("Invalid lock-screen asset path.")
     }
-    let root = documents.resolvingSymlinksInPath().standardizedFileURL
+    let root = exchange.resolvingSymlinksInPath().standardizedFileURL
     let url = root.appendingPathComponent(relativePath).resolvingSymlinksInPath()
       .standardizedFileURL
     guard url.path.hasPrefix(root.path + "/"), FileManager.default.isReadableFile(atPath: url.path)
@@ -175,8 +179,8 @@ enum WallpaperRuntime {
   static func log(_ message: String) {
     NSLog("[MWE LockScreen] %@", message)
     // Small bounded local diagnostic, never asset contents or authentication data.
-    let file = documents.appendingPathComponent("extension.log")
-    try? FileManager.default.createDirectory(at: documents, withIntermediateDirectories: true)
+    let file = exchange.appendingPathComponent("extension.log")
+    try? FileManager.default.createDirectory(at: exchange, withIntermediateDirectories: true)
     if let size = try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize, size > 512 * 1024 {
       try? FileManager.default.removeItem(at: file)
     }
@@ -189,5 +193,19 @@ enum WallpaperRuntime {
     defer { try? handle.close() }
     _ = try? handle.seekToEnd()
     try? handle.write(contentsOf: data)
+  }
+
+  /// Earlier releases published into this container, which made macOS ask the app
+  /// for access to another app's data on every launch. Only the extension may
+  /// clean it up without that prompt; the shader cache stays.
+  static func removeLegacyExchange() {
+    let manager = FileManager.default
+    guard let names = try? manager.contentsOfDirectory(atPath: documents.path) else { return }
+    for name in names
+    where name == LockScreenConfiguration.fileName || name == "extension.log"
+      || name == "revisions" || (name.hasPrefix("ready-") && name.hasSuffix(".json"))
+    {
+      try? manager.removeItem(at: documents.appendingPathComponent(name))
+    }
   }
 }
