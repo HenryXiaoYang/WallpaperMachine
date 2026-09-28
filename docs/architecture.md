@@ -185,7 +185,10 @@ Swift keeps the *system* wallpaper consistent with that window:
   refresh reopens a scene only when its saved configuration changed. The frame-rate ceiling, the
   transient mute, pause and the gating of system-audio capture are applied live and never count
   as a different wallpaper; a scene's own audio-response switch follows the saved setting even
-  while capture waits for the scene to read audio.
+  while capture waits for the scene to read audio. Every reconcile (Apply, a display edit, a
+  video-backend switch, a repair) hands the engine each scene with the frame-rate ceiling and the
+  transient mute already applied, the form an open scene's descriptor holds, so it too reopens
+  only the scenes whose saved configuration changed.
 
 ### Renderer bridge (generated uniffi)
 

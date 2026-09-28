@@ -764,9 +764,7 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
 
     /// Saved rate, never above the ceiling currently in force.
     fn live_target_fps(&self, rate: u32) -> u32 {
-        self.active_target_fps_cap()
-            .map_or(rate, |cap| rate.min(cap))
-            .max(1)
+        capped_frame_rate(rate, self.active_target_fps_cap())
     }
 
     fn quality_runtime(&self) -> QualityRuntime {
@@ -1290,16 +1288,6 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
             .collect()
     }
 
-    /// `scene` as its renderer runs it once the bridge has applied the live
-    /// frame-rate ceiling and the transient mute on top of the saved values,
-    /// which is what an open scene's descriptor holds.
-    fn live_scene(&self, scene: &SceneDesc) -> SceneDesc {
-        let mut live = scene.clone();
-        live.fps = self.live_target_fps(scene.fps);
-        live.audio_muted = scene.audio_muted || self.state.audio_suppressed;
-        live
-    }
-
     fn unchanged_configured_scenes(
         &self,
         displays: &[DisplaySnapshotEntry],
@@ -1322,7 +1310,11 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
         }
 
         if scenes.iter().all(|scene| {
-            let live = self.live_scene(scene);
+            let live = live_scene(
+                scene.clone(),
+                self.active_target_fps_cap(),
+                self.state.audio_suppressed,
+            );
             snapshot.iter().any(|entry| {
                 entry.handle.is_some()
                     && entry
@@ -1897,15 +1889,36 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
     }
 }
 
-/// The quality settings a reconcile has to re-assert on the scenes it opens.
+/// The quality settings a reconcile puts into effect.
 ///
-/// A freshly opened scene starts at its descriptor's rate and at native
-/// rasterization size, so without this a wallpaper change would silently
-/// discard the render scale and the active power profile.
+/// The frame-rate ceiling goes into every descriptor the reconcile hands the
+/// engine. The render scale is not part of a descriptor and a freshly opened
+/// scene rasterizes at native size, so it is re-asserted on each scene.
+/// Without either, a wallpaper change would silently discard the render scale
+/// or the active power profile.
 #[derive(Clone, Copy, Debug)]
 struct QualityRuntime {
     render_scale: f32,
     target_fps_cap: Option<u32>,
+}
+
+/// The saved rate, never above the ceiling in force.
+fn capped_frame_rate(rate: u32, cap: Option<u32>) -> u32 {
+    cap.map_or(rate, |cap| rate.min(cap)).max(1)
+}
+
+/// `scene` as its renderer runs it: the saved rate under the frame-rate
+/// ceiling in force, and the saved mute with the transient mute on top.
+///
+/// Both are applied live, and applying them rewrites the open scene's
+/// descriptor. The engine reopens any scene whose descriptor differs from the
+/// one it is handed, so every reconcile hands over, and every unchanged check
+/// compares against, this form. The saved values would reload each capped or
+/// muted scene on every Apply, display edit, backend switch or repair.
+fn live_scene(mut scene: SceneDesc, fps_cap: Option<u32>, audio_suppressed: bool) -> SceneDesc {
+    scene.fps = capped_frame_rate(scene.fps, fps_cap);
+    scene.audio_muted = scene.audio_muted || audio_suppressed;
+    scene
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1924,7 +1937,7 @@ async fn reconcile_with<E: EngineFacade>(
     audio_suppressed: bool,
 ) -> Result<Vec<SceneDesc>, BridgeError> {
     let displays = engine.display_snapshot();
-    let scenes = if presentation_unloaded {
+    let scenes: Vec<SceneDesc> = if presentation_unloaded {
         Vec::new()
     } else {
         ActivationInputs {
@@ -1942,6 +1955,9 @@ async fn reconcile_with<E: EngineFacade>(
             audio_suppressed,
         }
         .build()?
+        .into_iter()
+        .map(|scene| live_scene(scene, quality.target_fps_cap, audio_suppressed))
+        .collect()
     };
     let results = engine
         .reconcile_scenes(scenes.clone())
@@ -1972,7 +1988,7 @@ async fn reconcile_with<E: EngineFacade>(
             .await
             .map_err(|error| BridgeError::engine(error.to_string()))?;
         engine
-            .set_audio_muted(handle, scene.audio_muted || audio_suppressed)
+            .set_audio_muted(handle, scene.audio_muted)
             .await
             .map_err(|error| BridgeError::engine(error.to_string()))?;
         register_audio_capture(&engine, handle, scene.audio_response_enabled)
@@ -1985,15 +2001,6 @@ async fn reconcile_with<E: EngineFacade>(
                 .set_render_scale(handle, quality.render_scale)
                 .await
                 .map_err(|error| BridgeError::engine(error.to_string()))?;
-        }
-        if let Some(cap) = quality.target_fps_cap {
-            let fps = scene.fps.min(cap).max(1);
-            if fps != scene.fps {
-                engine
-                    .set_fps(handle, fps)
-                    .await
-                    .map_err(|error| BridgeError::engine(error.to_string()))?;
-            }
         }
     }
 

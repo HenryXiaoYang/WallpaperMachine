@@ -350,11 +350,13 @@ async fn set_target_fps_above_the_cap_stays_capped_live_and_saves_the_request() 
 }
 
 #[tokio::test]
-async fn web_descriptor_fps_is_capped_and_scene_descriptors_are_not() {
+async fn wallpapers_applied_under_a_frame_rate_cap_start_at_the_capped_rate() {
     let temp = tempfile::tempdir().unwrap();
     let engine = FakeEngineFacade::default();
     engine.set_snapshot(vec![display(7, Some(1)), display(8, None)]);
     let bridge = bridge_with(&engine, &temp);
+    bridge.set_frame_rate_cap(Some(20)).await.unwrap();
+
     commit(
         &bridge,
         "100",
@@ -372,14 +374,11 @@ async fn web_descriptor_fps_is_capped_and_scene_descriptors_are_not() {
     )
     .await;
 
-    bridge.set_frame_rate_cap(Some(20)).await.unwrap();
-
     assert_eq!(bridge.web_wallpapers().await.unwrap()[0].fps, 20);
     assert_eq!(
-        engine.rendered_scenes()[0].fps, 60,
-        "scene descriptors keep the saved rate; the cap is applied live"
+        engine.rendered_scenes()[0].fps, 20,
+        "a scene opens at its descriptor's rate, so the descriptor carries the cap"
     );
-    assert_eq!(engine.fps_calls().last().map(|call| call.1), Some(20));
 }
 
 #[tokio::test]
