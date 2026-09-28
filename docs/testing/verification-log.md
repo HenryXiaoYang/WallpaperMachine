@@ -25,6 +25,17 @@ move the oldest entries verbatim into
 (or a new dated archive file) first, and promote anything durable before it
 goes. Trimming is allowed; editing an entry's recorded result is not.
 
+## 2026-09-28 — Release the closed control panel to reduce memory
+
+- Panel lifecycle follow-up: CPython 3.12.14 scripts/test.py --only ControlPanelWindowSizingTests --only ControlPanelShellTests --only ControlPanelSyncTests passed 30/30. Earlier full gate is recorded separately; not repeated.
+- scripts/build.py --swift-only --configuration Release passed; installed signed result into /Applications/WallpaperMachine.app with the previous bundle backed up.
+- Codex computer use confirmed original scene playback, close/reopen, Settings navigation and restoration of the last native section. No quality, audio, power or renderer settings changed.
+- Old installed build retained 121.6 MiB across WebKit GPU/WebContent/Networking after closing. Updated build released WebContent/Networking immediately and GPU after its idle timeout.
+- Same updated main PID 88547: total app coalition plus separate installed extension 904.6 MiB with panel open, 790.0 MiB after close and helper exit; main 734.8 to 734.7 MiB. This isolates panel residency, not a build-to-build benchmark.
+- Fresh startup remained above 1 GiB before freed decode allocations were reclaimed; closing the panel does not solve the remaining scene texture/renderer memory.
+- Existing native Metal local-scene harness drew 120 frames at 3840x2160; no demonstrated memory win and no live backend switch. Raw-mip copy experiment did not apply to this scene’s embedded PNGs and was removed.
+- Local imports retain the hidden page until the next close to avoid cancellation. This exception was reviewed but not exercised with a real file picker; real lock/unlock remains pending user operation.
+
 ## 2026-09-28 — Reduce active-scene reservations and release unlocked lock-screen renderer
 
 - Memory follow-up to the active-wallpaper report, not an idle-panel result. User approved unloading the unlocked lock-screen renderer and cold reloading on the next lock; original texture resolution, render scale, frame-rate ceiling and playback settings remain unchanged.
@@ -118,13 +129,3 @@ Settings → General → Hide window after applying a wallpaper now defaults to 
 - `python3 scripts/test.py` — exit 0; Python suites OK; native 661: 650 passed, 11 skipped, 0 failed
 - `xcodebuild build-for-testing -scheme WallpaperMachineUI` — TEST BUILD SUCCEEDED; the new `testCommandWClosesLikeTheCloseButton` compiles but was not run
 - Not exercised: Command-W and the panel staying open after Apply on the desktop (no desktop run requested); no Release build
-
-## 2026-09-28 — Rebase of the power change set onto origin/main f383bbd
-
-Conflicts only in verification logs (entries unioned verbatim, oldest six archived) and provenance.json (sceneEngine.equalQualityPerformanceChanges keeps upstream's 2026-09-24 note followed by ours; upstream deferredSurfaceLifetimeChanges kept). Upstream 36359b3 SceneWallpaperBindings.mm and 2d1322a panel.js/WebControlPanel.swift touch disjoint hunks; no bridge API change upstream.
-
-- `python3 scripts/build.py --renderer-only` — exit 0; regenerated App/Bridge/Generated unchanged
-- `cargo test --release -p wallpaper-bridge --lib` (build.py cargo environment) — 349 passed; `-p wallpaper-core --lib` — 220 passed
-- `python3 scripts/check_renderer.py` — exit 0; 10/10 generated cases pixel-equal pooled vs isolated, 0 diagnostics, reload cycles 0 (artifacts/renderer/adaptive-20260928-001427)
-- `python3 scripts/test.py` — 650 passed, 0 failed, 11 skipped of 661; Python script suites OK
-- Not run: desktop, visual or power verification; no Release build.

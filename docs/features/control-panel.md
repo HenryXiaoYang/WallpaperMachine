@@ -226,9 +226,15 @@ and scrolling. About's update actions precede expanded release notes.
 
 The panel's web view sets WebKit's inactive scheduling policy
 (`WKPreferences.inactiveSchedulingPolicy = .suspend`). WebKit applies it when
-it considers the view inactive; the view stays in the window tree, so the panel
-does not rely on it being suspended while hidden. A snapshot the host skipped
-while the window was hidden is delivered when the window is revealed. Discover's live-preview luminance sampler
+it considers the view inactive. Minimized or app-hidden windows keep their page;
+a snapshot skipped while hidden is delivered when revealed. Closing the window
+(close button or Command-W) releases its hosting controller and web view instead
+of retaining a hidden page. Reopening rebuilds the page on the last native
+navigation section, using the existing library, playback and download stores.
+Page-local scrolling, filters, disclosures and uncommitted input start fresh.
+An active local import keeps the window hidden until its next close, so releasing
+the page cannot cancel the import. Workshop downloads live in the retained store.
+Discover's live-preview luminance sampler
 (`panel.js`, `sampleLivePreviews`) runs only while Discover is the visible page
 and a ready animated preview is on screen; leaving Discover, hiding the
 document, or running out of ready tiles stops it.

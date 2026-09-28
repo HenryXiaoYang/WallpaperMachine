@@ -15,6 +15,16 @@ renderer behaviour and known-failing tests into
 [../renderer.md](../renderer.md), build and code-signing traps into
 [../../build.md](../../build.md).
 
+## 2026-09-28 — Rebase of the power change set onto origin/main f383bbd
+
+Conflicts only in verification logs (entries unioned verbatim, oldest six archived) and provenance.json (sceneEngine.equalQualityPerformanceChanges keeps upstream's 2026-09-24 note followed by ours; upstream deferredSurfaceLifetimeChanges kept). Upstream 36359b3 SceneWallpaperBindings.mm and 2d1322a panel.js/WebControlPanel.swift touch disjoint hunks; no bridge API change upstream.
+
+- `python3 scripts/build.py --renderer-only` — exit 0; regenerated App/Bridge/Generated unchanged
+- `cargo test --release -p wallpaper-bridge --lib` (build.py cargo environment) — 349 passed; `-p wallpaper-core --lib` — 220 passed
+- `python3 scripts/check_renderer.py` — exit 0; 10/10 generated cases pixel-equal pooled vs isolated, 0 diagnostics, reload cycles 0 (artifacts/renderer/adaptive-20260928-001427)
+- `python3 scripts/test.py` — 650 passed, 0 failed, 11 skipped of 661; Python script suites OK
+- Not run: desktop, visual or power verification; no Release build.
+
 ## 2026-09-28 — Power set pre-commit finish: R25 revert, R3/R16/R1-R4 evidence
 
 R25 PowerWatcher restored to its original 5 s run_in_mode loop and its drop test and notes removed. New: ParticleHiddenGeometry.LayerShownByTickAfterEmittDrawsWhatAlwaysGeneratingDraws (fails with RebuildMesh stubbed out, passes as shipped); UnchangedPresent.TheSkipPresentsTheSameVideoFramesInTheSameOrder (75 distinct generations/PTS identical with the skip on and off) and OutputChangesOnAHeldVideoFramePresentOnceEach (crop, render scale, resize, fill mode), via the new observation-only RenderInitInfo::video_frame_presented. R3 late-flag bridge test already existed.

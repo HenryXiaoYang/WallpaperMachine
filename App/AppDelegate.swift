@@ -505,7 +505,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        // A Dock click returns to the panel as the user left it; only a fresh panel starts on the library.
+        // A Dock click returns to the last native section, even after releasing the page.
         showControlPanel(selection: controlPanelNavigation.selection ?? .wallpaper)
         return false
     }
@@ -516,16 +516,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        guard sender === controlPanelWindow else {
-            return true
-        }
-        guard !shutdownInProgress && !shutdownComplete else {
-            return true
-        }
-
+        guard sender === controlPanelWindow, controlPanelNavigation.isImporting else { return true }
+        // ponytail: retain the page during an import so dismantling cannot cancel it;
+        // the next close releases it. Move import ownership to a store if this grows.
         sender.orderOut(nil)
         NSApp.setActivationPolicy(.accessory)
-        rebuildMenu()
         return false
     }
 
@@ -542,7 +537,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
 
         controlPanelWindow = nil
+        // Closing releases the page and its WebKit processes; reopening builds a
+        // fresh view around the existing stores and navigation.
+        window.contentViewController = nil
         NSApp.setActivationPolicy(.accessory)
+        rebuildMenu()
     }
 
     private func startDesktopWallpaperSync() throws {

@@ -230,6 +230,10 @@ The desktop renderer still needs the textures and render targets of the active
 wallpaper. An idle control-panel benchmark cannot establish its playback memory
 usage, and the extension must be measured separately from the app coalition.
 
+Closing the control panel releases its web view and allows its WebKit helpers
+to exit, rather than keeping the whole page hidden. Reopening reloads the page;
+see [panel lifecycle and import exception](control-panel.md#tabs).
+
 ## Repeated-work reduction
 
 These internal optimizations do not change any setting, target frame rate,
