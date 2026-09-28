@@ -20,11 +20,14 @@ struct DisabledAppUpdateClient: AppUpdateClient {
 
 struct GitHubReleaseClient: AppUpdateClient {
     private let session: URLSession
+    private let manifestURL: URL
     private let latestURL: URL
 
     init(session: URLSession = GitHubReleaseClient.makeSession(),
+         manifestURL: URL = AppUpdateConfiguration.latestManifestURL,
          latestURL: URL = AppUpdateConfiguration.latestReleaseURL) {
         self.session = session
+        self.manifestURL = manifestURL
         self.latestURL = latestURL
     }
 
@@ -44,44 +47,74 @@ struct GitHubReleaseClient: AppUpdateClient {
         return URLSession(configuration: configuration)
     }
 
+    /// Reads the update manifest attached to the Latest release and asks the REST API only
+    /// when that release has no usable one. The manifest arrives through github.com's release
+    /// download redirect, which GitHub's anonymous API limit (60 requests an hour per public
+    /// IP, shared with everything behind it) does not count.
     func fetchLatestRelease() async throws -> GitHubRelease? {
-        var request = URLRequest(url: latestURL)
-        request.setValue("WallpaperMachine", forHTTPHeaderField: "User-Agent")
-        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-        request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
         do {
-            let (data, response) = try await session.data(for: request)
-            guard let http = response as? HTTPURLResponse else {
-                throw AppUpdateIssue(code: .network, detail: String(localized: "GitHub did not return a successful update response."))
+            if let data = try await fetchManifestData() {
+                if let release = try? GitHubReleaseParser.decode(data) { return release }
+                AppLog.warn("The latest release's update manifest is unreadable; asking the GitHub API instead")
             }
-            if let limited = Self.rateLimitIssue(http) { throw limited }
-            if http.statusCode == 404 {
-                // GitHub also returns 404 for inaccessible repositories. Only a
-                // reachable repository can turn a missing latest release into an empty result.
-                request.url = latestURL.deletingLastPathComponent().deletingLastPathComponent()
-                let (repositoryData, repositoryResponse) = try await session.data(for: request)
-                guard let repositoryHTTP = repositoryResponse as? HTTPURLResponse else {
-                    throw AppUpdateIssue(code: .network, detail: String(localized: "GitHub did not return a successful update response."))
-                }
-                if let limited = Self.rateLimitIssue(repositoryHTTP) { throw limited }
-                guard (200..<300).contains(repositoryHTTP.statusCode) else {
-                    throw AppUpdateIssue(code: repositoryHTTP.statusCode == 404 ? .configuration : .network,
-                                         detail: String(localized: "GitHub did not return a successful update response."))
-                }
-                guard let repository = try? JSONDecoder().decode(RepositoryIdentity.self, from: repositoryData), repository.id > 0 else {
-                    throw AppUpdateIssue(code: .configuration, detail: String(localized: "The GitHub Release update metadata is unavailable."))
-                }
-                return nil
-            }
-            guard (200..<300).contains(http.statusCode) else {
-                throw AppUpdateIssue(code: .network, detail: String(localized: "GitHub did not return a successful update response."))
-            }
-            return try GitHubReleaseParser.decode(data)
+            return try await fetchFromAPI()
         } catch let issue as AppUpdateIssue {
             throw issue
         } catch {
             throw AppUpdateIssue(code: AppUpdateErrorClassifier.classify(error), detail: error.localizedDescription)
         }
+    }
+
+    /// The manifest's bytes, or nil when the Latest release carries none: it predates the
+    /// manifest, or nothing is published yet. Redirects are followed only on GitHub's hosts.
+    func fetchManifestData() async throws -> Data? {
+        var request = URLRequest(url: manifestURL)
+        request.setValue("WallpaperMachine", forHTTPHeaderField: "User-Agent")
+        let (data, response) = try await session.data(for: request, delegate: GitHubRedirectGuard())
+        guard let http = response as? HTTPURLResponse else {
+            throw AppUpdateIssue(code: .network, detail: String(localized: "GitHub did not return a successful update response."))
+        }
+        if http.statusCode == 404 { return nil }
+        if let limited = Self.rateLimitIssue(http) { throw limited }
+        // A refused redirect leaves its 3xx as the final response.
+        guard (200..<300).contains(http.statusCode) else {
+            throw AppUpdateIssue(code: .network, detail: String(localized: "GitHub did not return a successful update response."))
+        }
+        return data
+    }
+
+    private func fetchFromAPI() async throws -> GitHubRelease? {
+        var request = URLRequest(url: latestURL)
+        request.setValue("WallpaperMachine", forHTTPHeaderField: "User-Agent")
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw AppUpdateIssue(code: .network, detail: String(localized: "GitHub did not return a successful update response."))
+        }
+        if let limited = Self.rateLimitIssue(http) { throw limited }
+        if http.statusCode == 404 {
+            // GitHub also returns 404 for inaccessible repositories. Only a
+            // reachable repository can turn a missing latest release into an empty result.
+            request.url = latestURL.deletingLastPathComponent().deletingLastPathComponent()
+            let (repositoryData, repositoryResponse) = try await session.data(for: request)
+            guard let repositoryHTTP = repositoryResponse as? HTTPURLResponse else {
+                throw AppUpdateIssue(code: .network, detail: String(localized: "GitHub did not return a successful update response."))
+            }
+            if let limited = Self.rateLimitIssue(repositoryHTTP) { throw limited }
+            guard (200..<300).contains(repositoryHTTP.statusCode) else {
+                throw AppUpdateIssue(code: repositoryHTTP.statusCode == 404 ? .configuration : .network,
+                                     detail: String(localized: "GitHub did not return a successful update response."))
+            }
+            guard let repository = try? JSONDecoder().decode(RepositoryIdentity.self, from: repositoryData), repository.id > 0 else {
+                throw AppUpdateIssue(code: .configuration, detail: String(localized: "The GitHub Release update metadata is unavailable."))
+            }
+            return nil
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            throw AppUpdateIssue(code: .network, detail: String(localized: "GitHub did not return a successful update response."))
+        }
+        return try GitHubReleaseParser.decode(data)
     }
 
     /// GitHub allows 60 unauthenticated API requests per hour per public IP address, shared by
@@ -117,6 +150,15 @@ struct GitHubReleaseClient: AppUpdateClient {
                                              expectedSize: asset.size > 0 ? asset.size : nil,
                                              digest: asset.digest, progress: progress)
         try await transfer.start()
+    }
+}
+
+/// Follows a redirect only while it stays on the GitHub HTTPS hosts a download may use.
+final class GitHubRedirectGuard: NSObject, URLSessionTaskDelegate, Sendable {
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest) async -> URLRequest? {
+        guard let url = request.url, GitHubReleaseDownload.isAllowed(url) else { return nil }
+        return request
     }
 }
 

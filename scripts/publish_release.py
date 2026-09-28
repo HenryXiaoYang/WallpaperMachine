@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Attach a built disk image to its GitHub Release, draft first, never to a live one.
 
-The in-app updater reads the newest non-draft release, so a release that is public
-before its image is uploaded is a release users cannot download. This creates the
-release as a draft, uploads, and clears the draft flag last; a failure anywhere in
-between leaves a draft, which `releases/latest` does not return.
+The in-app updater reads the newest non-draft release (its update manifest, or the API
+for releases without one), so a release that is public before its image is uploaded
+is a release users cannot download. This creates the release as a draft, uploads,
+and clears the draft flag last; a failure anywhere in between leaves a draft, which
+neither `releases/latest` nor `releases/latest/download/…` returns.
 Two things the naive `gh` sequence gets wrong, both covered by
 `scripts/tests/test_publish_release.py`:
 
@@ -19,7 +20,7 @@ Two things the naive `gh` sequence gets wrong, both covered by
   whatever order their caches allow; promoting unconditionally lets the older build
   finish last, take Latest, and offer users the wrong version.
 
-    python3 scripts/publish_release.py --tag v0.6.0 --notes notes.md app.dmg app.dmg.sha256
+    python3 scripts/publish_release.py --tag v0.6.0 --notes notes.md app.dmg app.dmg.sha256 WallpaperMachine-update.json
     python3 scripts/publish_release.py --tag v0.6.0 --notes notes.md --dry-run app.dmg
 
 Called by .github/workflows/build.yml; `gh` reads GH_TOKEN from the environment.

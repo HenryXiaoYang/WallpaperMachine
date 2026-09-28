@@ -13,7 +13,8 @@
 # and published only after the disk image it needs is uploaded, so the in-app updater
 # never sees a "latest" release with nothing to download. Everything published is
 # derived from the build or recorded at the tag: the notes from the tag's CHANGELOG.md
-# section, the checksum from the image, the provenance attestation from this run.
+# section, the checksum and the update manifest from the image, the provenance
+# attestation from this run.
 name: Build
 
 on:
@@ -259,15 +260,32 @@ jobs:
         with:
           subject-path: ${{ steps.image.outputs.image }}
 
+      - name: Write the update manifest
+        id: manifest
+        # The updater reads this asset through github.com's releases/latest/download
+        # redirect, which the 60-an-hour anonymous API limit does not count; releases
+        # without it are read from the API. Derived from the tag, the notes that become
+        # the release body and the image bytes checked above.
+        env:
+          TAG: ${{ inputs.tag }}
+          REPOSITORY: ${{ github.repository }}
+          IMAGE: ${{ steps.image.outputs.image }}
+        run: |
+          set -euo pipefail
+          manifest="$(python3 scripts/update_manifest.py --tag "$TAG" --repository "$REPOSITORY" \
+            --notes "${RUNNER_TEMP}/release/notes.md" "$IMAGE")"
+          echo "manifest=${manifest}" >> "$GITHUB_OUTPUT"
+
       - name: Publish the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag }}
           IMAGE: ${{ steps.image.outputs.image }}
           CHECKSUM: ${{ steps.image.outputs.checksum }}
+          MANIFEST: ${{ steps.manifest.outputs.manifest }}
         # Drafts first, a live release is refused rather than clobbered, and Latest
         # is claimed only when no greater version is public: scripts/publish_release.py,
         # covered by scripts/tests/test_publish_release.py.
         run: |
           python3 scripts/publish_release.py --tag "$TAG" --notes "${RUNNER_TEMP}/release/notes.md" \
-            "$IMAGE" "$CHECKSUM"
+            "$IMAGE" "$CHECKSUM" "$MANIFEST"

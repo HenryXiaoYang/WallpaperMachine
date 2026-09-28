@@ -352,6 +352,57 @@ final class AppUpdateTests: XCTestCase {
         XCTAssertNil(store.rateLimitedUntil)
     }
 
+    func testManifestAnswersTheCheckWithoutSpendingAnAPIRequest() async {
+        let http = UpdateHTTPFixture()
+        let digest = "sha256:" + String(repeating: "cd", count: 32)
+        http.respond(latest: .init(status: 500, body: Data()),
+                     manifest: .init(status: 200, body: Self.releaseJSON(
+                        tag: "v1.1.0", body: "### Fixed\n\n- From the manifest",
+                        assets: [("WallpaperMachine-1.1.0-arm64.dmg", "https://github.com/o/r/releases/download/v1.1.0/WallpaperMachine-1.1.0-arm64.dmg", 4_096, digest)])))
+        let store = AppUpdateStore(currentVersion: "1.0.0", client: http.client)
+        await expect(store.checkForUpdates(), equals: .available(currentVersion: "1.0.0", availableVersion: "1.1.0"))
+        XCTAssertEqual(store.releaseNotes?.sections.first?.items, ["From the manifest"])
+        XCTAssertEqual(http.requests, [UpdateHTTPFixture.manifestPath])
+    }
+
+    func testReleaseWithoutAManifestIsReadFromTheAPI() async {
+        let http = UpdateHTTPFixture()
+        http.respond(latest: .init(status: 200, body: Self.releaseJSON(
+            tag: "v1.1.0", assets: [("WallpaperMachine-1.1.0-arm64.dmg", "https://github.com/o/r/update.dmg", 100, nil)])))
+        let store = AppUpdateStore(currentVersion: "1.0.0", client: http.client)
+        await expect(store.checkForUpdates(), equals: .available(currentVersion: "1.0.0", availableVersion: "1.1.0"))
+        XCTAssertEqual(http.requests, [UpdateHTTPFixture.manifestPath, UpdateHTTPFixture.latestPath])
+
+        // An unreadable manifest is not a dead end either.
+        http.respond(latest: .init(status: 200, body: Self.releaseJSON(tag: "v1.2.0")),
+                     manifest: .init(status: 200, body: Data("<html>not a manifest</html>".utf8)))
+        await expect(store.checkForUpdates(), equals: .manual(currentVersion: "1.0.0", availableVersion: "1.2.0"))
+    }
+
+    func testManifestFailuresAreReportedWithoutFallingBackToTheAPI() async {
+        let http = UpdateHTTPFixture()
+        http.respond(latest: .init(status: 200, body: Self.releaseJSON(tag: "v1.1.0")),
+                     manifest: .init(status: 429, body: Data(), headers: ["retry-after": "60"]))
+        let limited = AppUpdateStore(currentVersion: "1.0.0", client: http.client)
+        await expect(limited.checkForUpdates(), equals: .error(currentVersion: "1.0.0", operation: .check, code: .rateLimited, availableVersion: nil))
+        XCTAssertNotNil(limited.rateLimitedUntil)
+
+        http.respond(latest: .init(status: 200, body: Self.releaseJSON(tag: "v1.1.0")),
+                     manifest: .init(status: 503, body: Data()))
+        let unavailable = AppUpdateStore(currentVersion: "1.0.0", client: http.client)
+        await expect(unavailable.checkForUpdates(), equals: .error(currentVersion: "1.0.0", operation: .check, code: .network, availableVersion: nil))
+        XCTAssertFalse(http.requests.contains(UpdateHTTPFixture.latestPath))
+    }
+
+    func testManifestRedirectOffGitHubIsNotFollowed() async {
+        let http = UpdateHTTPFixture()
+        http.respond(latest: .init(status: 200, body: Self.releaseJSON(tag: "v1.1.0")),
+                     manifest: .init(status: 302, body: Data(), redirect: "https://\(http.host)/elsewhere"))
+        let store = AppUpdateStore(currentVersion: "1.0.0", client: http.client)
+        await expect(store.checkForUpdates(), equals: .error(currentVersion: "1.0.0", operation: .check, code: .network, availableVersion: nil))
+        XCTAssertEqual(http.requests, [UpdateHTTPFixture.manifestPath])
+    }
+
     func testConcurrentChecksShareOneRequestAndHideDownloadPaths() async {
         let fixture = Fixture()
         fixture.client.release = fixture.release(version: "1.1.0")
@@ -700,6 +751,8 @@ private final class Gate: @unchecked Sendable {
 }
 
 private final class UpdateHTTPFixture {
+    static let manifestPath = "/fixture/app/releases/latest/download/" + AppUpdateConfiguration.manifestName
+    static let latestPath = "/repos/fixture/app/releases/latest"
     let host = "update-\(UUID().uuidString).invalid"
     let session: URLSession
     let client: GitHubReleaseClient
@@ -708,13 +761,21 @@ private final class UpdateHTTPFixture {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [UpdateHTTPProtocol.self]
         session = GitHubReleaseClient.makeSession(configuration: configuration)
-        client = GitHubReleaseClient(session: session, latestURL: URL(string: "https://\(host)/repos/fixture/app/releases/latest")!)
+        client = GitHubReleaseClient(session: session,
+                                     manifestURL: URL(string: "https://\(host)\(Self.manifestPath)")!,
+                                     latestURL: URL(string: "https://\(host)\(Self.latestPath)")!)
     }
 
+    /// Releases published before the manifest existed have none, so it is absent unless given.
     func respond(latest: UpdateHTTPProtocol.Response,
-                 repository: UpdateHTTPProtocol.Response = .init(status: 200, body: Data(#"{"id":1}"#.utf8))) {
-        UpdateHTTPProtocol.register(host, latest: latest, repository: repository)
+                 repository: UpdateHTTPProtocol.Response = .init(status: 200, body: Data(#"{"id":1}"#.utf8)),
+                 manifest: UpdateHTTPProtocol.Response = .init(status: 404, body: Data())) {
+        UpdateHTTPProtocol.register(host, routes: [Self.manifestPath: manifest, Self.latestPath: latest,
+                                                   "/repos/fixture/app": repository])
     }
+
+    /// Paths requested so far, in order.
+    var requests: [String] { UpdateHTTPProtocol.requests(host) }
 
     deinit {
         session.invalidateAndCancel()
@@ -728,34 +789,49 @@ private final class UpdateHTTPProtocol: URLProtocol, @unchecked Sendable {
         let body: Data
         var error: URLError.Code? = nil
         var headers: [String: String] = [:]
+        var redirect: String? = nil
     }
     private static let lock = NSLock()
-    nonisolated(unsafe) private static var responses: [String: (latest: Response, repository: Response)] = [:]
-    static func register(_ host: String, latest: Response, repository: Response) {
-        lock.withLock { responses[host] = (latest, repository) }
+    nonisolated(unsafe) private static var routes: [String: [String: Response]] = [:]
+    nonisolated(unsafe) private static var log: [String: [String]] = [:]
+    static func register(_ host: String, routes: [String: Response]) {
+        lock.withLock { self.routes[host] = routes }
     }
-    static func remove(_ host: String) { _ = lock.withLock { responses.removeValue(forKey: host) } }
+    static func requests(_ host: String) -> [String] { lock.withLock { log[host] ?? [] } }
+    static func remove(_ host: String) {
+        lock.withLock {
+            routes.removeValue(forKey: host)
+            log.removeValue(forKey: host)
+        }
+    }
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
-        guard let url = request.url,
-              let entry = Self.lock.withLock({ Self.responses[url.host ?? ""] }) else {
-            client?.urlProtocol(self, didFailWithError: URLError(.resourceUnavailable))
+        guard let url = request.url, let host = url.host else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badURL))
             return
         }
-        let response: Response
-        if url.path == "/repos/fixture/app/releases/latest" { response = entry.latest }
-        else if url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")) == "repos/fixture/app" { response = entry.repository }
-        else {
-            client?.urlProtocol(self, didFailWithError: URLError(.unsupportedURL))
+        let path = url.path.count > 1 && url.path.hasSuffix("/") ? String(url.path.dropLast()) : url.path
+        let response = Self.lock.withLock { () -> Response? in
+            Self.log[host, default: []].append(path)
+            return Self.routes[host]?[path]
+        }
+        guard let response else {
+            client?.urlProtocol(self, didFailWithError: URLError(.resourceUnavailable))
             return
         }
         if let error = response.error {
             client?.urlProtocol(self, didFailWithError: URLError(error))
             return
         }
-        let headers = response.headers.merging(["Content-Type": "application/json"]) { value, _ in value }
-        client?.urlProtocol(self, didReceive: HTTPURLResponse(url: url, statusCode: response.status, httpVersion: "HTTP/1.1", headerFields: headers)!, cacheStoragePolicy: .notAllowed)
+        var headers = response.headers.merging(["Content-Type": "application/json"]) { value, _ in value }
+        if let redirect = response.redirect { headers["Location"] = redirect }
+        let http = HTTPURLResponse(url: url, statusCode: response.status, httpVersion: "HTTP/1.1", headerFields: headers)!
+        if let redirect = response.redirect, let target = URL(string: redirect) {
+            // Like the HTTP loader: a refused redirect delivers the 3xx response itself.
+            client?.urlProtocol(self, wasRedirectedTo: URLRequest(url: target), redirectResponse: http)
+        }
+        client?.urlProtocol(self, didReceive: http, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: response.body)
         client?.urlProtocolDidFinishLoading(self)
     }

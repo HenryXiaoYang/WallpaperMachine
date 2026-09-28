@@ -24,6 +24,17 @@ enum AppUpdateConfiguration {
     static var latestReleaseURL: URL {
         URL(string: "https://api.github.com/repos/\(repository)/releases/latest")!
     }
+
+    /// The update manifest `scripts/update_manifest.py` writes and the Build workflow attaches
+    /// to every release: the release object in the REST API's shape, so one parser reads both.
+    /// Renaming it moves both sides of this contract at once.
+    static let manifestName = productName + "-update.json"
+
+    /// github.com redirects this to the asset of the release marked Latest; drafts never
+    /// resolve. Not an API request, so the anonymous API limit does not apply.
+    static var latestManifestURL: URL {
+        URL(string: "https://github.com/\(repository)/releases/latest/download/\(manifestName)")!
+    }
 }
 
 enum AppUpdateErrorCode: String, Equatable, Sendable {

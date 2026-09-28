@@ -15,6 +15,14 @@ renderer behaviour and known-failing tests into
 [../renderer.md](../renderer.md), build and code-signing traps into
 [../../build.md](../../build.md).
 
+## 2026-09-27 — Release CI: app icon compiled on macOS 26; 1.0.1 re-cut
+
+- Cause of the failed v1.0.1 build: on macos-15, Xcode 26.0.1-26.3 actool compiled AppIcon.icon in 6 of 30 probe attempts (exit 255); 30 of 30 on macos-26; Assets.xcassets alone 8 of 8 on macos-15.
+- Fix: build.yml app-icon job (macos-26) runs build.py --compile-app-icon; build (macos-15) uses --app-icon; test job moved to macos-26; cache keys carry the runner macOS; warm-caches runs both.
+- Branch validation runs (ci-probe-actool, deleted): app-icon OK; test on macos-26 643/1 failed -> EnergyUsageMonitorTests live-counter check now skipped in VMs; build failed on Xcode 26.3 type-check timeout in WebPanelSnapshot -> literal split.
+- Local: --app-icon Debug build carries the compiled Assets.car/AppIcon.icns, CFBundleIconName/File, codesign verify OK; Release type-check with 100 ms warning threshold clean; python3 scripts/test.py 645 passed, 0 failed, 11 skipped.
+- Bump f8c439b reverted and remote tag v1.0.1 deleted (no release existed); 1.0.1 re-released by the Version workflow from this push. Final proof is that run.
+
 ## 2026-09-27 — Automatic update check, background download and prompt
 
 - Live smoke (shipped 1.0.0 client code): GitHub API via bobbyhuang-dev rename redirect -> v1.0.0, asset WallpaperMachine-1.0.0-arm64.dmg downloaded (33426526 B, sha256 verified), hdiutil attach + ditto extract + validate passed.

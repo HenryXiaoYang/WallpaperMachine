@@ -270,7 +270,11 @@ kept 14 days: the job output is only the scripts' filtered summary.
 1. downloads the artifact and checks the image against its `.sha256` sidecar;
 2. attests build provenance for the image with
    `actions/attest-build-provenance`;
-3. publishes the image and its sidecar with `scripts/publish_release.py`.
+3. writes the update manifest `WallpaperMachine-update.json` from the tag, the
+   notes and the image with `scripts/update_manifest.py`
+   ([below](#what-the-in-app-updater-expects));
+4. publishes the image, its sidecar and the manifest with
+   `scripts/publish_release.py`.
 
 Step 5 of `build` is the guard that the bump actually reached the build:
 `scripts/package.py` names the image from the bundle's
@@ -325,7 +329,8 @@ failed upload and reversed completion order:
   replacement, so re-running against a live release would take the download away
   and only restore it if the upload succeeded — reopening the exact window the
   draft-first order closes. A failure anywhere before the last command leaves a
-  draft, which the GitHub API's `releases/latest` does not return.
+  draft, which neither the API's `releases/latest` nor github.com's
+  `releases/latest/download/…` returns.
 - **Latest cannot go backwards.** Both callers hold a `publish-<tag>` concurrency
   group, which locks per tag, not per repository, so `v0.6.0` and `v0.7.0` can
   build at the same time and finish in whatever order their caches allow. The
@@ -360,6 +365,23 @@ latest GitHub Release and, after confirmation, downloads the disk image and
 restart-installs the app from it. **Check for Updates…** in the application menu
 opens that section and starts the same check.
 
+A check reads the release's update manifest, not the REST API. Anonymous API
+requests are limited to 60 an hour per public IP, shared with every app and device
+behind that address (a NAT, VPN or proxy exit can use it up without this app), and
+a network that had used it up left the updater locked out.
+`https://github.com/WallpaperMachine/WallpaperMachine/releases/latest/download/WallpaperMachine-update.json`
+is a release asset download: github.com redirects it to the file on the release
+marked Latest (drafts never resolve), and it does not count against that limit. The
+manifest is the release object in the API's shape (`tag_name`, `html_url`,
+`prerelease`, `body`, and one asset with `browser_download_url`, `size` and a
+`sha256:` `digest`), written by `scripts/update_manifest.py` in Build's `publish`
+job, so `GitHubReleaseParser` reads both. Its name is
+`AppUpdateConfiguration.manifestName`; renaming it changes both sides at once.
+The API is asked only when the Latest release has no manifest (404: every release
+up to 1.0.2) or an unreadable one; a manifest that is rate-limited, fails or
+redirects off the GitHub hosts below is an error, not a reason to spend an API
+request.
+
 The app also checks on its own, once the library has loaded (whether or not it
 loaded cleanly) and every six hours after, since a menu-bar app can run for weeks.
 When the copy can be replaced in place, a newer version is downloaded in the
@@ -393,8 +415,9 @@ The contract it relies on:
   feeds and blockmaps are never downloaded;
 - downloads are restricted to HTTPS on `github.com`, `api.github.com` and the
   `objects`, `release-assets` and `github-releases` hosts under
-  `githubusercontent.com` (GitHub now redirects assets to `release-assets`), and a
-  `sha256:` asset digest, when GitHub supplies one, is verified;
+  `githubusercontent.com` (GitHub now redirects assets to `release-assets`), for the
+  manifest as for the image, and the image's `sha256:` digest (from the manifest,
+  or from GitHub when the API is asked) is verified;
 - the image is attached read-only and out of sight (`hdiutil attach -nobrowse
   -readonly -noautoopen`) at a private mount point, its single
   `WallpaperMachine.app` is copied out with `ditto` without following the
@@ -432,18 +455,16 @@ GitHub also returns 404 for inaccessible repositories. When `/releases/latest`
 returns 404, the client checks the repository endpoint and requires a successful,
 valid repository response before treating the release as absent. Repository
 404s, failed requests and malformed responses stay errors; they are never
-reported as **Up to date**. These paths are covered with isolated URLSession
-fixtures, without contacting GitHub.
+reported as **Up to date**. These paths, and the manifest's, are covered with
+isolated URLSession fixtures, without contacting GitHub.
 
-Update checks are anonymous, so they share GitHub's limit of 60 API requests an
-hour per public IP with every other app and device behind that address (a NAT,
-VPN or proxy exit can use it up without this app). The app itself sends one
-request per check (two when `/releases/latest` is 404): at launch, every six
-hours and on **Check for Updates**. A 403 with `x-ratelimit-remaining: 0`, or a
-429, is a distinct `rateLimited` error, not a network failure: About says the
-hourly limit is used up and shows the reset time from `x-ratelimit-reset` (or
-`retry-after`). Until that time every check, automatic or **Retry**, fails
-locally without a request, so retrying can't keep the shared quota exhausted.
+Checks run at launch, every six hours and on **Check for Updates**. With a
+manifest a check spends no API request; without one it spends one (two when
+`/releases/latest` is 404). A 403 with `x-ratelimit-remaining: 0`, or a 429, from
+either source is a distinct `rateLimited` error, not a network failure: About says
+the hourly limit is used up and shows the reset time from `x-ratelimit-reset` (or
+`retry-after`). Until that time every check, automatic or **Retry**, fails locally
+without a request, so retrying can't keep the shared quota exhausted.
 
 With no matching asset the app falls back to opening GitHub Releases for a manual
 update. Renaming the image, publishing a prerelease, or attaching only a zip
@@ -460,7 +481,9 @@ from a real disk image.
    it, and it is what users will see.
 3. Confirm the called Build run passed the test gate, verified the mounted
    image, and published `WallpaperMachine-x.y.z-arm64.dmg` with its `.sha256`
-   sidecar and a provenance attestation.
+   sidecar, `WallpaperMachine-update.json` and a provenance attestation. The
+   manifest's `digest` must equal the sidecar's checksum:
+   `curl -sL https://github.com/WallpaperMachine/WallpaperMachine/releases/latest/download/WallpaperMachine-update.json`.
 4. Read the release body on the page: it should be the `CHANGELOG.md` section
    with the folded commit list below the install footer, not a bare compare link,
    and the `Built from` line must match `git rev-parse vx.y.z^{commit}`.

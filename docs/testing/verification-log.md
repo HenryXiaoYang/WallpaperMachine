@@ -25,6 +25,16 @@ move the oldest entries verbatim into
 (or a new dated archive file) first, and promote anything durable before it
 goes. Trimming is allowed; editing an entry's recorded result is not.
 
+## 2026-09-28 — Update check via release manifest instead of GitHub API
+
+- python3 scripts/test.py: 660 passed, 0 failed, 11 skipped; AppUpdateTests 41/41 incl. 4 manifest tests; test_update_manifest.py 3/3
+- Mutation: dropping GitHubRedirectGuard fails testManifestRedirectOffGitHubIsNotFollowed (/elsewhere requested)
+- actionlint .github/workflows/build.yml: clean
+- CI publish steps simulated locally with a stub gh: manifest written beside the image, digest equals the .sha256 sidecar, uploaded with image and sidecar
+- Throwaway Swift binary (real AppUpdateModels + GitHubReleaseClient) over local HTTP: Python-written manifest decoded, arm64 dmg selected, digest parsed, API URL never requested; missing manifest fell back to the API
+- Live github.com: real releases/latest/download redirect chain followed to release-assets (0 API requests used); redirect to raw.githubusercontent.com refused as a network error; default client read v1.0.2 via API fallback at exactly 1 API request per check
+- Not run: a real release carrying the manifest (first one is the next Build run); no Release app build
+
 ## 2026-09-28 — Lock-screen exchange directory (no App Data prompt)
 
 - Cause: tccd log showed kTCCServiceSystemPolicyAppData AUTHREQ_PROMPTING on every launch; app wrote/read ~/Library/Containers/app.wallpapermachine.wallpaper-extension (ad-hoc signed, grant not persisted).
@@ -33,6 +43,7 @@ goes. Trimming is allowed; editing an entry's recorded result is not.
 - python3 scripts/test.py: 651 passed, 0 failed, 11 skipped.
 - Sandbox smoke: ad-hoc CLI signed with Extension entitlements resolved real home, read/wrote exchange, denied writes outside and reads of app-private LockScreen/.
 - Not run: live lock-screen activation on desktop (no desktop authorization); Release not rebuilt.
+
 ## 2026-09-28 — Display refresh no longer reloads an unchanged scene; lock screen ignores the covered desktop
 
 User report on 1.0.2 (Workshop 3521337568, Lucy): lock screen held a still frame, and after unlocking the desktop flashed white and restarted the opening animation. App logs showed 107-425 scene loads per session, one per queued display refresh; the extension log showed the lock-screen scene exported as paused (reasons=1) right after the desktop display was suspended by occlusion.
@@ -105,11 +116,3 @@ R25 PowerWatcher restored to its original 5 s run_in_mode loop and its drop test
 - Skipped: 9 opt-in native-video tests, 2 live Workshop tests, 2 private text-scene checks and the optional local Metal scene corpus.
 - Earlier build 46efd59 with the same lifetime fix was packaged, installed and opened in the explicitly requested desktop check: saved scenes reached first frame and the panel opened; no new crash report was observed. Shader-compilation and desktop-poster diagnostics remained. This rebased tree was verified headlessly only, not installed or live-tested.
 - git diff --check passed. Crash reports, screenshots, local logs and wallpaper assets remain uncommitted.
-
-## 2026-09-27 — Release CI: app icon compiled on macOS 26; 1.0.1 re-cut
-
-- Cause of the failed v1.0.1 build: on macos-15, Xcode 26.0.1-26.3 actool compiled AppIcon.icon in 6 of 30 probe attempts (exit 255); 30 of 30 on macos-26; Assets.xcassets alone 8 of 8 on macos-15.
-- Fix: build.yml app-icon job (macos-26) runs build.py --compile-app-icon; build (macos-15) uses --app-icon; test job moved to macos-26; cache keys carry the runner macOS; warm-caches runs both.
-- Branch validation runs (ci-probe-actool, deleted): app-icon OK; test on macos-26 643/1 failed -> EnergyUsageMonitorTests live-counter check now skipped in VMs; build failed on Xcode 26.3 type-check timeout in WebPanelSnapshot -> literal split.
-- Local: --app-icon Debug build carries the compiled Assets.car/AppIcon.icns, CFBundleIconName/File, codesign verify OK; Release type-check with 100 ms warning threshold clean; python3 scripts/test.py 645 passed, 0 failed, 11 skipped.
-- Bump f8c439b reverted and remote tag v1.0.1 deleted (no release existed); 1.0.1 re-released by the Version workflow from this push. Final proof is that run.
