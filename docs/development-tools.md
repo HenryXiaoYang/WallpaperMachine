@@ -66,6 +66,11 @@ local under `artifacts/`, and do not commit them.
   and Xcode Metal debugger. Correlate findings with renderer logs; Metal capture
   does not directly explain all upstream Vulkan/shader translation behavior.
 
+Debug and Release instances share the app bundle identifier. During desktop
+tests, target the PID of the exact executable under test and quit only that
+instance. Discard performance comparisons if another copy starts, foreground
+visibility changes unexpectedly, or the presentation policy suspends playback.
+
 For a performance comparison, use the same asset, display resolution, playback
 settings, power state, and observation duration. Separate cold load from warm
 shader-cache runs. Record CPU/GPU activity, memory growth, frame timing, and pause

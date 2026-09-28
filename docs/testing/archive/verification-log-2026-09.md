@@ -15,6 +15,17 @@ renderer behaviour and known-failing tests into
 [../renderer.md](../renderer.md), build and code-signing traps into
 [../../build.md](../../build.md).
 
+## 2026-09-27 — Updater: staged restart-install, writability gate, release certificate signing
+
+- Fix 1: AppUpdateInstaller.canReplace requires a writable bundle and folder; startReplacement stages the new app beside the old, swaps by rename, restores and reopens the previous app on any failure.
+- Repro before: old script (rm -rf then ditto) with a missing source left Applications empty and never reopened.
+- python3 scripts/test.py --only AppUpdateTests: 33 passed (new: canReplace permission, successful swap, failed swap keeps and reopens old app).
+- Fix 2: package.py --sign-identity; build.yml imports SIGNING_CERTIFICATE_P12/PASSWORD (set on repo) into a temp keychain and fails without them.
+- Local CI-step replay on a copy of the Release app: import ok, codesign --verify --deep --strict ok, DR = identifier app.wallpapermachine and certificate root = H"2bdf...fa82" (was cdhash); extension keeps app-sandbox; missing-secret path exits 1.
+- python3 scripts/test.py: 648 passed, 0 failed, 11 skipped.
+- Not exercised: a real CI release run, launching a certificate-signed app, lock-screen extension loading under the new signature, TCC persistence across an actual update (no desktop run authorized); no Release build.
+- 1.0.1 -> 1.0.2 still uses 1.0.1's installer and ad-hoc grants; fixes apply from 1.0.2 onward.
+
 ## 2026-09-27 — Release build
 
 - python3 scripts/test.py: 648 passed, 0 failed, 11 skipped
