@@ -33,6 +33,16 @@ goes. Trimming is allowed; editing an entry's recorded result is not.
 - python3 scripts/test.py: 651 passed, 0 failed, 11 skipped.
 - Sandbox smoke: ad-hoc CLI signed with Extension entitlements resolved real home, read/wrote exchange, denied writes outside and reads of app-private LockScreen/.
 - Not run: live lock-screen activation on desktop (no desktop authorization); Release not rebuilt.
+## 2026-09-28 — Display refresh no longer reloads an unchanged scene; lock screen ignores the covered desktop
+
+User report on 1.0.2 (Workshop 3521337568, Lucy): lock screen held a still frame, and after unlocking the desktop flashed white and restarted the opening animation. App logs showed 107-425 scene loads per session, one per queued display refresh; the extension log showed the lock-screen scene exported as paused (reasons=1) right after the desktop display was suspended by occlusion.
+
+- Bridge tests written first and failing on HEAD: settings_intents::a_display_refresh_does_not_reload_a_scene_{whose_audio_response_has_nothing_to_read,held_to_the_battery_frame_rate,muted_for_other_audio,paused_by_a_lock_or_a_covered_display} and apply_options::lock_screen_export_ignores_the_desktop_display_being_covered (5 failed before the fix).
+- `cargo test --release -p wallpaper-bridge --lib` (build.py cargo environment) — exit 0; 354 passed, 0 failed.
+- `python3 scripts/test.py --only DisplayRefreshCoalescerTests` — 2 passed (first attempt stopped at the known CodeSign xattr detritus; cleared with xattr -cr on the Debug app).
+- `python3 scripts/test.py` — exit 0; 652 passed, 0 failed, 11 skipped of 663.
+- `python3 scripts/check_renderer.py` — exit 0; 23 test binaries passed, 10 generated fixtures pixel-equal pooled vs isolated, reload cycles 0 failures.
+- Not verified: the lock/unlock and display-wake behaviour on the desktop (no desktop run authorised), and no Release build was made. Apply, display edits and repair reconciles still compare saved values, so they can still reopen a scene held to a frame-rate ceiling or transient mute, as in 1.0.1.
 
 ## 2026-09-28 — Panel stays open after applying; Command-W closes it
 
@@ -103,11 +113,3 @@ R25 PowerWatcher restored to its original 5 s run_in_mode loop and its drop test
 - Branch validation runs (ci-probe-actool, deleted): app-icon OK; test on macos-26 643/1 failed -> EnergyUsageMonitorTests live-counter check now skipped in VMs; build failed on Xcode 26.3 type-check timeout in WebPanelSnapshot -> literal split.
 - Local: --app-icon Debug build carries the compiled Assets.car/AppIcon.icns, CFBundleIconName/File, codesign verify OK; Release type-check with 100 ms warning threshold clean; python3 scripts/test.py 645 passed, 0 failed, 11 skipped.
 - Bump f8c439b reverted and remote tag v1.0.1 deleted (no release existed); 1.0.1 re-released by the Version workflow from this push. Final proof is that run.
-
-## 2026-09-27 — Automatic update check, background download and prompt
-
-- Live smoke (shipped 1.0.0 client code): GitHub API via bobbyhuang-dev rename redirect -> v1.0.0, asset WallpaperMachine-1.0.0-arm64.dmg downloaded (33426526 B, sha256 verified), hdiutil attach + ditto extract + validate passed.
-- Live smoke: new repository constant WallpaperMachine/WallpaperMachine resolves latest release and selects the arm64 dmg.
-- python3 scripts/test.py --only AppUpdateTests: 30 passed (new testBackgroundUpdateDownloadsOnlyWhatItCanInstallInPlace).
-- python3 scripts/test.py: 645 passed, 0 failed, 11 skipped.
-- Not exercised: the NSAlert prompt, status-menu item and 6-hour schedule in the running app (no desktop run authorized); no Release build.

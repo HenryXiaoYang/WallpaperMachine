@@ -180,6 +180,12 @@ Swift keeps the *system* wallpaper consistent with that window:
   paused state from its own display, and re-applies the still-hidden displays after a global resume.
   System audio capture follows visible consumers — a presenting scene with audio response
   enabled — rather than the global pause flag.
+- Screen-parameter changes refresh displays through `DisplayRefreshCoalescer`: one refresh runs
+  at a time and a burst that arrives meanwhile, as a waking display posts, gets one more. A
+  refresh reopens a scene only when its saved configuration changed. The frame-rate ceiling, the
+  transient mute, pause and the gating of system-audio capture are applied live and never count
+  as a different wallpaper; a scene's own audio-response switch follows the saved setting even
+  while capture waits for the scene to read audio.
 
 ### Renderer bridge (generated uniffi)
 
@@ -266,7 +272,9 @@ preview or lock-screen instance cannot render for nobody), and
 exchange directory) into `~/Library/Application Support/WallpaperMachine/LockScreenExchange/`,
 then posts `LockScreenConfiguration.changedNotification`; the extension reloads and writes
 `LockScreenReadiness` back once a GPU-ready non-preview surface exists, or with the error when
-acquiring or replacing that surface's renderer failed. The app never touches the extension's
+acquiring or replacing that surface's renderer failed. A scene's `paused` carries only the
+user's Play/Pause and power policy: the desktop display being suspended, which locking causes by
+covering it, is not a reason for the lock screen to hold still. The app never touches the extension's
 sandbox container: on macOS 15+ an ad-hoc-signed app reaching into another app's container
 triggers the "would like to access data from other apps" prompt on every launch. The extension
 never reads draft options or the app's private configuration files, and it publishes no

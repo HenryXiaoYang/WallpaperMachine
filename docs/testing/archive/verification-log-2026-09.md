@@ -15,6 +15,14 @@ renderer behaviour and known-failing tests into
 [../renderer.md](../renderer.md), build and code-signing traps into
 [../../build.md](../../build.md).
 
+## 2026-09-27 — Automatic update check, background download and prompt
+
+- Live smoke (shipped 1.0.0 client code): GitHub API via bobbyhuang-dev rename redirect -> v1.0.0, asset WallpaperMachine-1.0.0-arm64.dmg downloaded (33426526 B, sha256 verified), hdiutil attach + ditto extract + validate passed.
+- Live smoke: new repository constant WallpaperMachine/WallpaperMachine resolves latest release and selects the arm64 dmg.
+- python3 scripts/test.py --only AppUpdateTests: 30 passed (new testBackgroundUpdateDownloadsOnlyWhatItCanInstallInPlace).
+- python3 scripts/test.py: 645 passed, 0 failed, 11 skipped.
+- Not exercised: the NSAlert prompt, status-menu item and 6-hour schedule in the running app (no desktop run authorized); no Release build.
+
 ## 2026-09-27 — Renderer and app power work: batch 1, sibling renderer items, app side, Rust gate
 
 - Batch 1: R1+R4 with Scene render optimisation on, a frame that would repeat the picture on the surface is not drawn, submitted or presented; unchanged_present_test 3/3 (plain video submissions track video_frames_selected, other ticks count presents_skipped_unchanged; a static scene submits 0 once every pass is reused, and its poster matches the reuse-off baseline).

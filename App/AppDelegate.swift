@@ -13,6 +13,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     /// The version the unattended check last prompted for; "Later" holds until the next launch.
     private var promptedUpdateVersion: String?
     private var displayChangeObserver: NSObjectProtocol?
+    private lazy var displayRefresh = DisplayRefreshCoalescer { [weak self] in
+        guard let self else { return }
+        await self.refreshDisplaysFromSystemEvent()
+    }
     private var desktopWallpaperSync: DesktopWallpaperSync?
     private var desktopMediaSession: DesktopMediaSession?
     private var sceneMediaSink: SceneMediaSink?
@@ -601,7 +605,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
-                self?.refreshDisplaysFromSystemEvent()
+                self?.displayRefresh.request()
             }
         }
     }
@@ -948,7 +952,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
     }
 
-    private func refreshDisplaysFromSystemEvent() {
+    private func refreshDisplaysFromSystemEvent() async {
         guard let store,
               !shutdownInProgress,
               !shutdownComplete
@@ -956,17 +960,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             return
         }
 
-        Task {
-            do {
-                try await store.refreshDisplaysAsync()
-                lastError = nil
-                playbackSnapshotCurrent = true
-            } catch {
-                lastError = error
-                playbackSnapshotCurrent = false
-            }
-            rebuildMenu()
+        do {
+            try await store.refreshDisplaysAsync()
+            lastError = nil
+            playbackSnapshotCurrent = true
+        } catch {
+            lastError = error
+            playbackSnapshotCurrent = false
         }
+        rebuildMenu()
     }
 
     /// The applied desktop Scenes that have consented to now-playing.

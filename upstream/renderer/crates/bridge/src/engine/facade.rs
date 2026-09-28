@@ -90,6 +90,8 @@ pub trait EngineFacade: Send + Sync + 'static {
         let _ = (handle, width, height, rgba);
         async move { Ok(()) }.boxed()
     }
+    /// Registers or releases one scene as a system-audio capture consumer.
+    /// The scene's own audio-response switch is `set_audio_response_enabled`.
     fn set_audio_capture_enabled(&self, handle: SceneHandle, enabled: bool) -> EngineFuture<()>;
     fn set_scaling_mode(&self, handle: SceneHandle, mode: ScalingMode) -> EngineFuture<()>;
     fn set_scaling_factor(&self, handle: SceneHandle, factor: f64) -> EngineFuture<()>;
@@ -504,33 +506,12 @@ impl EngineFacade for RealEngineFacade {
     fn set_audio_capture_enabled(&self, handle: SceneHandle, enabled: bool) -> EngineFuture<()> {
         let audio_capture = self.audio_capture.clone();
         let audio_mutation = self.audio_mutation.clone();
-        let engine = self.engine.clone();
         async move {
             let _audio_guard = audio_mutation.lock().await;
-            // Capture ownership must be released even if its renderer has disappeared.
-            if !enabled {
-                audio_capture
-                    .set_enabled(handle, false)
-                    .await
-                    .map_err(EngineError::Platform)?;
-                if engine
-                    .display_snapshot()
-                    .iter()
-                    .any(|display| display.handle == Some(handle))
-                {
-                    engine.set_audio_response_enabled(handle, false).await?;
-                }
-                return Ok(());
-            }
             audio_capture
-                .set_enabled(handle, true)
+                .set_enabled(handle, enabled)
                 .await
-                .map_err(EngineError::Platform)?;
-            if let Err(error) = engine.set_audio_response_enabled(handle, true).await {
-                let _ = audio_capture.set_enabled(handle, false).await;
-                return Err(error);
-            }
-            Ok(())
+                .map_err(EngineError::Platform)
         }
         .boxed()
     }
@@ -1659,13 +1640,6 @@ impl EngineFacade for FakeEngineFacade {
                 }
             }
             push_log(&fake.audio_capture_calls, (handle, enabled));
-            push_log(&fake.audio_response_calls, (handle, enabled));
-            fake.update_direct_assignment(handle, |template| {
-                template.audio_response_enabled = enabled;
-            });
-            fake.update_direct_assignment_after_refresh(handle, |template| {
-                template.audio_response_enabled = enabled;
-            });
             Ok(())
         }
         .boxed()
