@@ -203,6 +203,11 @@ Swift keeps the *system* wallpaper consistent with that window:
 generated FFI files are excluded from the compile sources list and reached through the module map
 instead.
 
+Every snapshot the bridge returns carries the launch-at-login status, which `LaunchAtLoginController`
+reads from `SMAppService`, a round trip to the system's service manager. It keeps a read for two
+seconds: a burst of snapshots asks once, a change made through the bridge is current at once, and
+one made in System Settings shows on the first snapshot after the last read has aged.
+
 ### Rust crates and the C++ scene engine
 
 `upstream/renderer` is a Cargo workspace (`resolver = "2"`, edition 2024, GPL-2.0-only) with

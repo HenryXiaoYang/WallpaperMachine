@@ -25,6 +25,16 @@ move the oldest entries verbatim into
 (or a new dated archive file) first, and promote anything durable before it
 goes. Trimming is allowed; editing an entry's recorded result is not.
 
+## 2026-09-28 — Reconcile keeps unchanged scenes; launch-at-login read once per burst
+
+Follow-up to 4ee91e5: full reconciles (Apply, display edits, backend switch, repair) now hand the engine live descriptors (frame-rate ceiling and transient mute applied), and the launch-at-login status is read from SMAppService at most every two seconds.
+
+- `cargo test --release -p wallpaper-bridge` (build env) — before the fix `a_reconcile_does_not_reload_a_scene_held_to_the_frame_rate_cap` and `::…_muted_for_other_audio` failed (handed fps 120 / unmuted vs running 60 / muted); after: 359 passed, 0 failed, including the four `a_display_refresh_does_not_reload_*` tests from 4ee91e5
+- `python3 scripts/build.py --renderer-only` — exit 0; regenerated bindings identical
+- `python3 scripts/test.py` — exit 0; Python modules all OK; native 671: 660 passed, 11 skipped (opt-in layers)
+- `python3 scripts/check_renderer.py` — exit 0; 10 generated scenes pooled and isolated exit 0, pixels equal, 0 diagnostics; reload cycles (8 projects x2): 0
+- Not verified: a Release build or the live desktop; no manual unlock/Apply run against a real display
+
 ## 2026-09-28 — Update check via release manifest instead of GitHub API
 
 - python3 scripts/test.py: 660 passed, 0 failed, 11 skipped; AppUpdateTests 41/41 incl. 4 manifest tests; test_update_manifest.py 3/3
@@ -105,14 +115,3 @@ R25 PowerWatcher restored to its original 5 s run_in_mode loop and its drop test
 
 - python3 scripts/test.py: 648 passed, 0 failed, 11 skipped
 - python3 scripts/build.py --configuration Release: OK; bundled WebUI matches WebUI/
-
-## 2026-09-27 — Deferred Metal layer lifetime on upstream 1.0.1
-
-- Based on upstream main 5286e70 (1.0.1). Kept a97e1e1 CopyPass teardown and its regression unchanged; this patch only retains the layer during deferred backend selection and adds ownership coverage.
-- uv run --no-project --python 3.12 python scripts/build.py --renderer-only: exit 0; renderer/bridge rebuilt and Swift bindings regenerated with no generated-source diff.
-- uv run --no-project --python 3.12 python scripts/test.py: exit 0; Python phase passed (187 tests reported), native phase 645 passed, 0 failed, 11 skipped.
-- uv run --no-project --python 3.12 python scripts/check_renderer.py: exit 0; 466 passed, 3 skipped; all 10 generated scenes passed pooled/isolated and expected-pixel checks; 8 projects reloaded twice.
-- The new SceneSurface.DeferredBackendRetainsTheLayerUntilTheSceneIsDeleted regression passes; Core Animation transactions and temporary weak-reference reads are drained before ownership assertions.
-- Skipped: 9 opt-in native-video tests, 2 live Workshop tests, 2 private text-scene checks and the optional local Metal scene corpus.
-- Earlier build 46efd59 with the same lifetime fix was packaged, installed and opened in the explicitly requested desktop check: saved scenes reached first frame and the panel opened; no new crash report was observed. Shader-compilation and desktop-poster diagnostics remained. This rebased tree was verified headlessly only, not installed or live-tested.
-- git diff --check passed. Crash reports, screenshots, local logs and wallpaper assets remain uncommitted.

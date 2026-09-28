@@ -1,6 +1,7 @@
-use std::sync::Arc;
-#[cfg(test)]
-use std::sync::Mutex;
+use std::{
+    sync::{Arc, Mutex, PoisonError},
+    time::{Duration, Instant},
+};
 
 use objc2_foundation::NSBundle;
 use objc2_service_management::{SMAppService, SMAppServiceStatus};
@@ -13,9 +14,20 @@ pub enum LaunchAtLoginStatus {
     Unavailable,
 }
 
+/// How long a status read stays current.
+///
+/// Every snapshot the bridge returns carries the status, and reading it is a
+/// round trip to the system's service manager that costs far more than the
+/// rest of a snapshot. Read per snapshot, it held every queued bridge request
+/// behind it. The status changes through `set_enabled`, which records its own
+/// result, or in System Settings, which a read this recent still reflects.
+const STATUS_FRESHNESS: Duration = Duration::from_secs(2);
+
 #[derive(Clone)]
 pub struct LaunchAtLoginController {
     implementation: Arc<dyn LaunchAtLoginImpl>,
+    /// The last status read and when it was taken, shared by every clone.
+    last_read: Arc<Mutex<Option<(Instant, LaunchAtLoginStatus)>>>,
 }
 
 trait LaunchAtLoginImpl: Send + Sync {
@@ -25,18 +37,36 @@ trait LaunchAtLoginImpl: Send + Sync {
 
 impl Default for LaunchAtLoginController {
     fn default() -> Self {
-        Self {
-            implementation: Arc::new(SystemLaunchAtLogin),
-        }
+        Self::new(Arc::new(SystemLaunchAtLogin))
     }
 }
 
 impl LaunchAtLoginController {
+    fn new(implementation: Arc<dyn LaunchAtLoginImpl>) -> Self {
+        Self {
+            implementation,
+            last_read: Arc::new(Mutex::new(None)),
+        }
+    }
+
     #[must_use]
     pub fn status(&self) -> LaunchAtLoginStatus {
-        self.implementation
+        self.status_at(Instant::now())
+    }
+
+    fn status_at(&self, now: Instant) -> LaunchAtLoginStatus {
+        let mut last_read = self.last_read.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((read_at, status)) = *last_read
+            && now.saturating_duration_since(read_at) < STATUS_FRESHNESS
+        {
+            return status;
+        }
+        let status = self
+            .implementation
             .status()
-            .unwrap_or(LaunchAtLoginStatus::Unavailable)
+            .unwrap_or(LaunchAtLoginStatus::Unavailable);
+        *last_read = Some((now, status));
+        status
     }
 
     /// # Errors
@@ -44,17 +74,20 @@ impl LaunchAtLoginController {
     /// Returns an error when launch at login is unavailable or when the
     /// system service manager rejects the requested state.
     pub fn set_enabled(&self, enabled: bool) -> Result<LaunchAtLoginStatus, BridgeError> {
-        self.implementation.set_enabled(enabled)
+        let result = self.implementation.set_enabled(enabled);
+        // A rejected change may still have moved the system state, so only a
+        // confirmed one is remembered; otherwise the next read asks again.
+        *self.last_read.lock().unwrap_or_else(PoisonError::into_inner) =
+            result.as_ref().ok().map(|status| (Instant::now(), *status));
+        result
     }
 
     #[cfg(test)]
     #[must_use]
     pub fn fake(status: LaunchAtLoginStatus) -> Self {
-        Self {
-            implementation: Arc::new(FakeLaunchAtLogin {
-                status: Mutex::new(status),
-            }),
-        }
+        Self::new(Arc::new(FakeLaunchAtLogin {
+            status: Mutex::new(status),
+        }))
     }
 }
 
@@ -131,5 +164,88 @@ impl LaunchAtLoginImpl for FakeLaunchAtLogin {
                 "launch at login is available only when the app is installed in Applications",
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    /// The service manager: the status System Settings shows, and how often it
+    /// was asked for it.
+    struct CountingLaunchAtLogin {
+        status: Mutex<LaunchAtLoginStatus>,
+        reads: AtomicUsize,
+    }
+
+    impl LaunchAtLoginImpl for CountingLaunchAtLogin {
+        fn status(&self) -> Result<LaunchAtLoginStatus, BridgeError> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            Ok(*self.status.lock().unwrap())
+        }
+
+        fn set_enabled(&self, enabled: bool) -> Result<LaunchAtLoginStatus, BridgeError> {
+            let status = LaunchAtLoginStatus::Available { enabled };
+            *self.status.lock().unwrap() = status;
+            Ok(status)
+        }
+    }
+
+    fn controller(enabled: bool) -> (LaunchAtLoginController, Arc<CountingLaunchAtLogin>) {
+        let system = Arc::new(CountingLaunchAtLogin {
+            status: Mutex::new(LaunchAtLoginStatus::Available { enabled }),
+            reads: AtomicUsize::new(0),
+        });
+        (LaunchAtLoginController::new(system.clone()), system)
+    }
+
+    #[test]
+    fn a_burst_of_snapshots_asks_the_service_manager_once() {
+        let (controller, system) = controller(true);
+        let start = Instant::now();
+
+        for step in 0..100 {
+            assert_eq!(
+                controller.status_at(start + Duration::from_millis(step * 10)),
+                LaunchAtLoginStatus::Available { enabled: true }
+            );
+        }
+
+        assert_eq!(system.reads.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_change_made_in_system_settings_shows_once_the_last_read_has_aged() {
+        let (controller, system) = controller(false);
+        let start = Instant::now();
+        assert_eq!(
+            controller.status_at(start),
+            LaunchAtLoginStatus::Available { enabled: false }
+        );
+
+        *system.status.lock().unwrap() = LaunchAtLoginStatus::Available { enabled: true };
+
+        assert_eq!(
+            controller.status_at(start + STATUS_FRESHNESS),
+            LaunchAtLoginStatus::Available { enabled: true }
+        );
+    }
+
+    #[test]
+    fn a_change_made_in_the_app_shows_at_once() {
+        let (controller, _system) = controller(false);
+        assert_eq!(
+            controller.status(),
+            LaunchAtLoginStatus::Available { enabled: false }
+        );
+
+        controller.set_enabled(true).unwrap();
+
+        assert_eq!(
+            controller.status(),
+            LaunchAtLoginStatus::Available { enabled: true }
+        );
     }
 }
