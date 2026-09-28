@@ -504,6 +504,14 @@ int main() {
 #endif
         Check(instance.ChoosePhysicalDevice([&](auto gpu) { return Device::CheckGPU(gpu, extensions, {}); }), "choose GPU");
         Device device;
+        // Opt in to the production texture residency policy while leaving the
+        // existing full-source golden comparisons available as a baseline.
+        if (const char* size = std::getenv("WE_TEST_TEXTURE_SURFACE")) {
+            unsigned width = 0, height = 0;
+            Check(std::sscanf(size, "%ux%u", &width, &height) == 2 && width && height,
+                  "WE_TEST_TEXTURE_SURFACE must be <width>x<height>");
+            scene->imageParser->SetTextureSurfaceSize(width, height);
+        }
         const auto extents = ResolveScreenBoundRenderTargetSizes(*scene, {1920, 1080});
         const auto extent = extents.raster;
         Check(extent.width <= 8192 && extent.height <= 8192, "probe raster extent exceeds 8192");

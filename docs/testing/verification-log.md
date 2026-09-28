@@ -25,6 +25,18 @@ move the oldest entries verbatim into
 (or a new dated archive file) first, and promote anything durable before it
 goes. Trimming is allowed; editing an entry's recorded result is not.
 
+## 2026-09-28 — Display-sized packaged texture residency
+
+- scripts/test.py with CPython 3.12.14: 190 Python passed; 663 native passed, 11 skipped. Full gate run once for this feature.
+- scripts/check_renderer.py passed: 23 binaries, ten generated pixel comparisons, eight projects x2 reloads. Three asset-dependent cases skipped; the local Metal scene was tested separately.
+- tex_schema_tests: 22 passed, including surface budget selection/reset, metadata preservation, pre-decode skipping, payload truncation and sprite/video exclusions.
+- Current local scene: GPU allocated 457.1 to 198.1 MiB, reserved 490.4 to 231.4 MiB. Matched headless process peak 1175.4 to 622.9 MiB.
+- Compatibility: five frames spanning two seconds with particle seed 42 and synthetic silent audio were byte-identical before/after; the frames differed over time.
+- Metal: fixed local-project random-seed handling; full-source and budgeted seeded 120-frame runs ended with byte-identical images. Temporary baseline budget bypass was restored before final review.
+- Live closed-panel samples, 3 per build 10 seconds apart: main median 735.5 to 458.9 MiB; whole app coalition plus separate extension median 786.3 to 509.4 MiB (after range 413.9–509.4). GPU accounting and settling samples fluctuate; no universal ceiling or CPU saving claimed.
+- Renderer/bindings and Release builds passed. Signed app installed into /Applications with backup, launched using Codex computer use, same wallpaper playing and first frame ready. Saved configuration identical; only installed extension registered.
+- Policy may reduce source detail under zoom and only limits available authored mip chains. Actual lock/unlock and the local-import close exception remain unexercised; private scene assets/images stay in artifacts.
+
 ## 2026-09-28 — Release the closed control panel to reduce memory
 
 - Panel lifecycle follow-up: CPython 3.12.14 scripts/test.py --only ControlPanelWindowSizingTests --only ControlPanelShellTests --only ControlPanelSyncTests passed 30/30. Earlier full gate is recorded separately; not repeated.
@@ -120,12 +132,3 @@ User report on 1.0.2 (Workshop 3521337568, Lucy): lock screen held a still frame
 - `python3 scripts/test.py` — exit 0; 652 passed, 0 failed, 11 skipped of 663.
 - `python3 scripts/check_renderer.py` — exit 0; 23 test binaries passed, 10 generated fixtures pixel-equal pooled vs isolated, reload cycles 0 failures.
 - Not verified: the lock/unlock and display-wake behaviour on the desktop (no desktop run authorised), and no Release build was made. Apply, display edits and repair reconciles still compare saved values, so they can still reopen a scene held to a frame-rate ceiling or transient mute, as in 1.0.1.
-
-## 2026-09-28 — Panel stays open after applying; Command-W closes it
-
-Settings → General → Hide window after applying a wallpaper now defaults to off (a stored choice is kept). The main menu gains File → Close (Command-W), which goes through the panel's windowShouldClose like the close button.
-
-- `python3 scripts/test.py --only WebPanelGeneralSettingsTests` — exit 0; 1 passed (first attempt stopped at CodeSign on Finder/file-provider xattrs on the Debug bundle; cleared with `xattr -cr`)
-- `python3 scripts/test.py` — exit 0; Python suites OK; native 661: 650 passed, 11 skipped, 0 failed
-- `xcodebuild build-for-testing -scheme WallpaperMachineUI` — TEST BUILD SUCCEEDED; the new `testCommandWClosesLikeTheCloseButton` compiles but was not run
-- Not exercised: Command-W and the panel staying open after Apply on the desktop (no desktop run requested); no Release build

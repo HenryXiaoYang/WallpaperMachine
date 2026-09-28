@@ -15,6 +15,15 @@ renderer behaviour and known-failing tests into
 [../renderer.md](../renderer.md), build and code-signing traps into
 [../../build.md](../../build.md).
 
+## 2026-09-28 — Panel stays open after applying; Command-W closes it
+
+Settings → General → Hide window after applying a wallpaper now defaults to off (a stored choice is kept). The main menu gains File → Close (Command-W), which goes through the panel's windowShouldClose like the close button.
+
+- `python3 scripts/test.py --only WebPanelGeneralSettingsTests` — exit 0; 1 passed (first attempt stopped at CodeSign on Finder/file-provider xattrs on the Debug bundle; cleared with `xattr -cr`)
+- `python3 scripts/test.py` — exit 0; Python suites OK; native 661: 650 passed, 11 skipped, 0 failed
+- `xcodebuild build-for-testing -scheme WallpaperMachineUI` — TEST BUILD SUCCEEDED; the new `testCommandWClosesLikeTheCloseButton` compiles but was not run
+- Not exercised: Command-W and the panel staying open after Apply on the desktop (no desktop run requested); no Release build
+
 ## 2026-09-28 — Rebase of the power change set onto origin/main f383bbd
 
 Conflicts only in verification logs (entries unioned verbatim, oldest six archived) and provenance.json (sceneEngine.equalQualityPerformanceChanges keeps upstream's 2026-09-24 note followed by ours; upstream deferredSurfaceLifetimeChanges kept). Upstream 36359b3 SceneWallpaperBindings.mm and 2d1322a panel.js/WebControlPanel.swift touch disjoint hunks; no bridge API change upstream.

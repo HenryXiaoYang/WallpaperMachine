@@ -51,6 +51,10 @@ public:
         return m_fallback != nullptr ? m_fallback->ParseHeader(name) : ImageHeader {};
     }
 
+    void SetTextureSurfaceSize(uint32_t width, uint32_t height) override {
+        if (m_fallback != nullptr) m_fallback->SetTextureSurfaceSize(width, height);
+    }
+
     bool IsRuntimeImage(const std::string& name) const {
         std::lock_guard lock(m_mutex);
         return m_runtime_images.find(name) != m_runtime_images.end();

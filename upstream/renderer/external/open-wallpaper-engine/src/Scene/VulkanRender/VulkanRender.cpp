@@ -26,6 +26,7 @@
 #include "FinPass.hpp"
 #include "Resource.hpp"
 #include "TexturePrefetch.hpp"
+#include "Interface/IImageParser.h"
 #include "SpecTexs.hpp"
 #include "PassCommon.hpp"
 
@@ -1701,6 +1702,10 @@ bool VulkanRender::Impl::preparePasses(Scene& scene) {
     // Re-prepared passes draw into rebuilt targets; nothing presented before
     // this point describes what they will produce.
     m_present_gate.Invalidate();
+    if (scene.imageParser != nullptr) {
+        const auto extent = m_device->out_extent();
+        scene.imageParser->SetTextureSurfaceSize(extent.width, extent.height);
+    }
     glslang::InitializeProcess();
     {
         // Decodes ahead of the passes on other threads; joined when this

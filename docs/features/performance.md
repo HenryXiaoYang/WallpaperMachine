@@ -220,9 +220,21 @@ content pacing, shared video decode and direct video plane sampling.
 On Apple platforms, the Compatibility renderer grows its Vulkan allocator in
 32 MiB preferred blocks rather than the library's 256 MiB default. This reduces
 unused reservations in unified memory; it is not a cap on wallpaper size, and
-larger resources still allocate normally. Texture sizes, render targets, frame
-rates and effects are unchanged. The offscreen probe prints allocator reserved
+larger resources still allocate normally. The offscreen probe prints allocator reserved
 and used bytes separately from process memory.
+
+Both scene backends load packaged image mip chains to match the physical display:
+the texture's longest edge is limited to the next power of two at or above the
+display's longest edge. A 3024×1964 display therefore uses the authored 4K mip
+instead of an 8K source level. Larger levels are skipped before decoding and GPU
+upload. Layout metadata, render-target resolution, frame rate and effects stay
+unchanged, but source detail can differ, especially when zooming into an image.
+Display-surface replacement rebuilds the textures for the new display size.
+
+This policy uses available authored mips; a single-level image or an incomplete
+chain may remain above the limit. Loose images, videos, sprite atlases, multi-slot
+images and unknown encoded containers retain their original loading behavior.
+This is a texture-residency reduction, not a fixed ceiling on total process memory.
 
 The lock-screen extension releases its renderer while unlocked after preserving
 a poster; see [lock-screen behavior and reload costs](lock-screen.md#enabling-it).
