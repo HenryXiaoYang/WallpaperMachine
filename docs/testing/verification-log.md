@@ -25,6 +25,17 @@ move the oldest entries verbatim into
 (or a new dated archive file) first, and promote anything durable before it
 goes. Trimming is allowed; editing an entry's recorded result is not.
 
+## 2026-09-28 — Display refresh no longer reloads an unchanged scene; lock screen ignores the covered desktop
+
+User report on 1.0.2 (Workshop 3521337568, Lucy): lock screen held a still frame, and after unlocking the desktop flashed white and restarted the opening animation. App logs showed 107-425 scene loads per session, one per queued display refresh; the extension log showed the lock-screen scene exported as paused (reasons=1) right after the desktop display was suspended by occlusion.
+
+- Bridge tests written first and failing on HEAD: settings_intents::a_display_refresh_does_not_reload_a_scene_{whose_audio_response_has_nothing_to_read,held_to_the_battery_frame_rate,muted_for_other_audio,paused_by_a_lock_or_a_covered_display} and apply_options::lock_screen_export_ignores_the_desktop_display_being_covered (5 failed before the fix).
+- `cargo test --release -p wallpaper-bridge --lib` (build.py cargo environment) — exit 0; 354 passed, 0 failed.
+- `python3 scripts/test.py --only DisplayRefreshCoalescerTests` — 2 passed (first attempt stopped at the known CodeSign xattr detritus; cleared with xattr -cr on the Debug app).
+- `python3 scripts/test.py` — exit 0; 652 passed, 0 failed, 11 skipped of 663.
+- `python3 scripts/check_renderer.py` — exit 0; 23 test binaries passed, 10 generated fixtures pixel-equal pooled vs isolated, reload cycles 0 failures.
+- Not verified: the lock/unlock and display-wake behaviour on the desktop (no desktop run authorised), and no Release build was made. Apply, display edits and repair reconciles still compare saved values, so they can still reopen a scene held to a frame-rate ceiling or transient mute, as in 1.0.1.
+
 ## 2026-09-28 — Panel stays open after applying; Command-W closes it
 
 Settings → General → Hide window after applying a wallpaper now defaults to off (a stored choice is kept). The main menu gains File → Close (Command-W), which goes through the panel's windowShouldClose like the close button.
@@ -102,15 +113,3 @@ R25 PowerWatcher restored to its original 5 s run_in_mode loop and its drop test
 - python3 scripts/test.py --only AppUpdateTests: 30 passed (new testBackgroundUpdateDownloadsOnlyWhatItCanInstallInPlace).
 - python3 scripts/test.py: 645 passed, 0 failed, 11 skipped.
 - Not exercised: the NSAlert prompt, status-menu item and 6-hour schedule in the running app (no desktop run authorized); no Release build.
-
-## 2026-09-27 — Renderer and app power work: batch 1, sibling renderer items, app side, Rust gate
-
-- Batch 1: R1+R4 with Scene render optimisation on, a frame that would repeat the picture on the surface is not drawn, submitted or presented; unchanged_present_test 3/3 (plain video submissions track video_frames_selected, other ticks count presents_skipped_unchanged; a static scene submits 0 once every pass is reused, and its poster matches the reuse-off baseline).
-- Batch 1: R2 sound output starts only while mounted, playing and unmuted; R3 system-audio tap only for scenes that read audio (or a subscribed web page); R5/R6 pointer sampling is event-armed and a paused scene is not a consumer.
-- Batch 1: R21 sound worker wakes and per-chunk allocations reduced; R23 global resume never un-pauses a still-covered display; R24 no frame clock without a loaded scene.
-- Other worker's renderer items: R12 decode-thread notify gating + AVDISCARD_ALL on unused streams; R13 ThreadTimer::WakeOnce latch at the ceiling; R17 audio demuxer AVDISCARD + reused convert buffer; R27 software-decode import failure logged once per failure run; R28 transparent map find, three-bucket rope sort, per-subsystem overflow log latches.
-- Other worker's R16: hidden particle layers skip geometry and RebuildVisibleMeshes runs after Tick, before drawFrame; particle dumps (spritetrail/ropetrail/rope, shown and hidden) byte-identical to HEAD. R25: power watcher stops through a signalled run-loop source.
-- App side: panel WKWebView uses inactiveSchedulingPolicy .suspend and keeps a pending snapshot for reveal; Discover luminance sampler runs only while visible; web-wallpaper pointer monitor only while a page is live; lock-screen unchanged path skips the compatibility check.
-- Cargo, default target dir: cargo test --release -p wallpaper-core --lib 220 passed; cargo test --release -p wallpaper-bridge 351 passed (lib incl. api_smoke, playback, display_presentation, power_settings), 0 failed in either.
-- Not changed: R11 (frame-clock drift), R19, R20, N1-N6.
-- No desktop, visual or power verification; no Release build. Evidence is workload only; no energy saving is claimed.

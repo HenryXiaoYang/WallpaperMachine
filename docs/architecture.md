@@ -180,6 +180,12 @@ Swift keeps the *system* wallpaper consistent with that window:
   paused state from its own display, and re-applies the still-hidden displays after a global resume.
   System audio capture follows visible consumers — a presenting scene with audio response
   enabled — rather than the global pause flag.
+- Screen-parameter changes refresh displays through `DisplayRefreshCoalescer`: one refresh runs
+  at a time and a burst that arrives meanwhile, as a waking display posts, gets one more. A
+  refresh reopens a scene only when its saved configuration changed. The frame-rate ceiling, the
+  transient mute, pause and the gating of system-audio capture are applied live and never count
+  as a different wallpaper; a scene's own audio-response switch follows the saved setting even
+  while capture waits for the scene to read audio.
 
 ### Renderer bridge (generated uniffi)
 

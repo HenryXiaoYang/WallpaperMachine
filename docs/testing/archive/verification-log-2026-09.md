@@ -15,6 +15,18 @@ renderer behaviour and known-failing tests into
 [../renderer.md](../renderer.md), build and code-signing traps into
 [../../build.md](../../build.md).
 
+## 2026-09-27 — Renderer and app power work: batch 1, sibling renderer items, app side, Rust gate
+
+- Batch 1: R1+R4 with Scene render optimisation on, a frame that would repeat the picture on the surface is not drawn, submitted or presented; unchanged_present_test 3/3 (plain video submissions track video_frames_selected, other ticks count presents_skipped_unchanged; a static scene submits 0 once every pass is reused, and its poster matches the reuse-off baseline).
+- Batch 1: R2 sound output starts only while mounted, playing and unmuted; R3 system-audio tap only for scenes that read audio (or a subscribed web page); R5/R6 pointer sampling is event-armed and a paused scene is not a consumer.
+- Batch 1: R21 sound worker wakes and per-chunk allocations reduced; R23 global resume never un-pauses a still-covered display; R24 no frame clock without a loaded scene.
+- Other worker's renderer items: R12 decode-thread notify gating + AVDISCARD_ALL on unused streams; R13 ThreadTimer::WakeOnce latch at the ceiling; R17 audio demuxer AVDISCARD + reused convert buffer; R27 software-decode import failure logged once per failure run; R28 transparent map find, three-bucket rope sort, per-subsystem overflow log latches.
+- Other worker's R16: hidden particle layers skip geometry and RebuildVisibleMeshes runs after Tick, before drawFrame; particle dumps (spritetrail/ropetrail/rope, shown and hidden) byte-identical to HEAD. R25: power watcher stops through a signalled run-loop source.
+- App side: panel WKWebView uses inactiveSchedulingPolicy .suspend and keeps a pending snapshot for reveal; Discover luminance sampler runs only while visible; web-wallpaper pointer monitor only while a page is live; lock-screen unchanged path skips the compatibility check.
+- Cargo, default target dir: cargo test --release -p wallpaper-core --lib 220 passed; cargo test --release -p wallpaper-bridge 351 passed (lib incl. api_smoke, playback, display_presentation, power_settings), 0 failed in either.
+- Not changed: R11 (frame-clock drift), R19, R20, N1-N6.
+- No desktop, visual or power verification; no Release build. Evidence is workload only; no energy saving is claimed.
+
 ## 2026-09-27 — Renderer power: R15/R22 revert, R26/R28 fixes, final gate
 
 - R22 reverted to HEAD (generation-keyed audio array rewrite, recorded before the script runs); R15 script-property skip reverted (primitive-only skip is not less work); R15 FillDynamicValueFromJS kept (allocation-neutral refactor). resolve_auto_setting broadening, fprintf and 'false &&' removed; three tests with non-HEAD expectations removed.

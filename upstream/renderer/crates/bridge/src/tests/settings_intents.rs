@@ -2225,6 +2225,123 @@ async fn active_display_live_scaling_update_does_not_reconcile_on_next_refresh()
     );
 }
 
+/// One scene committed to a 120 Hz primary display and running. The engine
+/// snapshot carries the descriptor the scene was opened with, and live
+/// updates land in it as they do in the real engine.
+async fn running_scene_bridge(engine: &FakeEngineFacade) -> (WallpaperBridge, tempfile::TempDir) {
+    let display = identified_display("primary", 1);
+    let primary = DisplaySnapshotEntry {
+        desc: display.desc.clone().with_refresh_rate(120),
+        ..display
+    };
+    let root = tempfile::tempdir().unwrap();
+    let store = ConfigStore::open(root.path().to_path_buf());
+    store
+        .save_app_config(&AppConfig {
+            monitors: vec![MonitorCfg {
+                selector: SerializedSelector::Primary,
+                enabled: true,
+                mode: "independent".to_string(),
+                wallpaper: Some("100".to_string()),
+                mirror_target: None,
+            }],
+            ..AppConfig::default()
+        })
+        .unwrap();
+    store
+        .save_wallpaper(&WallpaperConfig::new_for("100", "scene"))
+        .unwrap();
+    engine.set_snapshot_after_refresh(vec![primary]);
+    let bridge = BridgeBuilder::new(engine.clone())
+        .with_config_store(ConfigStore::open(root.path().to_path_buf()))
+        .build()
+        .expect("tokio runtime and config load for wallpaper bridge");
+    bridge
+        .inject_scene_wallpaper_config_for_test("100", "Scene")
+        .await;
+    bridge.refresh_displays().await.unwrap();
+    let opened = engine.calls()[0][0].clone();
+    let running = vec![DisplaySnapshotEntry {
+        identity: opened.display.identity.clone(),
+        desc: opened.display.clone(),
+        handle: Some(SceneHandle::new(1)),
+        accepts_pointer_input: true,
+        paused: false,
+        window_active: true,
+        assignment: Some(WallpaperAssignment::Direct(SceneTemplate::from_scene_desc(&opened))),
+    }];
+    engine.set_snapshot(running.clone());
+    engine.set_snapshot_after_refresh(running);
+    (bridge, root)
+}
+
+async fn assert_refresh_keeps_the_scene(bridge: &WallpaperBridge, engine: &FakeEngineFacade) {
+    let calls_before = engine.calls().len();
+    bridge.refresh_displays().await.unwrap();
+    assert_eq!(
+        engine.calls().len(),
+        calls_before,
+        "nothing about the wallpaper changed, so a display refresh must not reload it"
+    );
+}
+
+#[tokio::test]
+async fn a_display_refresh_does_not_reload_a_scene_whose_audio_response_has_nothing_to_read() {
+    // Audio response is on, but the scene has not reported reading audio, so
+    // the system-audio tap stays shut for it. That is not a different wallpaper.
+    let engine = FakeEngineFacade::default();
+    engine.scenes_start_without_audio();
+    let (bridge, _root) = running_scene_bridge(&engine).await;
+    bridge
+        .set_audio_response_enabled("100".into(), true)
+        .await
+        .unwrap();
+    assert_eq!(
+        engine.audio_capture_calls().last(),
+        Some(&(SceneHandle::new(1), false))
+    );
+
+    assert_refresh_keeps_the_scene(&bridge, &engine).await;
+}
+
+#[tokio::test]
+async fn a_display_refresh_does_not_reload_a_scene_held_to_the_battery_frame_rate() {
+    let engine = FakeEngineFacade::default();
+    let (bridge, _root) = running_scene_bridge(&engine).await;
+    bridge
+        .set_battery_mode(crate::BridgeBatteryMode::ReducedQuality)
+        .await
+        .unwrap();
+    bridge
+        .set_power_source_for_test(crate::power::PowerSource::Battery)
+        .await;
+    assert_eq!(engine.fps_calls().last(), Some(&(SceneHandle::new(1), 30)));
+
+    assert_refresh_keeps_the_scene(&bridge, &engine).await;
+}
+
+#[tokio::test]
+async fn a_display_refresh_does_not_reload_a_scene_muted_for_other_audio() {
+    let engine = FakeEngineFacade::default();
+    let (bridge, _root) = running_scene_bridge(&engine).await;
+    bridge.set_audio_suppressed(true).await.unwrap();
+
+    assert_refresh_keeps_the_scene(&bridge, &engine).await;
+}
+
+#[tokio::test]
+async fn a_display_refresh_does_not_reload_a_scene_paused_by_a_lock_or_a_covered_display() {
+    let engine = FakeEngineFacade::default();
+    let (bridge, _root) = running_scene_bridge(&engine).await;
+    bridge.set_presentation_suspended(true).await.unwrap();
+    bridge
+        .set_display_presentation_suspended("1".into(), true)
+        .await
+        .unwrap();
+
+    assert_refresh_keeps_the_scene(&bridge, &engine).await;
+}
+
 #[tokio::test]
 async fn mirror_scene_tracks_source_rebuild_settings_except_monitor_overrides() {
     let (bridge, engine, secondary_display_id) = mirrored_wallpaper_bridge().await;

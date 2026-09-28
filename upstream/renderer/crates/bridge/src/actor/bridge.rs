@@ -273,20 +273,43 @@ fn scene_reads_audio<E: EngineFacade>(
 /// scene when it does, possibly before this call lands with an older value.
 /// Re-reading after each registration keeps a stale value from winning; it
 /// settles because a scene's requirement only changes on its renderer's report.
+///
+/// Only the capture waits for the report. The scene's own audio-response
+/// switch follows the setting: the renderer already feeds nothing to a scene
+/// that reads no audio, and a switch that disagreed with the setting would
+/// leave the scene's descriptor looking like a different wallpaper to every
+/// later reconcile, which then reloads it.
 async fn register_audio_capture<E: EngineFacade>(
     engine: &E,
     handle: SceneHandle,
     response_enabled: bool,
 ) -> Result<(), wallpaper_core::EngineError> {
-    let mut enabled = response_enabled && engine.scene_requires_audio(handle);
+    let mut capture = response_enabled && engine.scene_requires_audio(handle);
     loop {
-        engine.set_audio_capture_enabled(handle, enabled).await?;
+        engine.set_audio_capture_enabled(handle, capture).await?;
         let current = response_enabled && engine.scene_requires_audio(handle);
-        if current == enabled {
-            return Ok(());
+        if current == capture {
+            break;
         }
-        enabled = current;
+        capture = current;
     }
+    // A scene that went away has had its capture released above and has no
+    // switch left to set.
+    if !capture
+        && !engine
+            .display_snapshot()
+            .iter()
+            .any(|display| display.handle == Some(handle))
+    {
+        return Ok(());
+    }
+    if let Err(error) = engine.set_audio_response_enabled(handle, response_enabled).await {
+        if capture {
+            let _ = engine.set_audio_capture_enabled(handle, false).await;
+        }
+        return Err(error);
+    }
+    Ok(())
 }
 
 fn map_send_error<M>(error: SendError<M, BridgeError>) -> BridgeError {
@@ -1267,6 +1290,16 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
             .collect()
     }
 
+    /// `scene` as its renderer runs it once the bridge has applied the live
+    /// frame-rate ceiling and the transient mute on top of the saved values,
+    /// which is what an open scene's descriptor holds.
+    fn live_scene(&self, scene: &SceneDesc) -> SceneDesc {
+        let mut live = scene.clone();
+        live.fps = self.live_target_fps(scene.fps);
+        live.audio_muted = scene.audio_muted || self.state.audio_suppressed;
+        live
+    }
+
     fn unchanged_configured_scenes(
         &self,
         displays: &[DisplaySnapshotEntry],
@@ -1289,6 +1322,7 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
         }
 
         if scenes.iter().all(|scene| {
+            let live = self.live_scene(scene);
             snapshot.iter().any(|entry| {
                 entry.handle.is_some()
                     && entry
@@ -1296,7 +1330,10 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
                         .as_ref()
                         .is_some_and(|assignment| match assignment {
                             WallpaperAssignment::Direct(template) => {
-                                template.for_display(scene.display.clone()) == *scene
+                                let mut running = template.for_display(scene.display.clone());
+                                // Pause is applied live and never reopens a scene.
+                                running.paused = live.paused;
+                                running == live
                             }
                             WallpaperAssignment::Mirror(_) => false,
                         })
